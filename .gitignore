@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- Virtual environment ---
+venv/
+env/
+.venv/
+
+# --- Logs and runtime data ---
+*.log
+logs/
+logs.json
+
+# --- OS-specific ---
+.DS_Store
+Thumbs.db
+
+# --- VS Code ---
+.vscode/
+
+# --- Build / packaging ---
+*.egg-info/
+dist/
+build/
