@@ -6,6 +6,9 @@ WIDTH = commonUtils.WIDTH
 VERTICAL = commonUtils.VERTICAL
 HORIZONTAL = commonUtils.HORIZONTAL
 BASE_SIZE = 40
+ROAD_THICKNESS = 90
+ROAD_SPAN = int(WIDTH * 1.35)
+ROAD_GAP = 150
 
 class Road:
     def __init__(self, rect, direction):
@@ -40,34 +43,37 @@ class MapBase:
 class VerticalMap(MapBase):
     def __init__(self):
         roads = []
+        top_start = 120
         for i in range(3):
-            roads.append(Road(make_rectangle(0, 200 * i, WIDTH * 2, 100), VERTICAL))
-        start_pos = (WIDTH // 2, 700)
+            roads.append(Road(make_rectangle(0, top_start + ROAD_GAP * i, ROAD_SPAN, ROAD_THICKNESS), VERTICAL))
+        start_pos = (ROAD_SPAN // 2, roads[-1].rect.bottom + 90)
         first_road = roads[0].rect
-        goal_rect = pygame.Rect(WIDTH // 2 - 20, first_road.top - 60, BASE_SIZE, BASE_SIZE)
+        goal_rect = pygame.Rect(ROAD_SPAN // 2 - 20, first_road.top - 70, BASE_SIZE, BASE_SIZE)
         super().__init__(roads, start_pos, goal_rect)
 
 class HorizontalMap(MapBase):
     def __init__(self):
         roads = []
+        left_start = 120
         for i in range(3):
-            roads.append(Road(make_rectangle(200 * i, 0, 100, WIDTH * 2), HORIZONTAL))
-        start_pos = (-15, WIDTH // 2)
+            roads.append(Road(make_rectangle(left_start + ROAD_GAP * i, 0, ROAD_THICKNESS, ROAD_SPAN), HORIZONTAL))
+        start_pos = (roads[0].rect.left - 70, ROAD_SPAN // 2)
         first_road = roads[-1].rect
-        goal_rect = make_rectangle(first_road.left + 100, WIDTH // 2 - 20, BASE_SIZE, BASE_SIZE)
+        goal_rect = make_rectangle(first_road.right + 35, ROAD_SPAN // 2 - 20, BASE_SIZE, BASE_SIZE)
         super().__init__(roads, start_pos, goal_rect)
 
 class MixedMap(MapBase):
     def __init__(self):
-        # Two horizontal roads, then one vertical
+        # Two horizontal roads, then one vertical in a compact area
         roads = [
-            Road(make_rectangle(200, 0, 100, WIDTH * 2), HORIZONTAL),
-            Road(make_rectangle(400, 0, 100, WIDTH * 2), HORIZONTAL),
-            Road(make_rectangle(0, 600, WIDTH * 2, 100), VERTICAL)
+            Road(make_rectangle(170, 0, ROAD_THICKNESS, ROAD_SPAN), HORIZONTAL),
+            Road(make_rectangle(330, 0, ROAD_THICKNESS, ROAD_SPAN), HORIZONTAL),
+            Road(make_rectangle(0, 470, ROAD_SPAN, ROAD_THICKNESS), VERTICAL)
         ]
-        start_pos = (50, WIDTH // 2)
+        # Start outside all roads to prevent spawn-kill.
+        start_pos = (70, 650)
         last_vertical = roads[-1].rect
-        goal_rect = make_rectangle(last_vertical.right // 3, last_vertical.top + (BASE_SIZE * 3), BASE_SIZE, BASE_SIZE)
+        goal_rect = make_rectangle(last_vertical.right - 240, last_vertical.top - (BASE_SIZE * 2), BASE_SIZE, BASE_SIZE)
         super().__init__(roads, start_pos, goal_rect)
 
 def draw_arrow(surface, player, goal, camera_offset):
