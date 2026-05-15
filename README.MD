@@ -18,3 +18,8 @@ Ensure pygame is installed. run pip install pygame (if on Linux / Mac, use pip3 
 4. Run Pathwise
 in the same OS specific terminal opened in step 2, run python main.py
 It should then launch, and place you in a random map. To participate, cross the roads without making contact with incoming traffic. The round ends upon reaching either the goal location (win) or making contact with a car (fail)
+
+5. View Recruiter Analytics
+After each run, Pathwise writes `logs.json` (decision sequence, hesitation events, heatmap samples) and auto-generates `logs_dashboard.html`.
+Open the HTML file in a browser to see role-tailored archetype scores and a **frame-by-frame replay** (roads, cars, traffic lights, player) with a scrubber and jump-to-decision markers.
+To rebuild the dashboard from an existing log: `python -m analytics.dashboard logs.json`

@@ -4,6 +4,12 @@ import json
 import time
 import commonUtils
 import map
+import sprites
+from analytics.decision_logger import DecisionLogger
+from analytics.archetype_scoring import score_session
+from analytics.dashboard import build_dashboard_html
+from analytics.map_snapshot import serialize_map_layout
+from analytics.frame_recorder import FrameRecorder
 
 # --- Config ---
 utils = commonUtils
@@ -35,24 +41,112 @@ pygame.display.set_caption("Pathwise MVP")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 28)
 sign_font = pygame.font.SysFont(None, 16)
+honk_font = pygame.font.SysFont(None, 20)
+HONK_DURATION = 0.55
+HONK_COOLDOWN = 1.1
+HONK_CLOSE_PAD = 72
 
-# --- Entities --- 
+
+def player_on_car_red_crosswalk(player_rect, road_states):
+    for state in road_states:
+        if state["crosswalk"].colliderect(player_rect) and state["light_state"] == "red":
+            return True
+    return False
+
+
+def cars_should_respect_player(player_rect, player_on_road, player_on_crosswalk, road_states):
+    """Yield / stop for player only when they occupy the road or cross legally on red-for-cars."""
+    if player_on_crosswalk:
+        return player_on_car_red_crosswalk(player_rect, road_states)
+    return player_on_road
+
+
+def should_honk_at_player(player_rect, player_on_road, player_on_crosswalk, road_states):
+    if not player_on_road:
+        return False
+    if player_on_crosswalk and player_on_car_red_crosswalk(player_rect, road_states):
+        return False
+    return True
+
+
+# --- Entities ---
 class Car(pygame.sprite.Sprite):
     def __init__(self, x, y, speed, vertical=False):
         super().__init__()
-        if (vertical):
-            self.image = pygame.Surface((CAR_HEIGHT, CAR_WIDTH))  # swap dimensions for vertical cars
-        else: 
-            self.image = pygame.Surface((CAR_WIDTH, CAR_HEIGHT))
-        self.image.fill((200, 0, 0))
+        self.direction = 1 if speed >= 0 else -1
+        self.vertical = vertical
+        self.archetype_index = sprites.pick_random_archetype_index()
+        self.image = sprites.make_car_surface(
+            vertical=vertical,
+            direction=self.direction,
+            archetype_index=self.archetype_index,
+        )
         self.rect = self.image.get_rect(topleft=(x, y))
         self.base_speed = abs(speed)
-        self.direction = 1 if speed >= 0 else -1
         self.current_speed = float(self.base_speed)
         self.acceleration = 0.16
         self.brake_strength = 0.42
         self.speed = speed
-        self.vertical = vertical
+        self.honk_until = 0.0
+        self._last_honk_time = -999.0
+        self.honk_risk_pending = False
+        self.honk_reason = None
+
+    def is_honking(self, game_time):
+        return game_time < self.honk_until
+
+    def trigger_honk(self, game_time, reason):
+        if game_time - self._last_honk_time < HONK_COOLDOWN:
+            return False
+        self.honk_until = game_time + HONK_DURATION
+        self._last_honk_time = game_time
+        self.honk_reason = reason
+        return True
+
+    def _player_in_travel_lane(self, player_rect):
+        if self.vertical:
+            lane_gap = abs(player_rect.centerx - self.rect.centerx)
+            ahead = (player_rect.centery - self.rect.centery) * self.direction
+        else:
+            lane_gap = abs(player_rect.centery - self.rect.centery)
+            ahead = (player_rect.centerx - self.rect.centerx) * self.direction
+        return lane_gap < 55 and 0 < ahead < 250
+
+    def _player_blocking_lane(self, player_rect):
+        if self.rect.colliderect(player_rect):
+            return True
+        if self.vertical:
+            lane_gap = abs(player_rect.centerx - self.rect.centerx)
+            ahead = (player_rect.centery - self.rect.centery) * self.direction
+        else:
+            lane_gap = abs(player_rect.centery - self.rect.centery)
+            ahead = (player_rect.centerx - self.rect.centerx) * self.direction
+        return lane_gap < 50 and 0 <= ahead < 130
+
+    def evaluate_honk(self, player_rect, player_on_road, player_on_crosswalk, road_states, game_time):
+        self.honk_risk_pending = False
+        if not should_honk_at_player(player_rect, player_on_road, player_on_crosswalk, road_states):
+            return
+
+        too_close = player_rect.colliderect(
+            self.rect.inflate(HONK_CLOSE_PAD, HONK_CLOSE_PAD)
+        )
+        blocked_by_player = (
+            self.current_speed < self.base_speed * 0.25
+            and self._player_blocking_lane(player_rect)
+        )
+        jaywalking = (
+            not player_on_crosswalk
+            and self._player_in_travel_lane(player_rect)
+            and self.current_speed >= self.base_speed * 0.15
+        )
+
+        if too_close and self.trigger_honk(game_time, "close"):
+            self.honk_risk_pending = True
+        elif blocked_by_player and self.trigger_honk(game_time, "blocked"):
+            self.honk_risk_pending = True
+        elif jaywalking and self.trigger_honk(game_time, "jaywalk"):
+            self.honk_risk_pending = True
 
     def _distance_to_other(self, other):
         if self.vertical:
@@ -84,10 +178,23 @@ class Car(pygame.sprite.Sprite):
             else:
                 self.rect.left = zone.right + STOP_LINE_GAP
 
-    def update(self, all_cars, road_states, world_rect, intersection_zones, player_rect):
+    def update(
+        self,
+        all_cars,
+        road_states,
+        world_rect,
+        intersection_zones,
+        player_rect,
+        player_on_road=False,
+        player_on_crosswalk=False,
+        game_time=0,
+    ):
         desired_speed = self.base_speed
         blocking_controls = []
         will_yield_to_player = random.random() < PLAYER_AVOIDANCE_CHANCE
+        respect_player = cars_should_respect_player(
+            player_rect, player_on_road, player_on_crosswalk, road_states
+        )
 
         for state in road_states:
             if state["direction"] != ("horizontal" if self.vertical else "vertical"):
@@ -111,7 +218,12 @@ class Car(pygame.sprite.Sprite):
                         desired_speed = 0
                     else:
                         desired_speed = min(desired_speed, self.base_speed * 0.45)
-                elif state["player_waiting"] and 0 < stop_distance < 210 and random.random() < 0.72:
+                elif (
+                    state["player_waiting"]
+                    and state["light_state"] != "green"
+                    and 0 < stop_distance < 210
+                    and random.random() < 0.72
+                ):
                     desired_speed = min(desired_speed, self.base_speed * 0.33)
 
                 if state["stop_active"] and 0 < stop_distance < 100:
@@ -125,7 +237,7 @@ class Car(pygame.sprite.Sprite):
             player_ahead = (player_rect.centerx - self.rect.centerx) * self.direction
             player_lane_gap = abs(player_rect.centery - self.rect.centery)
 
-        if 0 < player_ahead < 300 and player_lane_gap < 70:
+        if respect_player and 0 < player_ahead < 300 and player_lane_gap < 70:
             if will_yield_to_player:
                 if player_ahead < 90:
                     desired_speed = 0
@@ -147,7 +259,7 @@ class Car(pygame.sprite.Sprite):
             lookahead_rect.width += int(max(40, self.current_speed * 10))
             if self.direction < 0:
                 lookahead_rect.x -= int(max(40, self.current_speed * 10))
-        if lookahead_rect.colliderect(player_rect):
+        if respect_player and lookahead_rect.colliderect(player_rect):
             if will_yield_to_player:
                 desired_speed = 0
             else:
@@ -284,13 +396,16 @@ class Car(pygame.sprite.Sprite):
 
         self.rect.clamp_ip(world_rect.inflate(300, 300))
         if self.rect.right < 0 or self.rect.left > WIDTH * 2: # allow offscreen cleanup 
-            self.kill() 
+            self.kill()
 
-class Pedestrian(pygame.sprite.Sprite): 
-    def __init__(self, start_pos): 
-        super().__init__() 
-        self.image = pygame.Surface((PEDESTRIAN_SIZE, PEDESTRIAN_SIZE)) 
-        self.image.fill((0, 200, 0)) 
+        self.evaluate_honk(
+            player_rect, player_on_road, player_on_crosswalk, road_states, game_time
+        )
+
+class Pedestrian(pygame.sprite.Sprite):
+    def __init__(self, start_pos):
+        super().__init__()
+        self.image = sprites.make_pedestrian_surface(PEDESTRIAN_SIZE)
         self.rect = self.image.get_rect(center=start_pos) 
     def update(self, keys): 
         if keys[pygame.K_LEFT]: 
@@ -316,6 +431,15 @@ risk_events = 0
 last_risk_time = 0
 failure_reason = "none"
 running = True
+frame_recorder = FrameRecorder(PEDESTRIAN_SIZE)
+decision_logger = DecisionLogger(
+    current_map.start_pos,
+    current_map.goal_rect.center,
+    current_map.__class__.__name__,
+    len(current_map.roads),
+    frame_recorder=frame_recorder,
+)
+frame_risk_flag = False
 
 
 def build_world_bounds(roads, start_pos, goal_rect):
@@ -496,38 +620,86 @@ wall_rects = [
     pygame.Rect(world_bounds.left, world_bounds.bottom, world_bounds.width, 4000),
 ]
 
-def end_game(collided, timed_out=False): 
+def get_player_light_state(player_rect, states):
+    for state in states:
+        if state["crosswalk"].colliderect(player_rect):
+            return state["light_state"]
+    return "none"
+
+
+def get_pressed_keys(key_state):
+    labels = []
+    if key_state[pygame.K_LEFT]:
+        labels.append("left")
+    if key_state[pygame.K_RIGHT]:
+        labels.append("right")
+    if key_state[pygame.K_UP]:
+        labels.append("up")
+    if key_state[pygame.K_DOWN]:
+        labels.append("down")
+    return labels
+
+
+def end_game(collided, timed_out=False):
     global crossings, collisions, running, risk_events, failure_reason
-    end_time = time.time() 
-    duration = round(end_time - start_time, 2) 
-    if collided: 
-        collisions += 1 
+    end_time = time.time()
+    duration = round(end_time - start_time, 2)
+    if collided:
+        collisions += 1
         failure_reason = "collision"
+        outcome = "collision"
     elif timed_out:
         failure_reason = "timeout"
+        outcome = "timeout"
     else:
         failure_reason = "goal_reached"
-    log = { 
-        "time": duration, 
-        "crossings": crossings, 
-        "collisions": collisions, 
+        outcome = "success"
+
+    session = decision_logger.finalize(
+        outcome=outcome,
+        duration=duration,
+        crossings=crossings,
+        collisions=collisions,
+        risk_events=risk_events,
+        failure_reason=failure_reason,
+    )
+    session["map_layout"] = serialize_map_layout(current_map, road_states, world_bounds)
+    session["car_archetypes"] = sprites.serialize_archetypes_for_log()
+    frame_recorder.capture_end(duration, player.rect, list(cars.sprites()), road_states, game_time=duration)
+    archetypes = score_session(session)
+    log = {
+        "time": duration,
+        "crossings": crossings,
+        "collisions": collisions,
         "risks_taken": risk_events,
         "failure_reason": failure_reason,
-        "min_crossings": len(current_map.roads), 
-        "avg_time_per_crossing": duration / max(1, crossings) 
-        } 
-    with open("logs.json", "w") as f: 
-        json.dump(log, f, indent=2) 
-    print("Run complete:", log) 
+        "outcome": outcome,
+        "min_crossings": len(current_map.roads),
+        "avg_time_per_crossing": duration / max(1, crossings),
+        "session": session,
+        "archetypes": archetypes,
+    }
+    with open("logs.json", "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2)
+    dashboard_path = build_dashboard_html("logs.json")
+    print("Run complete:", {
+        "outcome": outcome,
+        "duration": duration,
+        "crossings": crossings,
+        "risks": risk_events,
+        "primary_archetype": archetypes["primary_label"],
+        "dashboard": dashboard_path,
+    })
     running = False
 
 
 def record_risk(cooldown=None):
-    global risk_events, last_risk_time
+    global risk_events, last_risk_time, frame_risk_flag
     local_cooldown = RISK_COOLDOWN_SECONDS if cooldown is None else cooldown
     if (time.time() - last_risk_time) > local_cooldown:
         risk_events += 1
         last_risk_time = time.time()
+        frame_risk_flag = True
 
 
 def is_car_approaching_player(car, player_rect):
@@ -549,6 +721,7 @@ while running:
     keys = pygame.key.get_pressed()
     elapsed = time.time() - start_time
     time_left = max(0, ROUND_TIME_LIMIT - elapsed)
+    frame_risk_flag = False
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -566,18 +739,28 @@ while running:
             state["player_waiting"] = True
 
     # Crossing logic
-    for road in current_map.roads:
+    for road_index, road in enumerate(current_map.roads):
+        approach_zone = road.rect.inflate(120, 120)
+        if not road.crossed and approach_zone.colliderect(player.rect):
+            decision_logger.note_road_approach(road_index)
+
         if road.rect.colliderect(player.rect) and not road.crossed:
             if road.direction == "vertical":
                 # Player must move vertically across
                 if player.rect.top < road.rect.top:
                     crossings += 1
                     road.crossed = True
+                    decision_logger.note_road_crossed(
+                        road_index, get_player_light_state(player.rect, road_states)
+                    )
             elif road.direction == "horizontal":
                 # Player must move horizontally across
                 if player.rect.left > road.rect.left:
                     crossings += 1
                     road.crossed = True
+                    decision_logger.note_road_crossed(
+                        road_index, get_player_light_state(player.rect, road_states)
+                    )
         # Car spawning logic
         if road.direction == "vertical":
             if abs(player.rect.centery - road.rect.centery) < 300 and random.random() < 0.01: # testing spawn-zones
@@ -591,10 +774,25 @@ while running:
     if not world_bounds.contains(player.rect):
         player.rect.topleft = previous_pos
 
-    cars.update(cars.sprites(), road_states, world_bounds, intersection_zones, player.rect)
-
     player_on_crosswalk = any(state["crosswalk"].colliderect(player.rect) for state in road_states)
     player_on_road = any(road.rect.colliderect(player.rect) for road in current_map.roads)
+
+    cars.update(
+        cars.sprites(),
+        road_states,
+        world_bounds,
+        intersection_zones,
+        player.rect,
+        player_on_road=player_on_road,
+        player_on_crosswalk=player_on_crosswalk,
+        game_time=elapsed,
+    )
+
+    for car in cars:
+        if car.honk_risk_pending:
+            record_risk(cooldown=0.85)
+            decision_logger._record("car_honk", reason=car.honk_reason or "honk")
+            car.honk_risk_pending = False
     nearby_fast_cars = [car for car in cars if car.rect.colliderect(player.rect.inflate(170, 170)) and car.current_speed > car.base_speed * 0.65]
     approaching_cars = [car for car in cars if is_car_approaching_player(car, player.rect)]
 
@@ -619,6 +817,20 @@ while running:
             record_risk(cooldown=0.7)
         if any(car.rect.colliderect(player.rect.inflate(NEAR_MISS_DISTANCE, NEAR_MISS_DISTANCE)) and car.current_speed > car.base_speed * 0.75 for car in cars):
             record_risk()
+
+    decision_logger.update(
+        player.rect.center,
+        get_pressed_keys(keys),
+        player_on_crosswalk,
+        player_on_road,
+        get_player_light_state(player.rect, road_states),
+        frame_risk_flag,
+    )
+
+    if not frame_recorder.frames:
+        frame_recorder.capture_start(elapsed, player.rect, list(cars.sprites()), road_states, game_time=elapsed)
+    else:
+        frame_recorder.capture(elapsed, player.rect, list(cars.sprites()), road_states, game_time=elapsed)
 
     # Collision check
     if pygame.sprite.spritecollideany(player, cars):
@@ -689,9 +901,13 @@ while running:
         shifted_wall = wall.move(-camera_offset[0], -camera_offset[1])
         pygame.draw.rect(screen, (40, 40, 40), shifted_wall)
 
-    for sprite in all_sprites: 
-        shifted_rect = sprite.rect.move(-camera_offset[0], -camera_offset[1]) 
-        screen.blit(sprite.image, shifted_rect) 
+    for sprite in all_sprites:
+        shifted_rect = sprite.rect.move(-camera_offset[0], -camera_offset[1])
+        screen.blit(sprite.image, shifted_rect)
+
+    for car in cars:
+        if car.is_honking(elapsed):
+            sprites.draw_honk_bubble(screen, car.rect, camera_offset, honk_font)
 
     hud_lines = [
         f"Time left: {time_left:05.1f}s",
