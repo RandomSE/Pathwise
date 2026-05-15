@@ -25,3 +25,6 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+# --- log dashboard ---
+logs_dashboard.html
