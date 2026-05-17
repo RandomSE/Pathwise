@@ -11,13 +11,64 @@ def build_dashboard_html(session_path, output_path=None):
     with open(session_path, encoding="utf-8") as f:
         payload = json.load(f)
 
-    session = payload.get("session", payload)
-    archetypes = payload.get("archetypes") or score_session(session)
-    duration = session.get("duration_s", 1)
-    frames = session.get("replay_frames", [])
-    decision_marks = session.get("decision_marks", [])
-    map_layout = session.get("map_layout")
-    car_archetypes = session.get("car_archetypes", [])
+    def _is_risk_mark(m):
+        return m.get("action") in ("risk_event", "car_honk") or bool(m.get("risk"))
+
+    def _split_marks(sess):
+        decision_marks = sess.get("decision_marks", [])
+        risk_marks = sess.get("risk_marks", [])
+        if not risk_marks and decision_marks:
+            risk_marks = [m for m in decision_marks if _is_risk_mark(m)]
+            decision_marks = [m for m in decision_marks if not _is_risk_mark(m)]
+        return decision_marks, risk_marks
+
+    def _round_view(entry):
+        if isinstance(entry, dict) and entry.get("session"):
+            sess = entry["session"]
+            round_n = entry.get("round", 1)
+            outcome = entry.get("outcome", sess.get("outcome"))
+            archetypes = entry.get("archetypes")
+        else:
+            sess = entry
+            round_n = sess.get("round_index", 1)
+            outcome = sess.get("outcome")
+            archetypes = None
+        decision_marks, risk_marks = _split_marks(sess)
+        if archetypes is None:
+            archetypes = score_session(sess)
+        return {
+            "round": round_n,
+            "outcome": outcome,
+            "session": sess,
+            "archetypes": archetypes,
+            "duration": sess.get("duration_s", 1),
+            "frames": sess.get("replay_frames", []),
+            "decision_marks": decision_marks,
+            "risk_marks": risk_marks,
+            "map_layout": sess.get("map_layout"),
+            "car_archetypes": sess.get("car_archetypes", []),
+        }
+
+    round_entries = payload.get("rounds")
+    if round_entries:
+        rounds_ui = [_round_view(r) for r in round_entries]
+    else:
+        session = payload.get("session", payload)
+        archetypes = payload.get("archetypes") or score_session(session)
+        rounds_ui = [
+            _round_view(
+                {
+                    "session": session,
+                    "round": session.get("round_index", 1),
+                    "outcome": payload.get("outcome", session.get("outcome")),
+                    "archetypes": archetypes,
+                }
+            )
+        ]
+
+    last = rounds_ui[-1]
+    session = last["session"]
+    archetypes = payload.get("archetypes") or last["archetypes"]
 
     if output_path is None:
         base = os.path.splitext(os.path.basename(session_path))[0]
@@ -25,13 +76,16 @@ def build_dashboard_html(session_path, output_path=None):
 
     data_json = json.dumps(
         {
+            "rounds": rounds_ui,
+            "num_rounds": len(rounds_ui),
             "session": session,
             "archetypes": archetypes,
-            "duration": duration,
-            "map_layout": map_layout,
-            "frames": frames,
-            "decision_marks": decision_marks,
-            "car_archetypes": car_archetypes,
+            "duration": last["duration"],
+            "map_layout": last["map_layout"],
+            "frames": last["frames"],
+            "decision_marks": last["decision_marks"],
+            "risk_marks": last["risk_marks"],
+            "car_archetypes": last["car_archetypes"],
         }
     )
 
@@ -208,12 +262,98 @@ def build_dashboard_html(session_path, output_path=None):
       cursor: pointer;
     }}
     .decision-tick:hover {{ background: #ffc766; height: 16px; }}
+    .decision-log .decision-id {{ color: var(--muted); font-size: 0.7rem; }}
+    .scrub-track-risks {{ padding-top: 4px; margin-top: 2px; }}
+    .risk-tick {{ background: #e85d5d; }}
+    .risk-tick:hover {{ background: #ff7a7a; height: 14px; }}
+    .replay-events {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }}
+    @media (max-width: 720px) {{
+      .replay-events {{ grid-template-columns: 1fr; }}
+    }}
+    .replay-events h3 {{
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      color: var(--text);
+    }}
+    .event-log {{
+      max-height: 140px;
+      overflow-y: auto;
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem;
+      background: #121820;
+      border-radius: 8px;
+      padding: 0.6rem;
+    }}
+    .event-log div {{ padding: 0.12rem 0; color: var(--muted); }}
+    .risk-log div {{ color: #ff9b9b; }}
+    .event-jump {{
+      width: 100%;
+      margin-bottom: 0.5rem;
+      background: #121820;
+      border: 1px solid #2a3548;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.85rem;
+    }}
+    .light-timer {{
+      font-size: 9px;
+      fill: #333;
+      font-family: ui-monospace, monospace;
+    }}
+    .round-tabs {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 0.75rem 0 0.25rem;
+    }}
+    .round-tab {{
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid #2a3548;
+      background: #121820;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.85rem;
+    }}
+    .round-tab.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }}
+    .round-tab.outcome-success {{ border-color: var(--success); }}
+    .round-tab.outcome-collision {{ border-color: var(--danger); }}
+    .round-tab.outcome-timeout {{ border-color: var(--warn); }}
+    .round-tab.active.outcome-success {{ background: var(--success); border-color: var(--success); }}
+    .round-tab.active.outcome-collision {{ background: var(--danger); border-color: var(--danger); }}
+    .round-tab.active.outcome-timeout {{ background: var(--warn); border-color: var(--warn); color: #1a1208; }}
+    .event-log div.event-active {{ opacity: 1; color: var(--text); font-weight: 600; }}
+    .event-log div.event-row {{ cursor: pointer; opacity: 0.72; }}
+    .event-log div.event-row:hover {{ opacity: 1; }}
+    .replay-shortcuts {{
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-top: 0.25rem;
+    }}
+    .replay-controls {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1rem;
+      margin: 0.75rem 0 0.25rem;
+      font-size: 0.9rem;
+    }}
     .frame-meta {{
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 1rem;
-      margin-top: 0.75rem;
+      margin-top: 0.5rem;
       font-size: 0.9rem;
     }}
     #frame-decision-label {{ color: var(--warn); font-weight: 600; }}
@@ -260,7 +400,8 @@ def build_dashboard_html(session_path, output_path=None):
     </div>
     <section class="card card-wide">
       <h2>Run Replay</h2>
-      <p class="subtitle">Press Play for real-time replay, scrub the slider, or use arrows. Scroll or +/- to zoom, drag to pan. Orange ticks = decision points.</p>
+      <p class="subtitle">Press Play for real-time replay, scrub the slider, or use arrows. Scroll or +/- to zoom, drag to pan. Select a round, then scrub or play. Orange ticks = decisions; red ticks = risks.</p>
+      <div id="round-tabs" class="round-tabs"></div>
       <div id="replay-viewport" class="replay-viewport">
         <div id="map-replay" class="map-replay-wrap"></div>
       </div>
@@ -277,35 +418,100 @@ def build_dashboard_html(session_path, output_path=None):
         <div class="scrub-track">
           <div id="decision-ticks"></div>
           <input type="range" id="frame-slider" min="0" max="0" value="0" step="1" />
+          <div class="scrub-track-risks" id="risk-ticks"></div>
         </div>
         <button type="button" id="frame-next" title="Next frame">&#9654;</button>
+      </div>
+      <div class="replay-controls">
+        <label class="subtitle" for="playback-rate">Playback speed</label>
+        <select id="playback-rate" title="Playback speed">
+          <option value="0.5">0.5×</option>
+          <option value="1">1×</option>
+          <option value="2" selected>2×</option>
+          <option value="4">4×</option>
+        </select>
+        <span class="replay-shortcuts">Space play · ←→ scrub · [ ] speed · D / R jump decisions / risks</span>
       </div>
       <div class="frame-meta">
         <span id="frame-time">0.0s</span>
         <span id="frame-index">Frame 0 / 0</span>
-        <select id="frame-decision-jump"><option value="">Jump to decision…</option></select>
         <span id="frame-decision-label"></span>
-        <label class="subtitle" for="playback-rate">Speed</label>
-        <select id="playback-rate" title="Playback speed">
-          <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
-          <option value="1.5">1.5×</option>
-          <option value="2">2×</option>
-        </select>
+      </div>
+      <div class="replay-events">
+        <div>
+          <h3>Decisions</h3>
+          <select id="frame-decision-jump" class="event-jump"><option value="">Jump to decision…</option></select>
+          <div id="replay-decision-log" class="event-log"></div>
+        </div>
+        <div>
+          <h3>Risks</h3>
+          <select id="frame-risk-jump" class="event-jump"><option value="">Jump to risk…</option></select>
+          <div id="replay-risk-log" class="event-log risk-log"></div>
+        </div>
       </div>
     </section>
   </main>
-  <script>
+  
+<script>
     const DATA = {data_json};
     let currentFrameIndex = 0;
     let isPlaying = false;
     let playTimeoutId = null;
-    let playbackRate = 1;
+    const DEFAULT_PLAYBACK_RATE = 2;
+    let playbackRate = DEFAULT_PLAYBACK_RATE;
+    const REPLAY_STEP_S = 1 / 12;
     let replayZoom = 1;
     let replayPanX = 0;
     let replayPanY = 0;
     let replayBaseBounds = null;
     let replayDrag = null;
+
+    let activeRoundIndex = 0;
+    let scrubberInitialized = false;
+
+    function applyRoundToData(idx) {{
+      const rounds = DATA.rounds || [];
+      if (!rounds.length) return;
+      activeRoundIndex = Math.max(0, Math.min(idx, rounds.length - 1));
+      const r = rounds[activeRoundIndex];
+      DATA.session = r.session;
+      DATA.archetypes = r.archetypes;
+      DATA.duration = r.duration;
+      DATA.frames = r.frames;
+      DATA.map_layout = r.map_layout;
+      DATA.decision_marks = r.decision_marks;
+      DATA.risk_marks = r.risk_marks;
+      DATA.car_archetypes = r.car_archetypes;
+      replayBaseBounds = null;
+      initReplayBounds();
+    }}
+
+    function selectRound(idx) {{
+      stopPlayback();
+      applyRoundToData(idx);
+      buildRoundTabs();
+      renderRoundPanels();
+      refreshFrameScrubber();
+    }}
+
+    function buildRoundTabs() {{
+      const el = document.getElementById("round-tabs");
+      const rounds = DATA.rounds || [];
+      if (!el) return;
+      if (rounds.length <= 1) {{
+        el.style.display = "none";
+        return;
+      }}
+      el.style.display = "flex";
+      el.innerHTML = rounds.map((r, i) => {{
+        const active = i === activeRoundIndex ? " active" : "";
+        const oc = r.outcome ? ` outcome-${{r.outcome}}` : "";
+        return `<button type="button" class="round-tab${{active}}${{oc}}" data-idx="${{i}}">Round ${{r.round}} — ${{r.outcome || "?"}}</button>`;
+      }}).join("");
+      el.querySelectorAll(".round-tab").forEach(btn => {{
+        btn.addEventListener("click", () => selectRound(Number(btn.dataset.idx)));
+      }});
+    }}
 
     function initReplayBounds() {{
       const L = DATA.map_layout;
@@ -332,6 +538,64 @@ def build_dashboard_html(session_path, output_path=None):
     function parseViewBox(vb) {{
       const p = vb.trim().split(/\\s+/).map(Number);
       return {{ x: p[0], y: p[1], w: p[2], h: p[3] }};
+    }}
+
+    function frameIndexForDecisionId(id, marks) {{
+      if (!id) return null;
+      const hit = (marks || []).find(m => m.id === id);
+      return hit != null ? hit.frame : null;
+    }}
+
+    function setPlaybackRate(rate) {{
+      playbackRate = Math.max(0.25, Math.min(8, rate));
+      const sel = document.getElementById("playback-rate");
+      if (sel) sel.value = String(playbackRate);
+      if (isPlaying) {{
+        if (playTimeoutId !== null) clearTimeout(playTimeoutId);
+        scheduleNextFrame();
+      }}
+    }}
+
+    function jumpAlongMarks(marks, direction) {{
+      if (!marks.length) return;
+      const targets = marks.map(m => m.frame).sort((a, b) => a - b);
+      if (direction > 0) {{
+        const next = targets.find(f => f > currentFrameIndex);
+        if (next != null) updateFrameUI(next);
+        else if (targets.length) updateFrameUI(targets[0]);
+      }} else {{
+        const prev = targets.filter(f => f < currentFrameIndex).pop();
+        if (prev != null) updateFrameUI(prev);
+        else if (targets.length) updateFrameUI(targets[targets.length - 1]);
+      }}
+    }}
+
+    function bindReplayLog(container) {{
+      if (!container) return;
+      container.querySelectorAll(".event-row").forEach(row => {{
+        row.addEventListener("click", () => {{
+          const frame = row.dataset.frame;
+          if (frame !== "") updateFrameUI(Number(frame));
+        }});
+      }});
+    }}
+
+    function highlightReplayLogs(frame) {{
+      const dec = frame.decision;
+      const decId = dec && !isRiskAction(dec.action, dec.risk) ? (dec.id || "") : "";
+      const riskId = dec && isRiskAction(dec.action, dec.risk) ? (dec.id || "") : "";
+      document.querySelectorAll("#replay-decision-log .event-row").forEach(el => {{
+        el.classList.toggle("event-active", !!decId && el.dataset.decisionId === decId);
+      }});
+      document.querySelectorAll("#replay-risk-log .event-row").forEach(el => {{
+        el.classList.toggle("event-active", !!riskId && el.dataset.decisionId === riskId);
+      }});
+    }}
+
+    function replayEventRow(d, marks, formatter) {{
+      const frame = frameIndexForDecisionId(d.id, marks);
+      const frameAttr = frame != null ? frame : "";
+      return `<div class="event-row" data-decision-id="${{d.id || ""}}" data-frame="${{frameAttr}}">${{formatter(d)}}</div>`;
     }}
 
     function zoomReplayAt(factor, clientX, clientY) {{
@@ -408,6 +672,29 @@ def build_dashboard_html(session_path, output_path=None):
       if (outcome === "success") return "var(--success)";
       if (outcome === "collision") return "var(--danger)";
       return "var(--warn)";
+    }}
+
+
+    function isRiskAction(action, risk) {{
+      return action === "risk_event" || action === "car_honk" || !!risk;
+    }}
+
+    function lightPhase(light) {{
+      if (!light) return {{ state: "green", in: 0, next: "yellow" }};
+      if (typeof light === "string") return {{ state: light, in: 0, next: "yellow" }};
+      return {{ state: light.s || "green", in: light.in || 0, next: light.next || "yellow" }};
+    }}
+
+    function formatDecisionLine(d) {{
+      const idSpan = d.id ? `<span class="decision-id">${{d.id}}</span> ` : "";
+      const extra = d.commit_time_s != null ? " (" + d.commit_time_s + "s)" : "";
+      return `${{idSpan}}<strong>${{d.t}}s</strong> ${{d.action}}${{extra}}`;
+    }}
+
+    function formatRiskLine(d) {{
+      const idSpan = d.id ? `<span class="decision-id">${{d.id}}</span> ` : "";
+      const riskText = d.risk_label || d.risk || d.action;
+      return `${{idSpan}}<strong>${{d.t}}s</strong> Risk: ${{riskText}}`;
     }}
 
     function bulbColors(state) {{
@@ -538,6 +825,19 @@ def build_dashboard_html(session_path, output_path=None):
       const b = L.bounds;
       svg += `<defs><pattern id="crosswalkStripe" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="12" fill="#f0f0f0"/><rect x="6" width="6" height="12" fill="#d8d8d8"/></pattern></defs>`;
       svg += `<rect x="${{b.x}}" y="${{b.y}}" width="${{b.w}}" height="${{b.h}}" fill="#dde8d8"/>`;
+      const zoneColors = {{
+        intersection: "rgba(245, 165, 36, 0.14)",
+        crossing: "rgba(38, 166, 154, 0.12)",
+        choke: "rgba(220, 80, 80, 0.12)",
+        spawn: "rgba(80, 120, 220, 0.1)",
+        goal: "rgba(34, 68, 204, 0.12)",
+      }};
+      for (const zone of (L.analytics_zones || [])) {{
+        const r = zone.rect;
+        if (!r || r.length < 4) continue;
+        const fill = zoneColors[zone.type] || "rgba(120, 120, 120, 0.1)";
+        svg += `<rect x="${{r[0]}}" y="${{r[1]}}" width="${{r[2]}}" height="${{r[3]}}" fill="${{fill}}" stroke="none"/>`;
+      }}
       for (const road of L.roads) {{
         svg += `<rect x="${{road.x}}" y="${{road.y}}" width="${{road.w}}" height="${{road.h}}" fill="#646464"/>`;
       }}
@@ -547,8 +847,8 @@ def build_dashboard_html(session_path, output_path=None):
         svg += `<rect x="${{cw.x}}" y="${{cw.y}}" width="${{cw.w}}" height="${{cw.h}}" fill="url(#crosswalkStripe)" stroke="#bdbdbd"/>`;
         const housing = cw.housing;
         if (!housing) return;
-        const state = lights[i] || "green";
-        const colors = bulbColors(state);
+        const phase = lightPhase(lights[i]);
+        const colors = bulbColors(phase.state);
         svg += `<rect x="${{housing[0]}}" y="${{housing[1]}}" width="${{housing[2]}}" height="${{housing[3]}}" fill="#191919" stroke="#464646" stroke-width="2" rx="5"/>`;
         if (cw.direction === "vertical") {{
           const cx = housing[0] + housing[2] / 2;
@@ -559,6 +859,10 @@ def build_dashboard_html(session_path, output_path=None):
           const lefts = [housing[0] + 10, housing[0] + 28, housing[0] + 46];
           lefts.forEach((x, idx) => {{ svg += `<circle cx="${{x}}" cy="${{cy}}" r="6" fill="${{colors[idx]}}"/>`; }});
         }}
+        const timerY = cw.direction === "vertical" ? housing[1] + housing[3] + 14 : housing[1] + housing[3] / 2 + 4;
+        const timerX = cw.direction === "vertical" ? housing[0] + housing[2] / 2 : housing[0] + housing[2] + 10;
+        const timerLabel = `${{phase.in.toFixed(1)}}s → ${{phase.next}}`;
+        svg += `<text class="light-timer" x="${{timerX}}" y="${{timerY}}" text-anchor="${{cw.direction === "vertical" ? "middle" : "start"}}">${{timerLabel}}</text>`;
       }});
       const goal = L.goal;
       svg += `<rect x="${{goal.x}}" y="${{goal.y}}" width="${{goal.w}}" height="${{goal.h}}" fill="#2244cc" stroke="#fff" stroke-width="3"/>`;
@@ -587,7 +891,7 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       const playBtn = document.getElementById("frame-play");
       if (playBtn) {{
-        playBtn.textContent = "\\u25B6";
+        playBtn.textContent = "\u25B6";
         playBtn.title = "Play replay";
         playBtn.setAttribute("aria-label", "Play replay");
         playBtn.classList.remove("is-playing");
@@ -603,7 +907,13 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       const current = frames[currentFrameIndex];
       const next = frames[currentFrameIndex + 1];
-      const deltaMs = Math.max(40, ((next.t - current.t) * 1000) / playbackRate);
+      let deltaS = REPLAY_STEP_S;
+      if (current.seq != null && next.seq != null) {{
+        deltaS = Math.max(1, next.seq - current.seq) * REPLAY_STEP_S;
+      }} else {{
+        deltaS = Math.max(REPLAY_STEP_S, next.t - current.t);
+      }}
+      const deltaMs = Math.max(25, (deltaS * 1000) / playbackRate);
       playTimeoutId = setTimeout(() => {{
         playTimeoutId = null;
         updateFrameUI(currentFrameIndex + 1, true);
@@ -623,7 +933,7 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       isPlaying = true;
       const playBtn = document.getElementById("frame-play");
-      playBtn.textContent = "\\u23F8";
+      playBtn.textContent = "\u23F8";
       playBtn.title = "Pause replay";
       playBtn.setAttribute("aria-label", "Pause replay");
       playBtn.classList.add("is-playing");
@@ -640,8 +950,13 @@ def build_dashboard_html(session_path, output_path=None):
       slider.value = String(currentFrameIndex);
       document.getElementById("frame-time").textContent = frame.t.toFixed(1) + "s";
       document.getElementById("frame-index").textContent = `Frame ${{currentFrameIndex + 1}} / ${{frames.length}}`;
-      const label = frame.decision ? frame.decision.label : "";
-      document.getElementById("frame-decision-label").textContent = label;
+      const dec = frame.decision;
+      let decLabel = "";
+      if (dec && !isRiskAction(dec.action, dec.risk)) {{
+        decLabel = (dec.id ? dec.id + " — " : "") + dec.label;
+      }}
+      document.getElementById("frame-decision-label").textContent = decLabel;
+      highlightReplayLogs(frame);
       drawFrame(frame);
     }}
 
@@ -656,14 +971,35 @@ def build_dashboard_html(session_path, output_path=None):
       const max = frames.length - 1;
       ticksEl.innerHTML = marks.map(m => {{
         const pct = (m.frame / max) * 100;
-        return `<button type="button" class="decision-tick" style="left:${{pct}}%" title="${{m.label}} @ ${{m.t}}s" data-frame="${{m.frame}}"></button>`;
+        const tip = (m.id ? m.id + " — " : "") + m.label + " @ " + m.t + "s";
+        return `<button type="button" class="decision-tick" style="left:${{pct}}%" title="${{tip}}" data-frame="${{m.frame}}" data-decision-id="${{m.id || ""}}"></button>`;
       }}).join("");
       ticksEl.querySelectorAll(".decision-tick").forEach(btn => {{
         btn.addEventListener("click", () => updateFrameUI(Number(btn.dataset.frame)));
       }});
     }}
 
-    function initFrameScrubber() {{
+
+    function buildRiskTicks() {{
+      const ticksEl = document.getElementById("risk-ticks");
+      const marks = DATA.risk_marks || [];
+      const frames = DATA.frames || [];
+      if (!ticksEl || !frames.length) {{
+        if (ticksEl) ticksEl.innerHTML = "";
+        return;
+      }}
+      const max = frames.length - 1;
+      ticksEl.innerHTML = marks.map(m => {{
+        const pct = (m.frame / max) * 100;
+        const tip = (m.id ? m.id + " — " : "") + m.label + " @ " + m.t + "s";
+        return `<button type="button" class="decision-tick risk-tick" style="left:${{pct}}%" title="${{tip}}" data-frame="${{m.frame}}"></button>`;
+      }}).join("");
+      ticksEl.querySelectorAll(".risk-tick").forEach(btn => {{
+        btn.addEventListener("click", () => updateFrameUI(Number(btn.dataset.frame)));
+      }});
+    }}
+
+    function refreshFrameScrubber() {{
       const frames = DATA.frames || [];
       const slider = document.getElementById("frame-slider");
       const jump = document.getElementById("frame-decision-jump");
@@ -672,60 +1008,101 @@ def build_dashboard_html(session_path, output_path=None):
         return;
       }}
       slider.max = String(frames.length - 1);
+      slider.value = "0";
       jump.innerHTML = '<option value="">Jump to decision…</option>' +
         (DATA.decision_marks || []).map(m =>
-          `<option value="${{m.frame}}">${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
+          `<option value="${{m.frame}}" data-decision-id="${{m.id || ""}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
         ).join("");
+      const riskJump = document.getElementById("frame-risk-jump");
+      if (riskJump) {{
+        riskJump.innerHTML = '<option value="">Jump to risk…</option>' +
+          (DATA.risk_marks || []).map(m =>
+            `<option value="${{m.frame}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
+          ).join("");
+      }}
       buildDecisionTicks();
-      document.getElementById("frame-play").addEventListener("click", togglePlayback);
-      document.getElementById("playback-rate").addEventListener("change", (e) => {{
-        playbackRate = Number(e.target.value) || 1;
-        if (isPlaying) {{
-          if (playTimeoutId !== null) clearTimeout(playTimeoutId);
-          scheduleNextFrame();
-        }}
-      }});
-      slider.addEventListener("input", () => updateFrameUI(Number(slider.value)));
-      document.getElementById("frame-prev").addEventListener("click", () => updateFrameUI(currentFrameIndex - 1));
-      document.getElementById("frame-next").addEventListener("click", () => updateFrameUI(currentFrameIndex + 1));
-      jump.addEventListener("change", () => {{
-        if (jump.value !== "") updateFrameUI(Number(jump.value));
-      }});
-      document.addEventListener("keydown", (e) => {{
-        if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
-        if (e.key === " ") {{
-          e.preventDefault();
-          togglePlayback();
-        }}
-        if (e.key === "ArrowLeft") updateFrameUI(currentFrameIndex - 1);
-        if (e.key === "ArrowRight") updateFrameUI(currentFrameIndex + 1);
-        if (e.key === "+" || e.key === "=") {{
-          const r = document.getElementById("replay-viewport").getBoundingClientRect();
-          zoomReplayAt(1.2, r.left + r.width / 2, r.top + r.height / 2);
-        }}
-        if (e.key === "-") {{
-          const r = document.getElementById("replay-viewport").getBoundingClientRect();
-          zoomReplayAt(1 / 1.2, r.left + r.width / 2, r.top + r.height / 2);
-        }}
-        if (e.key === "0") resetReplayZoom();
-      }});
-      initReplayZoom();
+      buildRiskTicks();
+      resetReplayZoom();
       updateFrameUI(0);
     }}
 
-    function render() {{
+    function initFrameScrubber() {{
+      const slider = document.getElementById("frame-slider");
+      const jump = document.getElementById("frame-decision-jump");
+      const riskJump = document.getElementById("frame-risk-jump");
+      if (!scrubberInitialized) {{
+        scrubberInitialized = true;
+        document.getElementById("frame-play").addEventListener("click", togglePlayback);
+        document.getElementById("playback-rate").addEventListener("change", (e) => {{
+          playbackRate = Number(e.target.value) || 1;
+          if (isPlaying) {{
+            if (playTimeoutId !== null) clearTimeout(playTimeoutId);
+            scheduleNextFrame();
+          }}
+        }});
+        slider.addEventListener("input", () => updateFrameUI(Number(slider.value)));
+        document.getElementById("frame-prev").addEventListener("click", () => updateFrameUI(currentFrameIndex - 1));
+        document.getElementById("frame-next").addEventListener("click", () => updateFrameUI(currentFrameIndex + 1));
+        jump.addEventListener("change", () => {{
+          if (jump.value !== "") updateFrameUI(Number(jump.value));
+        }});
+        if (riskJump) {{
+          riskJump.addEventListener("change", () => {{
+            if (riskJump.value !== "") updateFrameUI(Number(riskJump.value));
+          }});
+        }}
+        document.addEventListener("keydown", (e) => {{
+          if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+          if (e.key === " ") {{
+            e.preventDefault();
+            togglePlayback();
+          }}
+          if (e.key === "ArrowLeft") updateFrameUI(currentFrameIndex - 1);
+          if (e.key === "ArrowRight") updateFrameUI(currentFrameIndex + 1);
+          if (e.key === "+" || e.key === "=") {{
+            const r = document.getElementById("replay-viewport").getBoundingClientRect();
+            zoomReplayAt(1.2, r.left + r.width / 2, r.top + r.height / 2);
+          }}
+          if (e.key === "-") {{
+            const r = document.getElementById("replay-viewport").getBoundingClientRect();
+            zoomReplayAt(1 / 1.2, r.left + r.width / 2, r.top + r.height / 2);
+          }}
+          if (e.key === "0") resetReplayZoom();
+          if (e.key === "[") setPlaybackRate(playbackRate / 2);
+          if (e.key === "]") setPlaybackRate(playbackRate * 2);
+          if (e.key === "d") jumpAlongMarks(DATA.decision_marks || [], 1);
+          if (e.key === "D") jumpAlongMarks(DATA.decision_marks || [], -1);
+          if (e.key === "r") jumpAlongMarks(DATA.risk_marks || [], 1);
+          if (e.key === "R") jumpAlongMarks(DATA.risk_marks || [], -1);
+        }});
+        initReplayZoom();
+        setPlaybackRate(DEFAULT_PLAYBACK_RATE);
+      }}
+      refreshFrameScrubber();
+    }}
+
+    function renderRoundPanels() {{
       const s = DATA.session;
       const a = DATA.archetypes;
       const sum = s.summary || {{}};
 
-      document.getElementById("stats").innerHTML = [
+      const statRows = [];
+      if ((DATA.rounds || []).length > 1) {{
+        statRows.push([
+          "Viewing",
+          "Round " + (activeRoundIndex + 1) + " / " + DATA.rounds.length,
+          "var(--accent)",
+        ]);
+      }}
+      statRows.push(
         ["Outcome", s.outcome, outcomeColor(s.outcome)],
         ["Duration", s.duration_s + "s", "var(--text)"],
         ["Crossings", s.crossings, "var(--text)"],
         ["Risk events", s.risk_events, s.risk_events > 2 ? "var(--warn)" : "var(--text)"],
         ["Hesitation", sum.total_hesitation_s + "s (" + sum.hesitation_count + " pauses)", "var(--text)"],
         ["Backtracks", sum.total_backtracks, "var(--text)"],
-      ].map(([label, value, color]) =>
+      );
+      document.getElementById("stats").innerHTML = statRows.map(([label, value, color]) =>
         `<div class="stat"><div class="value" style="color:${{color}}">${{value}}</div><div class="label">${{label}}</div></div>`
       ).join("");
 
@@ -753,11 +1130,35 @@ def build_dashboard_html(session_path, output_path=None):
         <strong>${{sum.quick_commits || 0}}</strong> quick commits ·
         <strong>${{sum.slow_commits || 0}}</strong> deliberate commits</p>`;
 
-      const log = (s.decision_sequence || []).slice(-40);
-      document.getElementById("decision-log").innerHTML = log
-        .map(d => `<div><strong>${{d.t}}s</strong> ${{d.action}}${{d.commit_time_s != null ? " (" + d.commit_time_s + "s)" : ""}}</div>`)
-        .join("");
+      const seq = s.decision_sequence || [];
+      const decisions = seq.filter(d => !isRiskAction(d.action, d.risk)).slice(-40);
+      const risks = seq.filter(d => isRiskAction(d.action, d.risk)).slice(-40);
+      document.getElementById("decision-log").innerHTML = decisions
+        .map(d => `<div>${{formatDecisionLine(d)}}</div>`)
+        .join("") || "<div class='subtitle'>No decisions logged.</div>";
+      const dm = DATA.decision_marks || [];
+      const rm = DATA.risk_marks || [];
+      const replayDec = document.getElementById("replay-decision-log");
+      if (replayDec) {{
+        replayDec.innerHTML = decisions.map(d => replayEventRow(d, dm, formatDecisionLine)).join("")
+          || "<div class='subtitle'>No decisions.</div>";
+        bindReplayLog(replayDec);
+      }}
+      const replayRisk = document.getElementById("replay-risk-log");
+      if (replayRisk) {{
+        replayRisk.innerHTML = risks.map(d => replayEventRow(d, rm, formatRiskLine)).join("")
+          || "<div class='subtitle'>No risks.</div>";
+        bindReplayLog(replayRisk);
+      }}
 
+    }}
+
+    function render() {{
+      if (DATA.rounds && DATA.rounds.length) {{
+        applyRoundToData(DATA.rounds.length - 1);
+      }}
+      buildRoundTabs();
+      renderRoundPanels();
       initFrameScrubber();
     }}
     render();

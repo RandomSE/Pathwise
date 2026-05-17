@@ -17,7 +17,10 @@ Ensure pygame is installed. run pip install pygame (if on Linux / Mac, use pip3 
 
 4. Run Pathwise
 in the same OS specific terminal opened in step 2, run python main.py
-It should then launch, and place you in a random map. To participate, cross the roads without making contact with incoming traffic. The round ends upon reaching either the goal location (win) or making contact with a car (fail)
+A **pre-game menu** lets you pick difficulty (Easy / Normal / Hard) and start the session. You then play **3 rounds** on new procedural maps; each round is harder (faster traffic, denser spawns, tighter lights). Cross roads without hitting cars; reach the goal before time runs out.
+
+**Recruiter fairness:** run the same map for every candidate with a fixed seed:
+`set PATHWISE_SEED=12345` (Windows) then `python main.py`. Difficulty adapts from the previous `logs.json` when no seed is set.
 
 5. View Recruiter Analytics
 After each run, Pathwise writes `logs.json` (decision sequence, hesitation events, heatmap samples) and auto-generates `logs_dashboard.html`.
