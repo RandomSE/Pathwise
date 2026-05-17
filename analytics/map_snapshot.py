@@ -37,8 +37,9 @@ def serialize_map_layout(current_map, road_states, world_bounds):
             }
         )
 
-    return {
-        "map_id": current_map.__class__.__name__,
+    map_id = getattr(current_map, "map_id", current_map.__class__.__name__)
+    layout = {
+        "map_id": map_id,
         "bounds": {
             "x": world_bounds.x,
             "y": world_bounds.y,
@@ -64,3 +65,14 @@ def serialize_map_layout(current_map, road_states, world_bounds):
         ],
         "crosswalks": crosswalks,
     }
+    if getattr(current_map, "seed", None) is not None:
+        layout["seed"] = current_map.seed
+    if getattr(current_map, "time_limit", None) is not None:
+        layout["time_limit"] = current_map.time_limit
+    if getattr(current_map, "difficulty", None) is not None:
+        layout["difficulty"] = current_map.difficulty
+    if getattr(current_map, "analytics_zones", None):
+        layout["analytics_zones"] = current_map.analytics_zones
+    if getattr(current_map, "generation_meta", None) is not None:
+        layout["generation"] = current_map.generation_meta
+    return layout

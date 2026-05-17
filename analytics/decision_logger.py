@@ -10,7 +10,7 @@ POSITION_SAMPLE_INTERVAL_S = 0.12
 class DecisionLogger:
     """Captures movement decisions, hesitation, backtracking, and commit timing."""
 
-    def __init__(self, start_pos, goal_pos, map_id, road_count, frame_recorder=None):
+    def __init__(self, start_pos, goal_pos, map_id, road_count, frame_recorder=None, analytics_zones=None):
         self.start_time = time.time()
         self.map_id = map_id
         self.road_count = road_count
@@ -19,6 +19,8 @@ class DecisionLogger:
         self.heat_samples = []
         self.hesitation_events = []
         self.crossing_attempts = []
+        self.analytics_zones = list(analytics_zones or [])
+        self._active_zone_ids = set()
 
         self._last_pos = start_pos
         self._last_move_time = self.start_time
@@ -32,6 +34,7 @@ class DecisionLogger:
         self._quick_commits = 0
         self._slow_commits = 0
         self._frame_recorder = frame_recorder
+        self._decision_seq = 0
 
     def set_frame_recorder(self, frame_recorder):
         self._frame_recorder = frame_recorder
@@ -51,12 +54,23 @@ class DecisionLogger:
         dy = pos[1] - prev_pos[1]
         return dx * ux + dy * uy
 
+    def _next_decision_id(self):
+        self._decision_seq += 1
+        return f"d_{self._decision_seq:04d}"
+
     def _record(self, action, **context):
-        entry = {"t": self._elapsed(), "action": action}
+        decision_id = self._next_decision_id()
+        entry = {"id": decision_id, "t": self._elapsed(), "action": action}
         entry.update(context)
         self.decisions.append(entry)
         if self._frame_recorder:
-            self._frame_recorder.queue_decision(action, **context)
+            self._frame_recorder.queue_decision(action, decision_id=decision_id, **context)
+
+    def note_risk(self, reason, **context):
+        from analytics.frame_recorder import RISK_LABELS
+
+        risk_label = RISK_LABELS.get(reason, reason.replace("_", " "))
+        self._record("risk_event", risk=reason, risk_label=risk_label, **context)
 
     def _grid_cell(self, pos, cell_size=40):
         return [int(pos[0] // cell_size), int(pos[1] // cell_size)]
@@ -102,9 +116,6 @@ class DecisionLogger:
             elif on_crosswalk and light_state == "green":
                 self._record("cross_on_green", light=light_state)
 
-            if risk_flag:
-                self._record("risky_move", on_crosswalk=on_crosswalk, light=light_state)
-
             self._last_move_time = now
             self._still_since = now
             if self._active_hesitation:
@@ -143,7 +154,30 @@ class DecisionLogger:
         if keys_pressed and not moved:
             self._record("input_while_still", keys=list(keys_pressed))
 
+        self._track_analytics_zones(pos)
+
         self._last_pos = pos
+
+    def _track_analytics_zones(self, pos):
+        px, py = pos
+        for zone in self.analytics_zones:
+            rect = zone.get("rect")
+            if not rect or len(rect) < 4:
+                continue
+            x, y, w, h = rect
+            inside = x <= px <= x + w and y <= py <= y + h
+            zone_id = zone.get("id", "")
+            if inside and zone_id not in self._active_zone_ids:
+                self._active_zone_ids.add(zone_id)
+                self._record(
+                    "zone_enter",
+                    zone_id=zone_id,
+                    zone_type=zone.get("type"),
+                    challenge=zone.get("challenge"),
+                    label=zone.get("label"),
+                )
+            elif not inside and zone_id in self._active_zone_ids:
+                self._active_zone_ids.discard(zone_id)
 
     def note_road_approach(self, road_index):
         if road_index not in self._approach_start:
@@ -202,6 +236,10 @@ class DecisionLogger:
             "decision_marks": (
                 self._frame_recorder.decision_marks() if self._frame_recorder else []
             ),
+            "risk_marks": (
+                self._frame_recorder.risk_marks() if self._frame_recorder else []
+            ),
+            "analytics_zones": self.analytics_zones,
             "summary": {
                 "total_backtracks": self._total_backtracks,
                 "total_hesitation_s": round(self._total_hesitation_s, 2),
