@@ -63,6 +63,8 @@ def serialize_map_layout(current_map, road_states, world_bounds):
             }
             for road in current_map.roads
         ],
+        "city_blocks": getattr(current_map, "city_blocks", []),
+        "decorations": getattr(current_map, "decorations", []),
         "crosswalks": crosswalks,
     }
     if getattr(current_map, "seed", None) is not None:

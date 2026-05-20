@@ -8,7 +8,7 @@ HORIZONTAL = commonUtils.HORIZONTAL
 BASE_SIZE = 40
 ROAD_THICKNESS = 90
 ROAD_SPAN = int(WIDTH * 1.35)
-ROAD_GAP = 150
+ROAD_GAP = 240
 
 class Road:
     def __init__(self, rect, direction):
@@ -25,17 +25,28 @@ class MapBase:
         self.start_pos = start_pos
         self.goal_rect = goal_rect 
 
-    def draw(self, surface, camera_offset, player):
-        # Draw roads
+    def draw(
+        self,
+        surface,
+        camera_offset,
+        player,
+        city_blocks=None,
+        world_bounds=None,
+        decorations=None,
+    ):
+        import map_visuals
+
+        view = surface.get_rect()
+        if world_bounds is not None:
+            map_visuals.draw_background(surface, world_bounds, camera_offset)
+        if city_blocks:
+            map_visuals.draw_city_scape(
+                surface, city_blocks, decorations, camera_offset, view
+            )
         for road in self.roads:
-            shifted = road.rect.move(-camera_offset[0], -camera_offset[1])
-            pygame.draw.rect(surface, (100, 100, 100), shifted)
-
-        # Draw goal
+            map_visuals.draw_road(surface, road.rect, road.direction, camera_offset, view)
         shifted_goal = self.goal_rect.move(-camera_offset[0], -camera_offset[1])
-        pygame.draw.rect(surface, (0, 0, 200), shifted_goal)
-
-        # Draw arrow pointing to goal
+        map_visuals.draw_goal(surface, self.goal_rect, camera_offset)
         draw_arrow(surface, player, shifted_goal, camera_offset)
 
 

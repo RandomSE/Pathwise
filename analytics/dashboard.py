@@ -468,6 +468,7 @@ def build_dashboard_html(session_path, output_path=None):
 
     let activeRoundIndex = 0;
     let scrubberInitialized = false;
+    let jumpDropdownListenersReady = false;
 
     function applyRoundToData(idx) {{
       const rounds = DATA.rounds || [];
@@ -756,7 +757,7 @@ def build_dashboard_html(session_path, output_path=None):
       </g>`;
     }}
 
-    function carSvg(car) {{
+    function carSvg(car, frameTime) {{
       const x = car.x, y = car.y, w = car.w, h = car.h;
       const vertical = car.v === 1;
       const pal = paletteForCar(car);
@@ -777,6 +778,14 @@ def build_dashboard_html(session_path, output_path=None):
         svg += `<ellipse cx="7" cy="3" rx="4" ry="2.5" fill="${{wheel}}"/><ellipse cx="${{w - 7}}" cy="3" rx="4" ry="2.5" fill="${{wheel}}"/>`;
         svg += `<ellipse cx="7" cy="${{h - 3}}" rx="4" ry="2.5" fill="${{wheel}}"/><ellipse cx="${{w - 7}}" cy="${{h - 3}}" rx="4" ry="2.5" fill="${{wheel}}"/>`;
         svg += `<circle cx="${{w - 5}}" cy="${{h / 2}}" r="2" fill="#fff9c4"/><circle cx="5" cy="${{h / 2}}" r="1.5" fill="#ff8f00" opacity="0.75"/>`;
+        if (car.ts) {{
+          const blink = (Math.floor((frameTime || 0) * 10) % 2) === 0;
+          const col = blink ? "#ffd640" : "#b48c28";
+          let ly = car.ts < 0 ? 4 : h - 5;
+          const dir = car.dir != null ? car.dir : 1;
+          if (dir < 0) ly = h - ly;
+          svg += `<circle cx="${{w / 2}}" cy="${{ly}}" r="3" fill="${{col}}"/>`;
+        }}
       }} else {{
         svg += `<rect x="5" y="1" width="${{w - 10}}" height="${{h - 2}}" rx="${{rx}}" fill="${{pal.body}}" stroke="${{pal.trim}}" stroke-width="1"/>`;
         if (pal.style === "pickup") {{
@@ -790,6 +799,14 @@ def build_dashboard_html(session_path, output_path=None):
         svg += `<ellipse cx="3" cy="7" rx="2.5" ry="4" fill="${{wheel}}"/><ellipse cx="${{w - 3}}" cy="7" rx="2.5" ry="4" fill="${{wheel}}"/>`;
         svg += `<ellipse cx="3" cy="${{h - 7}}" rx="2.5" ry="4" fill="${{wheel}}"/><ellipse cx="${{w - 3}}" cy="${{h - 7}}" rx="2.5" ry="4" fill="${{wheel}}"/>`;
         svg += `<circle cx="${{w / 2}}" cy="5" r="2" fill="#fff9c4"/><circle cx="${{w / 2}}" cy="${{h - 5}}" r="1.5" fill="#ff8f00" opacity="0.75"/>`;
+        if (car.ts) {{
+          const blink = (Math.floor((frameTime || 0) * 10) % 2) === 0;
+          const col = blink ? "#ffd640" : "#b48c28";
+          let lx = car.ts < 0 ? 4 : w - 5;
+          const dir = car.dir != null ? car.dir : 1;
+          if (dir < 0) lx = w - lx;
+          svg += `<circle cx="${{lx}}" cy="${{h / 2}}" r="3" fill="${{col}}"/>`;
+        }}
       }}
       svg += `</g>`;
       return svg;
@@ -824,7 +841,34 @@ def build_dashboard_html(session_path, output_path=None):
       let svg = `<svg viewBox="${{replayViewBox()}}" class="replay-svg" xmlns="http://www.w3.org/2000/svg">`;
       const b = L.bounds;
       svg += `<defs><pattern id="crosswalkStripe" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="12" fill="#f0f0f0"/><rect x="6" width="6" height="12" fill="#d8d8d8"/></pattern></defs>`;
-      svg += `<rect x="${{b.x}}" y="${{b.y}}" width="${{b.w}}" height="${{b.h}}" fill="#dde8d8"/>`;
+      svg += `<rect x="${{b.x}}" y="${{b.y}}" width="${{b.w}}" height="${{b.h}}" fill="#c8dcc4"/>`;
+      const blockFills = {{
+        park: "#4a8050",
+        residential: "#c4b498",
+        commercial: "#7888a8",
+        plaza: "#d2c8bc",
+      }};
+      for (const blk of (L.city_blocks || [])) {{
+        const fill = blockFills[blk.kind] || "#b8b0a4";
+        svg += `<rect x="${{blk.x}}" y="${{blk.y}}" width="${{blk.w}}" height="${{blk.h}}" fill="${{fill}}" stroke="#9a9488" stroke-width="1" rx="4"/>`;
+      }}
+      for (const d of (L.decorations || [])) {{
+        if (d.type === "tree") {{
+          const sc = d.scale || 1;
+          const r = 10 * sc;
+          svg += `<circle cx="${{d.x}}" cy="${{d.y - 4}}" r="${{r}}" fill="#3a8a48"/>`;
+          svg += `<rect x="${{d.x - 3}}" y="${{d.y}}" width="6" height="${{14 * sc}}" fill="#6b4a2e"/>`;
+        }} else if (d.type === "lamp") {{
+          svg += `<line x1="${{d.x}}" y1="${{d.y}}" x2="${{d.x}}" y2="${{d.y - 22}}" stroke="#555" stroke-width="3"/>`;
+          svg += `<circle cx="${{d.x}}" cy="${{d.y - 24}}" r="5" fill="#fff6c8"/>`;
+        }} else if (d.type === "bench") {{
+          if (d.wide) {{
+            svg += `<rect x="${{d.x - 14}}" y="${{d.y - 4}}" width="28" height="8" fill="#8a6848" rx="2"/>`;
+          }} else {{
+            svg += `<rect x="${{d.x - 4}}" y="${{d.y - 12}}" width="8" height="24" fill="#8a6848" rx="2"/>`;
+          }}
+        }}
+      }}
       const zoneColors = {{
         intersection: "rgba(245, 165, 36, 0.14)",
         crossing: "rgba(38, 166, 154, 0.12)",
@@ -839,7 +883,18 @@ def build_dashboard_html(session_path, output_path=None):
         svg += `<rect x="${{r[0]}}" y="${{r[1]}}" width="${{r[2]}}" height="${{r[3]}}" fill="${{fill}}" stroke="none"/>`;
       }}
       for (const road of L.roads) {{
-        svg += `<rect x="${{road.x}}" y="${{road.y}}" width="${{road.w}}" height="${{road.h}}" fill="#646464"/>`;
+        svg += `<rect x="${{road.x}}" y="${{road.y}}" width="${{road.w}}" height="${{road.h}}" fill="#3a3f44" stroke="#2e3236" stroke-width="1"/>`;
+        if (road.direction === "vertical" && road.w > 80) {{
+          const cy = road.y + road.h / 2;
+          for (let x = road.x + 12; x < road.x + road.w - 12; x += 22) {{
+            svg += `<line x1="${{x}}" y1="${{cy}}" x2="${{x + 10}}" y2="${{cy}}" stroke="#dcc846" stroke-width="2"/>`;
+          }}
+        }} else if (road.direction === "horizontal" && road.h > 80) {{
+          const cx = road.x + road.w / 2;
+          for (let y = road.y + 12; y < road.y + road.h - 12; y += 22) {{
+            svg += `<line x1="${{cx}}" y1="${{y}}" x2="${{cx}}" y2="${{y + 10}}" stroke="#dcc846" stroke-width="2"/>`;
+          }}
+        }}
       }}
       const signals = L.crosswalks || [];
       const lights = frame.lights || [];
@@ -865,9 +920,10 @@ def build_dashboard_html(session_path, output_path=None):
         svg += `<text class="light-timer" x="${{timerX}}" y="${{timerY}}" text-anchor="${{cw.direction === "vertical" ? "middle" : "start"}}">${{timerLabel}}</text>`;
       }});
       const goal = L.goal;
-      svg += `<rect x="${{goal.x}}" y="${{goal.y}}" width="${{goal.w}}" height="${{goal.h}}" fill="#2244cc" stroke="#fff" stroke-width="3"/>`;
+      svg += `<rect x="${{goal.x - 8}}" y="${{goal.y - 8}}" width="${{goal.w + 16}}" height="${{goal.h + 16}}" fill="#ffdc50" opacity="0.5" rx="10"/>`;
+      svg += `<rect x="${{goal.x}}" y="${{goal.y}}" width="${{goal.w}}" height="${{goal.h}}" fill="#2258d8" stroke="#fff" stroke-width="2" rx="6"/>`;
       for (const car of frame.cars || []) {{
-        svg += carSvg(car);
+        svg += carSvg(car, frame.t);
         if (car.honk) {{
           svg += honkSvg(car.x + car.w / 2, car.y - 4);
         }}
@@ -907,13 +963,13 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       const current = frames[currentFrameIndex];
       const next = frames[currentFrameIndex + 1];
+      // Wall-clock between recorded frames (decision extras have small t gaps — do not stretch them).
       let deltaS = REPLAY_STEP_S;
-      if (current.seq != null && next.seq != null) {{
-        deltaS = Math.max(1, next.seq - current.seq) * REPLAY_STEP_S;
-      }} else {{
-        deltaS = Math.max(REPLAY_STEP_S, next.t - current.t);
+      if (current.t != null && next.t != null) {{
+        const dt = next.t - current.t;
+        deltaS = dt > 0 ? dt : REPLAY_STEP_S;
       }}
-      const deltaMs = Math.max(25, (deltaS * 1000) / playbackRate);
+      const deltaMs = Math.max(16, (deltaS * 1000) / playbackRate);
       playTimeoutId = setTimeout(() => {{
         playTimeoutId = null;
         updateFrameUI(currentFrameIndex + 1, true);
@@ -999,20 +1055,14 @@ def build_dashboard_html(session_path, output_path=None):
       }});
     }}
 
-    function refreshFrameScrubber() {{
-      const frames = DATA.frames || [];
-      const slider = document.getElementById("frame-slider");
+    function populateJumpDropdowns() {{
       const jump = document.getElementById("frame-decision-jump");
-      if (!frames.length) {{
-        drawFrame({{}});
-        return;
+      if (jump) {{
+        jump.innerHTML = '<option value="">Jump to decision…</option>' +
+          (DATA.decision_marks || []).map(m =>
+            `<option value="${{m.frame}}" data-decision-id="${{m.id || ""}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
+          ).join("");
       }}
-      slider.max = String(frames.length - 1);
-      slider.value = "0";
-      jump.innerHTML = '<option value="">Jump to decision…</option>' +
-        (DATA.decision_marks || []).map(m =>
-          `<option value="${{m.frame}}" data-decision-id="${{m.id || ""}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
-        ).join("");
       const riskJump = document.getElementById("frame-risk-jump");
       if (riskJump) {{
         riskJump.innerHTML = '<option value="">Jump to risk…</option>' +
@@ -1020,6 +1070,32 @@ def build_dashboard_html(session_path, output_path=None):
             `<option value="${{m.frame}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
           ).join("");
       }}
+    }}
+
+    function setupJumpDropdownListeners() {{
+      if (jumpDropdownListenersReady) return;
+      jumpDropdownListenersReady = true;
+      document.addEventListener("change", (e) => {{
+        if (e.target.id === "frame-decision-jump" && e.target.value !== "") {{
+          updateFrameUI(Number(e.target.value));
+        }}
+        if (e.target.id === "frame-risk-jump" && e.target.value !== "") {{
+          updateFrameUI(Number(e.target.value));
+        }}
+      }});
+    }}
+
+    function refreshFrameScrubber() {{
+      const frames = DATA.frames || [];
+      const slider = document.getElementById("frame-slider");
+      if (!frames.length) {{
+        drawFrame({{}});
+        populateJumpDropdowns();
+        return;
+      }}
+      slider.max = String(frames.length - 1);
+      slider.value = "0";
+      populateJumpDropdowns();
       buildDecisionTicks();
       buildRiskTicks();
       resetReplayZoom();
@@ -1028,8 +1104,7 @@ def build_dashboard_html(session_path, output_path=None):
 
     function initFrameScrubber() {{
       const slider = document.getElementById("frame-slider");
-      const jump = document.getElementById("frame-decision-jump");
-      const riskJump = document.getElementById("frame-risk-jump");
+      setupJumpDropdownListeners();
       if (!scrubberInitialized) {{
         scrubberInitialized = true;
         document.getElementById("frame-play").addEventListener("click", togglePlayback);
@@ -1043,14 +1118,6 @@ def build_dashboard_html(session_path, output_path=None):
         slider.addEventListener("input", () => updateFrameUI(Number(slider.value)));
         document.getElementById("frame-prev").addEventListener("click", () => updateFrameUI(currentFrameIndex - 1));
         document.getElementById("frame-next").addEventListener("click", () => updateFrameUI(currentFrameIndex + 1));
-        jump.addEventListener("change", () => {{
-          if (jump.value !== "") updateFrameUI(Number(jump.value));
-        }});
-        if (riskJump) {{
-          riskJump.addEventListener("change", () => {{
-            if (riskJump.value !== "") updateFrameUI(Number(riskJump.value));
-          }});
-        }}
         document.addEventListener("keydown", (e) => {{
           if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
           if (e.key === " ") {{

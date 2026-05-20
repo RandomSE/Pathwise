@@ -20,7 +20,13 @@ if __name__ == "__main__":
     import sys
 
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    presets = ["easy", "normal", "hard"]
     for seed in range(count):
-        layout = generate_map_layout(seed)
-        assert 3 <= len(layout["roads"]) <= 5
-    print(f"OK: generated {count} procedural maps")
+        preset = presets[seed % len(presets)]
+        layout = generate_map_layout(seed, difficulty=DifficultyProfile.for_menu_preset(preset))
+        roads = len(layout["roads"])
+        blocks = len(layout.get("city_blocks", []))
+        assert 12 <= roads <= 120, f"seed {seed}: {roads} road segments"
+        assert blocks >= 4, f"seed {seed}: {blocks} city blocks"
+        assert layout["time_limit"] >= 100, layout["time_limit"]
+    print(f"OK: generated {count} procedural maps (easy/normal/hard presets)")

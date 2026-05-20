@@ -219,6 +219,7 @@ def _serialize_car(car, game_time):
         "a": getattr(car, "archetype_index", 0),
         "sp": round(float(getattr(car, "current_speed", 0)), 2),
         "dir": int(getattr(car, "direction", 1)),
+        "ts": int(getattr(car, "turn_signal", 0)),
     }
     if getattr(car, "is_honking", None) and car.is_honking(game_time):
         payload["honk"] = 1
