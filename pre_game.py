@@ -15,7 +15,8 @@ MENU_BORDER = (210, 220, 235)
 
 MIN_ROUNDS = 1
 MAX_ROUNDS = 5
-DEFAULT_ROUNDS = 3
+DEFAULT_ROUNDS = 1
+MAX_SEED_DIGITS = 10
 
 DIFFICULTY_PRESETS = [
     ("easy", "Easy", "Relaxed traffic · forgiving timing"),
@@ -28,6 +29,16 @@ DIFFICULTY_PRESETS = [
 class SessionConfig:
     preset: str
     num_rounds: int = DEFAULT_ROUNDS
+    seed: int | None = None  # None => random session seed (logged); same seed spans all rounds
+
+
+def _parse_seed_text(text: str) -> int | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    if not cleaned.isdigit():
+        return None
+    return int(cleaned) % (2**31)
 
 
 def _blit_centered(surface, font, text, color, center):
@@ -54,53 +65,100 @@ def _width_center(screen):
 def run_pre_game_menu(screen, clock, title_font, body_font, small_font) -> SessionConfig | None:
     selected_preset = "normal"
     num_rounds = DEFAULT_ROUNDS
+    seed_text = ""
+    seed_editing = False
     minus_rect = pygame.Rect(0, 0, 0, 0)
     plus_rect = pygame.Rect(0, 0, 0, 0)
-    start_rect = pygame.Rect(_width_center(screen) - 120, 455, 240, 52)
+    seed_field_rect = pygame.Rect(0, 0, 0, 0)
+    start_rect = pygame.Rect(_width_center(screen) - 120, 500, 240, 52)
     preset_rects = {}
-    y = 210
+    y = 300
     for preset_id, label, _desc in DIFFICULTY_PRESETS:
         preset_rects[preset_id] = pygame.Rect(_width_center(screen) - 200, y, 400, 44)
         y += 54
 
+    def finish_config():
+        return SessionConfig(
+            preset=selected_preset,
+            num_rounds=num_rounds,
+            seed=_parse_seed_text(seed_text),
+        )
+
     while True:
         cx = _width_center(screen)
-        minus_rect = pygame.Rect(cx - 120, 155, 44, 40)
-        plus_rect = pygame.Rect(cx + 76, 155, 44, 40)
+        minus_rect = pygame.Rect(cx - 120, 128, 44, 40)
+        plus_rect = pygame.Rect(cx + 76, 128, 44, 40)
+        seed_field_rect = pygame.Rect(cx - 160, 198, 320, 44)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return None
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    return None
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    return SessionConfig(preset=selected_preset, num_rounds=num_rounds)
+                    if seed_editing:
+                        seed_editing = False
+                    else:
+                        return None
+                elif seed_editing:
+                    if event.key == pygame.K_BACKSPACE:
+                        seed_text = seed_text[:-1]
+                    elif event.key == pygame.K_RETURN:
+                        seed_editing = False
+                    elif event.unicode.isdigit() and len(seed_text) < MAX_SEED_DIGITS:
+                        seed_text += event.unicode
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    return finish_config()
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 pos = event.pos
+                seed_editing = seed_field_rect.collidepoint(pos)
                 for preset_id, rect in preset_rects.items():
                     if rect.collidepoint(pos):
                         selected_preset = preset_id
+                        seed_editing = False
                 if minus_rect.collidepoint(pos):
                     num_rounds = max(MIN_ROUNDS, num_rounds - 1)
+                    seed_editing = False
                 if plus_rect.collidepoint(pos):
                     num_rounds = min(MAX_ROUNDS, num_rounds + 1)
+                    seed_editing = False
                 if start_rect.collidepoint(pos):
-                    return SessionConfig(preset=selected_preset, num_rounds=num_rounds)
+                    return finish_config()
 
         screen.fill(MENU_BG)
-        _blit_centered(screen, title_font, "Pathwise", MENU_TEXT, (cx, 60))
+        _blit_centered(screen, title_font, "Pathwise", MENU_TEXT, (cx, 52))
         _blit_centered(
-            screen, body_font, "Configure your session, then start", MENU_MUTED, (cx, 100)
+            screen, body_font, "Configure your session, then start", MENU_MUTED, (cx, 92)
         )
-        _blit_centered(screen, small_font, "Number of rounds", MENU_MUTED, (cx, 135))
+        _blit_centered(screen, small_font, "Number of rounds", MENU_MUTED, (cx, 108))
         _draw_button(screen, minus_rect, "-", body_font)
-        _blit_centered(screen, body_font, str(num_rounds), MENU_TEXT, (cx, 175))
+        _blit_centered(screen, body_font, str(num_rounds), MENU_TEXT, (cx, 148))
         _draw_button(screen, plus_rect, "+", body_font)
+        if num_rounds > 1:
+            _blit_centered(
+                screen,
+                small_font,
+                "One seed — each round uses a derived map from that seed",
+                MENU_MUTED,
+                (cx, 172),
+            )
+        _blit_centered(screen, small_font, "Map seed (optional)", MENU_MUTED, (cx, 188))
+        field_border = MENU_ACCENT if seed_editing else MENU_BORDER
+        pygame.draw.rect(screen, MENU_CARD, seed_field_rect, border_radius=10)
+        pygame.draw.rect(screen, field_border, seed_field_rect, width=2, border_radius=10)
+        if seed_text:
+            seed_label = seed_text + ("|" if seed_editing else "")
+        else:
+            seed_label = "random" + ("|" if seed_editing else "")
+        seed_color = MENU_TEXT if seed_text else MENU_MUTED
+        _blit_centered(screen, body_font, seed_label, seed_color, seed_field_rect.center)
         _blit_centered(
-            screen, small_font, "Difficulty increases each round", MENU_MUTED, (cx, 200)
+            screen,
+            small_font,
+            "Digits only · empty = random seed (shown after game)",
+            MENU_MUTED,
+            (cx, 258),
         )
-        _blit_centered(screen, small_font, "Starting difficulty", MENU_MUTED, (cx, 235))
+        _blit_centered(screen, small_font, "Starting difficulty", MENU_MUTED, (cx, 282))
         for preset_id, label, desc in DIFFICULTY_PRESETS:
             rect = preset_rects[preset_id]
             _draw_button(screen, rect, label, body_font, selected=(preset_id == selected_preset))
@@ -108,7 +166,7 @@ def run_pre_game_menu(screen, clock, title_font, body_font, small_font) -> Sessi
             screen.blit(d, d.get_rect(midleft=(rect.right + 12, rect.centery)))
 
         _draw_button(screen, start_rect, "Start game", body_font, primary=True)
-        _blit_centered(screen, small_font, "Enter or Space to start · Esc to quit", MENU_MUTED, (cx, 520))
+        _blit_centered(screen, small_font, "Enter or Space to start · Esc to quit", MENU_MUTED, (cx, 565))
 
         pygame.display.flip()
         clock.tick(60)
@@ -127,9 +185,16 @@ def run_round_intro(screen, clock, title_font, body_font, round_index: int, tota
         screen.fill(MENU_BG)
         cx = _width_center(screen)
         _blit_centered(
-            screen, title_font, f"Round {round_index} of {total_rounds}", MENU_TEXT, (cx, 200)
+            screen, title_font, f"Round {round_index} of {total_rounds}", MENU_TEXT, (cx, 175)
         )
-        _blit_centered(screen, body_font, "Go!", MENU_ACCENT, (cx, 280))
+        hint = (
+            f"~{profile.min_crossings}-{profile.max_crossings} roads · "
+            f"{profile.target_play_time_s}s · denser traffic"
+        )
+        if round_index > 1:
+            hint += f" (+{int(profile.round_escalation * 100)}% vs round 1)"
+        _blit_centered(screen, body_font, hint, MENU_MUTED, (cx, 235))
+        _blit_centered(screen, body_font, "Go!", MENU_ACCENT, (cx, 295))
         pygame.display.flip()
         clock.tick(60)
     return True
@@ -166,7 +231,15 @@ def run_between_rounds(screen, clock, title_font, body_font, round_index: int, t
         clock.tick(60)
 
 
-def run_session_complete(screen, clock, title_font, body_font, outcomes: list[str], total_rounds: int):
+def run_session_complete(
+    screen,
+    clock,
+    title_font,
+    body_font,
+    outcomes: list[str],
+    total_rounds: int,
+    session_seed: int | None = None,
+):
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -180,13 +253,17 @@ def run_session_complete(screen, clock, title_font, body_font, outcomes: list[st
             screen, title_font, f"All {total_rounds} rounds complete", MENU_TEXT, (cx, 180)
         )
         summary = " · ".join(f"R{i + 1}: {o}" for i, o in enumerate(outcomes))
-        _blit_centered(screen, body_font, summary, MENU_MUTED, (cx, 240))
+        _blit_centered(screen, body_font, summary, MENU_MUTED, (cx, 230))
+        if session_seed is not None:
+            _blit_centered(
+                screen, body_font, f"Session seed: {session_seed}", MENU_TEXT, (cx, 270)
+            )
         _blit_centered(
             screen,
             body_font,
             "Open logs_dashboard.html for per-round replays",
             MENU_ACCENT,
-            (cx, 300),
+            (cx, 310),
         )
         pygame.display.flip()
         clock.tick(60)

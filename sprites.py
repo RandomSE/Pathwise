@@ -13,7 +13,9 @@ PLAYER_FILL = (38, 166, 154)
 PLAYER_OUTLINE = (255, 255, 255)
 
 ARCHETYPE_COUNT = 100
-WHITE_ARCHETYPE_COUNT = 80
+WHITE_ARCHETYPE_COUNT = 50
+TURN_SIGNAL_COLOR = (255, 214, 64)
+TURN_SIGNAL_DIM = (180, 140, 40)
 
 WHITE_STYLES = ("sedan", "sport", "compact", "suv", "wagon", "pickup", "van", "hatch")
 WHITE_TONES = (
@@ -157,8 +159,11 @@ def _build_car_archetypes(count=ARCHETYPE_COUNT, white_count=WHITE_ARCHETYPE_COU
 CAR_ARCHETYPES = _build_car_archetypes()
 
 
-def pick_random_archetype_index():
-    return random.randrange(len(CAR_ARCHETYPES))
+def pick_random_archetype_index(rng=None):
+    r = rng if rng is not None else random
+    if r.random() < 0.5:
+        return r.randrange(WHITE_ARCHETYPE_COUNT)
+    return WHITE_ARCHETYPE_COUNT + r.randrange(ARCHETYPE_COUNT - WHITE_ARCHETYPE_COUNT)
 
 
 def get_archetype(index):
@@ -246,6 +251,7 @@ def _draw_car_body(surf, width, height, vertical, archetype):
         _wheel(surf, width - 7, height - 3, 4, 2)
         pygame.draw.circle(surf, HEADLIGHT, (width - 5, height // 2), 2)
         pygame.draw.circle(surf, TAILLIGHT, (5, height // 2), 2)
+        _draw_turn_signal_dots(surf, width, height, vertical=False)
     else:
         body_rect = (5, 1, width - 10, height - 2)
         pygame.draw.rect(surf, body, body_rect, border_radius=corner)
@@ -272,6 +278,52 @@ def _draw_car_body(surf, width, height, vertical, archetype):
         _wheel(surf, width - 3, height - 7, 2, 4)
         pygame.draw.circle(surf, HEADLIGHT, (width // 2, 5), 2)
         pygame.draw.circle(surf, TAILLIGHT, (width // 2, height - 5), 2)
+        _draw_turn_signal_dots(surf, width, height, vertical=True)
+
+
+def _signal_corner(width, height, vertical: bool, direction: int, side: int) -> tuple[int, int]:
+    """side: -1 left, 1 right in driver's frame (before direction flip)."""
+    if not vertical:
+        if direction > 0:
+            return (width // 2, 4 if side < 0 else height - 5)
+        return (width // 2, height - 5 if side < 0 else 4)
+    if direction > 0:
+        return (4 if side < 0 else width - 5, height // 2)
+    return (width - 5 if side < 0 else 4, height // 2)
+
+
+def _draw_turn_signal_dots(surf, width, height, vertical: bool):
+    """Static dim markers; active blink drawn in draw_turn_signal overlay."""
+    for side in (-1, 1):
+        pos = _signal_corner(width, height, vertical, 1, side)
+        pygame.draw.circle(surf, TURN_SIGNAL_DIM, pos, 2)
+
+
+def draw_turn_signal(
+    surface,
+    car_rect,
+    vertical: bool,
+    direction: int,
+    turn_side: int,
+    blink_on: bool,
+    camera_offset,
+):
+    """Amber indicator on the side the car will turn (left-hand traffic)."""
+    if turn_side == 0:
+        return
+    w = CAR_HEIGHT if vertical else CAR_WIDTH
+    h = CAR_WIDTH if vertical else CAR_HEIGHT
+    pos = _signal_corner(w, h, vertical, 1, turn_side)
+    lx, ly = pos
+    if not vertical and direction < 0:
+        lx = w - lx
+    elif vertical and direction < 0:
+        ly = h - ly
+    color = TURN_SIGNAL_COLOR if blink_on else TURN_SIGNAL_DIM
+    cx = car_rect.x - camera_offset[0] + lx
+    cy = car_rect.y - camera_offset[1] + ly
+    pygame.draw.circle(surface, color, (cx, cy), 3)
+    pygame.draw.circle(surface, (255, 240, 180), (cx, cy), 1)
 
 
 def make_car_surface(vertical=False, direction=1, archetype_index=0):
@@ -289,6 +341,47 @@ def make_car_surface(vertical=False, direction=1, archetype_index=0):
     elif vertical and direction < 0:
         surf = pygame.transform.flip(surf, False, True)
     return surf
+
+
+def player_body_hitbox(world_rect: pygame.Rect) -> pygame.Rect:
+    """
+    Tight hitbox matching head + torso in make_pedestrian_surface (not the full square).
+    """
+    w, h = world_rect.width, world_rect.height
+    if w <= 0 or h <= 0:
+        return world_rect.copy()
+    cx = world_rect.left + w // 2
+    head_r = max(2, int(w * 0.24))
+    shoulder_w = max(4, int(w * 0.62))
+    body_h = max(4, int(h * 0.42))
+    head_cy = world_rect.top + int(h * 0.36)
+    body_cy = world_rect.top + int(h * 0.62)
+
+    head = pygame.Rect(0, 0, head_r * 2, head_r * 2)
+    head.center = (cx, head_cy)
+    body = pygame.Rect(0, 0, shoulder_w, body_h)
+    body.center = (cx, body_cy)
+    return head.union(body)
+
+
+def car_collision_rect(rect: pygame.Rect, vertical: bool) -> pygame.Rect:
+    """
+    Body shell aligned with _draw_car_body (horizontal: (1,5,w-2,h-10), vertical: (5,1,w-10,h-2)).
+    """
+    r = rect.copy()
+    if not vertical:
+        r.x += 1
+        r.y += 5
+        r.w -= 2
+        r.h -= 10
+    else:
+        r.x += 5
+        r.y += 1
+        r.w -= 10
+        r.h -= 2
+    r.width = max(1, r.width)
+    r.height = max(1, r.height)
+    return r
 
 
 def make_pedestrian_surface(size=PEDESTRIAN_SIZE):

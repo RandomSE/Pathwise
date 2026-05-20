@@ -19,15 +19,25 @@ from map_generation.difficulty import DifficultyProfile, adaptive_difficulty
 from map_generation.noise import fbm, simplex2
 from map_generation.pathfinding import Cell, astar_travel_time, bfs_solvable
 from map_generation.safety import expected_wait_for_safe_crossing, min_time_limit_for_route
+from map_visuals import generate_city_blocks, generate_map_decorations
 
 VERTICAL = commonUtils.VERTICAL
 HORIZONTAL = commonUtils.HORIZONTAL
 
 ORIGIN = 100
 STRIDE = ROAD_THICKNESS + ROAD_GAP
-MIN_ROAD_GAP = ROAD_THICKNESS + 24
-MAX_GENERATION_ATTEMPTS = 64
+MIN_ROAD_GAP = ROAD_THICKNESS + 36
+MIN_SEGMENT_LEN = ROAD_THICKNESS + 48
+MAX_GENERATION_ATTEMPTS = 128
 JITTER_MAX = 28
+
+
+def _effective_stride(difficulty: DifficultyProfile) -> float:
+    return STRIDE * difficulty.stride_scale
+
+
+def _effective_jitter(difficulty: DifficultyProfile) -> int:
+    return int(JITTER_MAX * min(1.35, 0.85 + difficulty.stride_scale * 0.25))
 
 
 def _spawn_clear(x: int, y: int, roads: list[Road], pad: int = 22) -> bool:
@@ -69,16 +79,78 @@ def _noise_partition(total: int, difficulty: DifficultyProfile, rng: random.Rand
     if total >= 4 and (n_h < 2 or n_v < 2):
         n_h = max(2, min(total - 2, n_h + 1))
         n_v = total - n_h
+    if total >= 8:
+        n_h = max(3, min(total - 3, n_h))
+        n_v = total - n_h
     return n_h, n_v
 
 
-def _jittered_axis_positions(count: int, seed: int, axis: str) -> list[int]:
+def _segment_span(
+    index: int,
+    count: int,
+    inner_edges: list[int],
+    world_start: int,
+    world_end: int,
+) -> tuple[int, int]:
+    """
+    Span between parallel roads, extended through each intersection strip so
+    perpendicular segments still colliderect (required for connectivity checks).
+    """
+    if count == 0:
+        return world_start, world_end
+    if index == 0:
+        return world_start, inner_edges[0] + ROAD_THICKNESS
+    if index == count:
+        return inner_edges[-1], world_end
+    return inner_edges[index - 1], inner_edges[index] + ROAD_THICKNESS
+
+
+def _build_segmented_roads(
+    h_ys: list[int],
+    v_xs: list[int],
+    world_left: int,
+    world_top: int,
+    world_right: int,
+    world_bottom: int,
+) -> list[Road]:
+    """
+    Roads only between intersections (city blocks in between), not infinite cross-city spans.
+    """
+    roads: list[Road] = []
+    for y in h_ys:
+        for col in range(len(v_xs) + 1):
+            left, right = _segment_span(col, len(v_xs), v_xs, world_left, world_right)
+            width = right - left
+            if width >= MIN_SEGMENT_LEN:
+                roads.append(
+                    Road(make_rectangle(left, y, width, ROAD_THICKNESS), VERTICAL)
+                )
+    for x in v_xs:
+        for row in range(len(h_ys) + 1):
+            top, bottom = _segment_span(row, len(h_ys), h_ys, world_top, world_bottom)
+            height = bottom - top
+            if height >= MIN_SEGMENT_LEN:
+                roads.append(
+                    Road(make_rectangle(x, top, ROAD_THICKNESS, height), HORIZONTAL)
+                )
+    return roads
+
+
+def _jittered_axis_positions(
+    count: int,
+    seed: int,
+    axis: str,
+    stride: float,
+    min_gap: int,
+    jitter_max: int,
+) -> list[int]:
     positions = []
+    stride_i = int(round(stride))
     for i in range(count):
-        jitter = int((simplex2(i * 0.9 + (1 if axis == "x" else 0), seed * 0.03, seed) - 0.5) * 2 * JITTER_MAX)
-        base = ORIGIN + (i + 1) * STRIDE + jitter
-        if positions and base <= positions[-1] + MIN_ROAD_GAP:
-            base = positions[-1] + MIN_ROAD_GAP
+        jitter = int((simplex2(i * 0.9 + (1 if axis == "x" else 0), seed * 0.03, seed) - 0.5) * 2 * jitter_max)
+        base = ORIGIN + (i + 1) * stride_i + jitter
+        if positions and base <= positions[-1] + min_gap:
+            base = positions[-1] + min_gap
         positions.append(base)
     return positions
 
@@ -90,6 +162,21 @@ def _traffic_weights(roads: list[Road], seed: int, difficulty: DifficultyProfile
         w = 0.35 + n * 0.9 + difficulty.traffic_density * 0.35
         weights.append(round(w, 3))
     return weights
+
+
+def _compute_time_limit(
+    difficulty: DifficultyProfile,
+    travel_s: float,
+    manhattan: int,
+    safe_limit: int,
+) -> int:
+    """Round timer from preset targets (~2 min easy, ~5 min hard); extend only if route needs it."""
+    target = difficulty.target_play_time_s
+    minimum_viable = int(travel_s * 1.45 + manhattan * 5)
+    if minimum_viable <= target:
+        return target
+    extended = max(minimum_viable, safe_limit)
+    return min(extended, int(target * 1.18))
 
 
 def generate_map_layout(
@@ -105,28 +192,33 @@ def generate_map_layout(
         difficulty = adaptive_difficulty(prior_session)
 
     target_crossings = rng.randint(difficulty.min_crossings, difficulty.max_crossings)
+    eff_stride = _effective_stride(difficulty)
+    min_gap = int(MIN_ROAD_GAP * difficulty.stride_scale)
+    jitter_max = _effective_jitter(difficulty)
 
     for attempt in range(MAX_GENERATION_ATTEMPTS):
         n_h, n_v = _noise_partition(target_crossings, difficulty, rng, seed + attempt)
-        h_ys = _jittered_axis_positions(n_h, seed + attempt * 3, "y")
-        v_xs = _jittered_axis_positions(n_v, seed + attempt * 5 + 1, "x")
+        h_ys = _jittered_axis_positions(n_h, seed + attempt * 3, "y", eff_stride, min_gap, jitter_max)
+        v_xs = _jittered_axis_positions(n_v, seed + attempt * 5 + 1, "x", eff_stride, min_gap, jitter_max)
 
-        if not road_positions_valid(h_ys, v_xs, MIN_ROAD_GAP):
+        if not road_positions_valid(h_ys, v_xs, min_gap):
             continue
 
         grid_extent = max(n_v, n_h) + 1
-        world_left = ORIGIN - 60
-        world_top = ORIGIN - 60
-        world_right = ORIGIN + grid_extent * STRIDE + 220
-        world_bottom = ORIGIN + grid_extent * STRIDE + 220
+        margin = int(60 + 40 * difficulty.stride_scale)
+        pad = int(180 + 80 * difficulty.stride_scale)
+        world_left = ORIGIN - margin
+        world_top = ORIGIN - margin
+        world_right = ORIGIN + int(grid_extent * eff_stride) + pad
+        world_bottom = ORIGIN + int(grid_extent * eff_stride) + pad
         span_w = world_right - world_left
         span_h = world_bottom - world_top
 
-        roads: list[Road] = []
-        for y in h_ys:
-            roads.append(Road(make_rectangle(world_left, y, span_w, ROAD_THICKNESS), VERTICAL))
-        for x in v_xs:
-            roads.append(Road(make_rectangle(x, world_top, ROAD_THICKNESS, span_h), HORIZONTAL))
+        roads = _build_segmented_roads(
+            h_ys, v_xs, world_left, world_top, world_right, world_bottom
+        )
+        if not roads:
+            continue
 
         if not roads_fully_connected(roads):
             continue
@@ -150,7 +242,9 @@ def generate_map_layout(
             continue
 
         crossing_wait = expected_wait_for_safe_crossing(difficulty.light_cycle_scale)
-        travel_s = astar_travel_time(start_cell, goal_cell, n_v, n_h, crossing_wait)
+        travel_s = astar_travel_time(
+            start_cell, goal_cell, n_v, n_h, crossing_wait, eff_stride
+        )
         if travel_s is None:
             continue
 
@@ -159,10 +253,9 @@ def generate_map_layout(
             travel_s,
             manhattan,
             difficulty.light_cycle_scale,
-            safety_margin=1.08,
+            safety_margin=1.12,
         )
-        baseline = 18 + target_crossings * 4
-        time_limit = max(baseline, min(safe_limit, baseline + 14))
+        time_limit = _compute_time_limit(difficulty, travel_s, manhattan, safe_limit)
 
         sx = _block_center_x(start_col, v_xs, ORIGIN, world_right)
         sy = _block_center_y(start_row, h_ys, ORIGIN, world_bottom)
@@ -176,6 +269,10 @@ def generate_map_layout(
             continue
 
         analytics_zones = build_analytics_zones(roads, h_ys, v_xs, (sx, sy), goal_rect)
+        city_blocks = generate_city_blocks(
+            h_ys, v_xs, world_left, world_top, world_right, world_bottom, seed + attempt
+        )
+        decorations = generate_map_decorations(city_blocks, seed + attempt)
 
         return {
             "seed": seed,
@@ -189,10 +286,13 @@ def generate_map_layout(
             "difficulty": difficulty.to_dict(),
             "analytics_zones": analytics_zones,
             "traffic_weights": traffic_weights,
+            "city_blocks": city_blocks,
+            "decorations": decorations,
             "path_estimate_s": round(travel_s, 2),
             "generation": {
                 "attempt": attempt,
-                "noise_jitter": JITTER_MAX,
+                "noise_jitter": jitter_max,
+                "stride_px": round(eff_stride, 1),
                 "solver": "astar+bfs",
                 "safe_crossing_model": "light_cycle",
             },
@@ -220,6 +320,9 @@ class ProceduralMap(MapBase):
         self.path_estimate_s = layout["path_estimate_s"]
         self.light_cycle_scale = layout["difficulty"]["light_cycle_scale"]
         self.generation_meta = layout["generation"]
+        self.city_blocks = layout.get("city_blocks", [])
+        self.decorations = layout.get("decorations", [])
+        self.world_bounds_hint = None
 
         super().__init__(layout["roads"], layout["start_pos"], layout["goal_rect"])
 

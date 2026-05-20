@@ -6,15 +6,25 @@ import heapq
 import math
 from dataclasses import dataclass
 
-PED_SPEED = 1.0
-WALK_CELL_COST_S = 0.55
-CROSS_ROAD_COST_S = 2.2
+# Pedestrian ~60 px/s at PEDESTRIAN_SPEED=1, 60 FPS
+PX_PER_SECOND = 60.0
+CROSSING_BASE_S = 1.8
 
 
 @dataclass(frozen=True)
 class Cell:
     col: int
     row: int
+
+
+def walk_cell_cost_s(stride_px: float) -> float:
+    """Seconds to walk one block along a street segment."""
+    return max(1.0, stride_px / PX_PER_SECOND * 0.92)
+
+
+def cross_road_cost_s(crossing_wait_s: float) -> float:
+    """Extra time to cross one road (lights + crossing)."""
+    return CROSSING_BASE_S + crossing_wait_s * 0.5
 
 
 def _neighbors(cell: Cell, cols: int, rows: int) -> list[Cell]:
@@ -47,16 +57,18 @@ def bfs_solvable(start: Cell, goal: Cell, cols: int, rows: int) -> bool:
     return False
 
 
-def _heuristic(a: Cell, b: Cell) -> float:
-    return (abs(a.col - b.col) + abs(a.row - b.row)) * WALK_CELL_COST_S
+def _heuristic(a: Cell, b: Cell, stride_px: float) -> float:
+    walk = walk_cell_cost_s(stride_px)
+    return (abs(a.col - b.col) + abs(a.row - b.row)) * walk
 
 
-def _edge_cost(a: Cell, b: Cell, crossing_wait_s: float) -> float:
-    cost = WALK_CELL_COST_S
+def _edge_cost(a: Cell, b: Cell, crossing_wait_s: float, stride_px: float) -> float:
+    cost = walk_cell_cost_s(stride_px)
+    cross = cross_road_cost_s(crossing_wait_s)
     if a.col != b.col:
-        cost += CROSS_ROAD_COST_S + crossing_wait_s * 0.55
+        cost += cross
     if a.row != b.row:
-        cost += CROSS_ROAD_COST_S + crossing_wait_s * 0.55
+        cost += cross
     return cost
 
 
@@ -66,6 +78,7 @@ def astar_travel_time(
     cols: int,
     rows: int,
     crossing_wait_s: float,
+    stride_px: float,
 ) -> float | None:
     """Estimated seconds along shortest time-aware path (None if unreachable)."""
     if not bfs_solvable(start, goal, cols, rows):
@@ -84,10 +97,10 @@ def astar_travel_time(
             return g
 
         for nxt in _neighbors(current, cols, rows):
-            tentative = g + _edge_cost(current, nxt, crossing_wait_s)
+            tentative = g + _edge_cost(current, nxt, crossing_wait_s, stride_px)
             if tentative < g_score.get(nxt, math.inf):
                 g_score[nxt] = tentative
-                f = tentative + _heuristic(nxt, goal)
+                f = tentative + _heuristic(nxt, goal, stride_px)
                 tie += 1
                 heapq.heappush(open_heap, (f, tie, tentative, nxt))
 
