@@ -963,11 +963,11 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       const current = frames[currentFrameIndex];
       const next = frames[currentFrameIndex + 1];
-      // Wall-clock between recorded frames (decision extras have small t gaps — do not stretch them).
       let deltaS = REPLAY_STEP_S;
-      if (current.t != null && next.t != null) {{
-        const dt = next.t - current.t;
-        deltaS = dt > 0 ? dt : REPLAY_STEP_S;
+      if (current.seq != null && next.seq != null) {{
+        deltaS = Math.max(1, next.seq - current.seq) * REPLAY_STEP_S;
+      }} else if (current.t != null && next.t != null) {{
+        deltaS = Math.max(REPLAY_STEP_S, next.t - current.t);
       }}
       const deltaMs = Math.max(16, (deltaS * 1000) / playbackRate);
       playTimeoutId = setTimeout(() => {{

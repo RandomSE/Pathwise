@@ -16,7 +16,8 @@ def lane_center_xy(road, direction: int) -> tuple[int, int]:
         cy = road.rect.centery - half if d > 0 else road.rect.centery + half
         return int(road.rect.centerx), int(cy)
     half = max(10, int(road.rect.width * 0.22))
-    cx = road.rect.centerx - half if d > 0 else road.rect.centerx + half
+    # +y (down): keep-left is east (+x); -y (up): keep-left is west (-x).
+    cx = road.rect.centerx + half if d > 0 else road.rect.centerx - half
     return int(cx), int(road.rect.centery)
 
 
