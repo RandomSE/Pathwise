@@ -165,7 +165,7 @@ class DecisionLogger:
             if not rect or len(rect) < 4:
                 continue
             x, y, w, h = rect
-            inside = x <= px < x + w and y <= py < y + h
+            inside = x <= px <= x + w and y <= py <= y + h
             zone_id = zone.get("id", "")
             if inside and zone_id not in self._active_zone_ids:
                 self._active_zone_ids.add(zone_id)

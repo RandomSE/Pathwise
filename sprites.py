@@ -1,5 +1,6 @@
 """Top-down car and pedestrian sprites, car appearance archetypes, and honk visuals."""
 
+import math
 import random
 
 import pygame
@@ -299,6 +300,92 @@ def _draw_turn_signal_dots(surf, width, height, vertical: bool):
         pygame.draw.circle(surf, TURN_SIGNAL_DIM, pos, 2)
 
 
+def _left_of_travel_vector(vertical: bool, direction: int) -> tuple[int, int]:
+    """Screen-space unit-ish vector to the left of travel (y down)."""
+    direction = 1 if direction >= 0 else -1
+    if not vertical:
+        fx, fy = direction, 0
+    else:
+        fx, fy = 0, direction
+    return fy, -fx
+
+
+def _corner_side_for_screen_vector(
+    vertical: bool, direction: int, vx: int, vy: int
+) -> int:
+    """Pick sprite corner (-1/+1) that points most toward screen vector (vx, vy)."""
+    direction = 1 if direction >= 0 else -1
+    bw, bh = _body_dimensions(vertical)
+    best_side = -1
+    best_dot = -1e9
+    for side in (-1, 1):
+        lx, ly = _signal_corner(bw, bh, vertical, direction, side)
+        dot = (lx - bw * 0.5) * vx + (ly - bh * 0.5) * vy
+        if dot > best_dot:
+            best_dot = dot
+            best_side = side
+    return best_side
+
+
+def turn_signal_corner_side(vertical: bool, direction: int, turn_side: int) -> int:
+    """Blinker on the body side that faces the turn (top-down), not driver-side LH."""
+    if turn_side == 0:
+        return 0
+    lvx, lvy = _left_of_travel_vector(vertical, direction)
+    if turn_side > 0:
+        lvx, lvy = -lvx, -lvy
+    return _corner_side_for_screen_vector(vertical, direction, lvx, lvy)
+
+
+def _body_dimensions(vertical: bool) -> tuple[int, int]:
+    if vertical:
+        return CAR_HEIGHT, CAR_WIDTH
+    return CAR_WIDTH, CAR_HEIGHT
+
+
+def _turn_signal_local_offset(
+    vertical: bool, direction: int, corner_side: int
+) -> tuple[float, float]:
+    """Offset from body center to blinker on the unrotated body (east-facing base)."""
+    bw, bh = _body_dimensions(vertical)
+    lx, ly = _signal_corner(bw, bh, vertical, direction, corner_side)
+    return lx - bw * 0.5, ly - bh * 0.5
+
+
+def _rotate_offset(ox: float, oy: float, angle_deg: float) -> tuple[float, float]:
+    """Match pygame.transform.rotozoom (CCW, screen y down)."""
+    rad = math.radians(angle_deg)
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+    return ox * cos_r - oy * sin_r, ox * sin_r + oy * cos_r
+
+
+def turn_signal_screen_pos(
+    car_rect: pygame.Rect,
+    vertical: bool,
+    direction: int,
+    turn_side: int,
+    camera_offset: tuple[int, int],
+    angle_deg: float | None = None,
+) -> tuple[int, int] | None:
+    """World blinker position; pass angle_deg while the car sprite is rotated in a square box."""
+    corner_side = turn_signal_corner_side(vertical, direction, turn_side)
+    if corner_side == 0:
+        return None
+    ox, oy = _turn_signal_local_offset(vertical, direction, corner_side)
+    if angle_deg is not None:
+        ox, oy = _rotate_offset(ox, oy, angle_deg)
+        sx = car_rect.centerx + ox - camera_offset[0]
+        sy = car_rect.centery + oy - camera_offset[1]
+        return int(round(sx)), int(round(sy))
+    bw, bh = _body_dimensions(vertical)
+    lx, ly = _signal_corner(bw, bh, vertical, direction, corner_side)
+    return (
+        car_rect.x + lx - camera_offset[0],
+        car_rect.y + ly - camera_offset[1],
+    )
+
+
 def draw_turn_signal(
     surface,
     car_rect,
@@ -307,26 +394,67 @@ def draw_turn_signal(
     turn_side: int,
     blink_on: bool,
     camera_offset,
+    angle_deg: float | None = None,
 ):
-    """Amber indicator on the side the car will turn (left-hand traffic)."""
-    if turn_side == 0:
+    """Amber indicator on the driver's side for the intended turn (left-hand traffic)."""
+    pos = turn_signal_screen_pos(
+        car_rect, vertical, direction, turn_side, camera_offset, angle_deg
+    )
+    if pos is None:
         return
-    w = CAR_HEIGHT if vertical else CAR_WIDTH
-    h = CAR_WIDTH if vertical else CAR_HEIGHT
-    pos = _signal_corner(w, h, vertical, 1, turn_side)
-    lx, ly = pos
-    if not vertical and direction < 0:
-        lx = w - lx
-    elif vertical and direction < 0:
-        ly = h - ly
     color = TURN_SIGNAL_COLOR if blink_on else TURN_SIGNAL_DIM
-    cx = car_rect.x - camera_offset[0] + lx
-    cy = car_rect.y - camera_offset[1] + ly
-    pygame.draw.circle(surface, color, (cx, cy), 3)
-    pygame.draw.circle(surface, (255, 240, 180), (cx, cy), 1)
+    pygame.draw.circle(surface, color, pos, 3)
+    pygame.draw.circle(surface, (255, 240, 180), pos, 1)
+
+
+_car_surface_cache: dict[tuple[int, int, int], pygame.Surface] = {}
+_car_angle_surface_cache: dict[tuple[int, int], pygame.Surface] = {}
+_car_box_surface_cache: dict[tuple[int, int, int, int], pygame.Surface] = {}
+
+
+def car_travel_angle_deg(vertical: bool, direction: int) -> float:
+    """Degrees for rotozoom from the east-facing horizontal base sprite."""
+    direction = 1 if direction >= 0 else -1
+    if not vertical:
+        return 0.0 if direction > 0 else 180.0
+    return -90.0 if direction > 0 else 90.0
+
+
+def make_car_surface_at_angle(archetype_index: int, angle_deg: float) -> pygame.Surface:
+    """Rotated car on a square canvas (legacy); prefer make_car_rotated_in_box for turns."""
+    side = max(CAR_WIDTH, CAR_HEIGHT)
+    return make_car_rotated_in_box(archetype_index, angle_deg, side, side)
+
+
+def make_car_rotated_in_box(
+    archetype_index: int, angle_deg: float, box_w: int, box_h: int
+) -> pygame.Surface:
+    angle_q = int(round(angle_deg / 2.0) * 2) % 360
+    ai = int(archetype_index) % ARCHETYPE_COUNT
+    key = (ai, angle_q, int(box_w), int(box_h))
+    cached = _car_box_surface_cache.get(key)
+    if cached is not None:
+        return cached
+    base = make_car_surface(vertical=False, direction=1, archetype_index=ai)
+    if angle_q == 0:
+        rotated = base
+    else:
+        # pygame rotates CCW; angles match car_travel_angle_deg (east=0, south=-90, …).
+        rotated = pygame.transform.rotozoom(base, angle_q, 1.0)
+    canvas = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+    canvas.blit(rotated, rotated.get_rect(center=(box_w // 2, box_h // 2)))
+    _car_box_surface_cache[key] = canvas
+    return canvas
 
 
 def make_car_surface(vertical=False, direction=1, archetype_index=0):
+    d_sign = 1 if direction >= 0 else -1
+    v_key = 1 if vertical else 0
+    key = (v_key, d_sign, int(archetype_index) % ARCHETYPE_COUNT)
+    cached = _car_surface_cache.get(key)
+    if cached is not None:
+        return cached
+
     if vertical:
         width, height = CAR_HEIGHT, CAR_WIDTH
     else:
@@ -340,6 +468,7 @@ def make_car_surface(vertical=False, direction=1, archetype_index=0):
         surf = pygame.transform.flip(surf, True, False)
     elif vertical and direction < 0:
         surf = pygame.transform.flip(surf, False, True)
+    _car_surface_cache[key] = surf
     return surf
 
 
@@ -379,6 +508,16 @@ def car_collision_rect(rect: pygame.Rect, vertical: bool) -> pygame.Rect:
         r.y += 1
         r.w -= 10
         r.h -= 2
+    r.width = max(1, r.width)
+    r.height = max(1, r.height)
+    return r
+
+
+def car_collision_rect_turn(rect: pygame.Rect) -> pygame.Rect:
+    """Axis-aligned shell while the car sprite is rotated mid-turn."""
+    r = rect.copy()
+    inset = max(2, min(r.width, r.height) // 8)
+    r.inflate(-inset * 2, -inset * 2)
     r.width = max(1, r.width)
     r.height = max(1, r.height)
     return r

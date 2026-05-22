@@ -70,6 +70,24 @@ def pick_turn_side(rng: random.Random, turn_chance: float = 0.38) -> int:
     return -1 if rng.random() < 0.5 else 1
 
 
+def turn_side_from_exit(
+    entry_vertical: bool,
+    entry_direction: int,
+    exit_vertical: bool,
+    exit_direction: int,
+) -> int:
+    """Left/right relative to entry travel for the chosen exit arm (not driver-side)."""
+    evx, evy = travel_vector(entry_vertical, entry_direction)
+    xvx, xvy = travel_vector(exit_vertical, exit_direction)
+    lvx, lvy = left_vector(entry_vertical, entry_direction)
+    dot = xvx * lvx + xvy * lvy
+    if dot > 0:
+        return -1
+    if dot < 0:
+        return 1
+    return 0
+
+
 def choose_exit(
     roads,
     zone,
@@ -97,13 +115,14 @@ def choose_exit(
                 best_score = score
                 best = (idx, d, vertical)
         return best
+    tvx, tvy = turn_vector(entry_vertical, entry_direction, turn_side)
     best = None
-    best_dist = 1e9
+    best_score = -1e9
     for idx, d, vertical in opts:
         lx, ly = lane_center_xy(roads[idx], d)
-        dist = math.hypot(lx - cx, ly - cy)
-        if dist < best_dist:
-            best_dist = dist
+        score = (lx - cx) * tvx + (ly - cy) * tvy
+        if score > best_score:
+            best_score = score
             best = (idx, d, vertical)
     return best
 

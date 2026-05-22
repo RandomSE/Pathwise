@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import commonUtils
 import sprites
 from map_generation.difficulty import DifficultyProfile
-from map_generation.lane_geometry import lateral_axis_value
+from map_generation.lane_geometry import lane_center_xy, lateral_axis_value
 
 CAR_WIDTH = commonUtils.CAR_WIDTH
 CAR_HEIGHT = commonUtils.CAR_HEIGHT
@@ -20,17 +20,22 @@ MIN_ALONG_GAP = 22
 FILL_FRACTION = 0.58
 # Global 2x traffic vs original schedule (hard preset adds +50% via difficulty profile)
 TRAFFIC_SCHEDULE_MULT = 2.0
-# Round-start fill: edge queue, staggered in time
-INITIAL_FILL_FRACTION = 0.42
-INITIAL_MAX_PER_DIR = 1
-INITIAL_STAGGER_FRAMES = 6
-INITIAL_WARMUP_FRAMES = 90
+# Round-start surge (phase "opening"): deterministic edge queue, staggered in time
+INITIAL_FILL_FRACTION = 0.52
+INITIAL_MAX_PER_DIR = 3
+INITIAL_STAGGER_FRAMES = 3
+OPENING_WARMUP_FRAMES = 120
+MAX_LANE_ACTIVE_OPENING = 6
 EDGE_CLEARANCE = 20
 EDGE_QUEUE_SPACING = CAR_WIDTH + MIN_ALONG_GAP + 14
 MAX_LANE_ACTIVE = 4
 INTERSECTION_SPAWN_PAD = 28
 MIN_CLEAR_GAP_FRAC = 0.10
 RECT_COLLIDE_PAD = 8
+
+
+PHASE_OPENING = "opening"
+PHASE_ONGOING = "ongoing"
 
 
 @dataclass(frozen=True)
@@ -41,15 +46,18 @@ class TrafficSpawn:
     direction: int
     archetype_index: int
     event_id: int
+    phase: str = PHASE_ONGOING
 
 
-def _traffic_rng(map_seed: int, profile: DifficultyProfile) -> random.Random:
+def _traffic_rng(map_seed: int, profile: DifficultyProfile, stream: int = 0) -> random.Random:
+    """Separate streams keep opening vs ongoing RNG independent but seed-stable."""
     key = (
         int(map_seed)
         ^ (int(profile.spawn_rate_mult * 10000) << 7)
         ^ (int(profile.traffic_density * 10000) << 15)
         ^ (int(profile.level * 1_000_000) << 3)
         ^ (int(profile.round_escalation * 100_000))
+        ^ (int(stream) * 0x9E37_79B9)
         ^ 0x7A4B_1C30
     ) & 0xFFFFFFFF
     return random.Random(key)
@@ -137,8 +145,48 @@ def count_lane_cars(cars, road, direction: int) -> int:
     )
 
 
-def lane_spawn_allowed(cars, road, direction: int) -> bool:
-    return count_lane_cars(cars, road, direction) < MAX_LANE_ACTIVE
+def lane_spawn_allowed(cars, road, direction: int, phase: str = PHASE_ONGOING) -> bool:
+    cap = MAX_LANE_ACTIVE_OPENING if phase == PHASE_OPENING else MAX_LANE_ACTIVE
+    return count_lane_cars(cars, road, direction) < cap
+
+
+def edge_spawn_lane_allowed(
+    cars,
+    road,
+    direction: int,
+    world_rect,
+    max_queue: int = 2,
+) -> bool:
+    """Ongoing edge spawns: only limit cars queued near the map entry, not whole-lane count."""
+    if world_rect is None:
+        return lane_spawn_allowed(cars, road, direction, PHASE_ONGOING)
+    direction = 1 if direction >= 0 else -1
+    vertical = road.direction == "horizontal"
+    tcx, tcy = lane_center_xy(road, direction)
+    depth = 340
+    lateral = max(road.rect.width, road.rect.height) // 2 + 48
+    queued = 0
+    for car in cars:
+        if car.vertical != vertical or car.direction != direction:
+            continue
+        if vertical:
+            if abs(car.rect.centerx - tcx) > lateral:
+                continue
+            if direction > 0:
+                if car.rect.bottom > world_rect.top + depth:
+                    continue
+            elif car.rect.top < world_rect.bottom - depth:
+                continue
+        else:
+            if abs(car.rect.centery - tcy) > lateral:
+                continue
+            if direction > 0:
+                if car.rect.right > world_rect.left + depth:
+                    continue
+            elif car.rect.left < world_rect.right - depth:
+                continue
+        queued += 1
+    return queued < max_queue
 
 
 def _largest_clear_gap(
@@ -179,15 +227,48 @@ def _approach_pose_from_frac(
     return x, y, d, vertical
 
 
+def spawn_poses_from_world_edge(
+    road,
+    direction: int,
+    world_rect,
+    queue_slots: int = 6,
+) -> list[tuple[int, int, int, bool]]:
+    """Ongoing traffic: enter from outside the map boundary, drive inward."""
+    direction = 1 if direction >= 0 else -1
+    vertical = road.direction == "horizontal"
+    tcx, tcy = lane_center_xy(road, direction)
+    poses: list[tuple[int, int, int, bool]] = []
+    for k in range(queue_slots):
+        q = int(k * EDGE_QUEUE_SPACING)
+        if not vertical:
+            y = tcy
+            if direction > 0:
+                x = world_rect.left - CAR_WIDTH - EDGE_CLEARANCE - q
+            else:
+                x = world_rect.right + EDGE_CLEARANCE + q
+        else:
+            x = tcx
+            if direction > 0:
+                y = world_rect.top - CAR_HEIGHT - EDGE_CLEARANCE - q
+            else:
+                y = world_rect.bottom + EDGE_CLEARANCE + q
+        x, y = _clamp_lateral_on_road(road, x, y)
+        poses.append((x, y, direction, vertical))
+    return poses
+
+
 def spawn_poses_for_event(
     road,
     event: TrafficSpawn,
     intersection_rects: list[tuple[int, int, int, int]] | None = None,
+    world_rect=None,
 ) -> list[tuple[int, int, int, bool]]:
     """
-    Spawn on the open stretch between intersections — not on edge-of-segment that is
-    immediately inside an intersection (common on short segmented roads).
+    Opening: spawn on open road inside the map.
+    Ongoing: spawn outside the map edge and drive inward.
     """
+    if event.phase == PHASE_ONGOING and world_rect is not None:
+        return spawn_poses_from_world_edge(road, event.direction, world_rect)
     intersection_rects = intersection_rects or []
     direction = 1 if event.direction >= 0 else -1
     forbidden = _intersection_frac_ranges(road, intersection_rects)
@@ -454,7 +535,7 @@ def _try_place_initial_edge(
     if any(_rects_overlap(rect, other) for other in occupied_rects):
         return event_id
     arch = sprites.pick_random_archetype_index(rng)
-    frame = min(INITIAL_WARMUP_FRAMES, initial_spawn_index * INITIAL_STAGGER_FRAMES)
+    frame = min(OPENING_WARMUP_FRAMES, initial_spawn_index * INITIAL_STAGGER_FRAMES)
     events.append(
         TrafficSpawn(
             frame=frame,
@@ -463,6 +544,7 @@ def _try_place_initial_edge(
             direction=direction,
             archetype_index=arch,
             event_id=event_id,
+            phase=PHASE_OPENING,
         )
     )
     lane_fracs.setdefault(road_index, []).append((direction, frac))
@@ -516,28 +598,19 @@ def _fill_road_initial(
 build_intersection_rects = _build_intersection_rects
 
 
-def generate_traffic_schedule(
+def _generate_opening_surge(
     map_seed: int,
     roads,
     traffic_weights: list[float] | None,
     profile: DifficultyProfile,
-    time_limit_s: int,
-    fps: int = FPS,
 ) -> list[TrafficSpawn]:
-    """
-    Fully procedural spawn timeline: same map_seed + profile => identical cars.
-    Round start: cars queued at road entry edges, staggered over ~1.5s.
-    """
+    """Deterministic round-start burst: same seed => identical opening cars."""
     if not roads:
         return []
 
-    rng = _traffic_rng(map_seed, profile)
-    num_roads = len(roads)
+    rng = _traffic_rng(map_seed, profile, stream=1)
     density = profile.traffic_density * profile.spawn_rate_mult * TRAFFIC_SCHEDULE_MULT
     density *= 1.0 + profile.round_escalation * 0.4 + profile.level * 0.12
-
-    max_active = min(500, 110 + num_roads * 34)
-    duration_frames = max(fps * 30, int(time_limit_s * fps) + fps)
 
     events: list[TrafficSpawn] = []
     event_id = 0
@@ -560,13 +633,39 @@ def generate_traffic_schedule(
             initial_spawn_index,
             intersection_rects,
         )
+    return events
 
+
+def _generate_ongoing_spawns(
+    map_seed: int,
+    roads,
+    traffic_weights: list[float] | None,
+    profile: DifficultyProfile,
+    time_limit_s: int,
+    fps: int,
+    start_frame: int,
+    event_id_start: int,
+) -> list[TrafficSpawn]:
+    """Deterministic mid-round spawns after the opening surge window."""
+    if not roads:
+        return []
+
+    rng = _traffic_rng(map_seed, profile, stream=2)
+    num_roads = len(roads)
+    density = profile.traffic_density * profile.spawn_rate_mult * TRAFFIC_SCHEDULE_MULT
+    density *= 1.0 + profile.round_escalation * 0.4 + profile.level * 0.12
+
+    max_active = min(500, 110 + num_roads * 34)
+    duration_frames = max(fps * 30, int(time_limit_s * fps) + fps)
+
+    events: list[TrafficSpawn] = []
+    event_id = event_id_start
     interval = max(5, int(22 / max(0.45, density * (0.75 + num_roads * 0.02))))
     max_events = min(
         max_active * 3,
         int(max_active + duration_frames / interval * 1.15),
     )
-    frame = interval
+    frame = start_frame
     road_cursor = 0
     while frame < duration_frames and len(events) < max_events:
         ri = road_cursor % num_roads
@@ -583,11 +682,46 @@ def generate_traffic_schedule(
                     direction=direction,
                     archetype_index=arch,
                     event_id=event_id,
+                    phase=PHASE_ONGOING,
                 )
             )
             event_id += 1
         frame += interval + rng.randint(0, 3)
+    return events
 
+
+def generate_traffic_schedule(
+    map_seed: int,
+    roads,
+    traffic_weights: list[float] | None,
+    profile: DifficultyProfile,
+    time_limit_s: int,
+    fps: int = FPS,
+) -> list[TrafficSpawn]:
+    """
+    Fully procedural spawn timeline: same map_seed + profile => identical cars.
+    Phase A (opening): surge at frame 0..OPENING_WARMUP_FRAMES.
+    Phase B (ongoing): steady deterministic spawns for the rest of the round.
+    """
+    opening = _generate_opening_surge(map_seed, roads, traffic_weights, profile)
+    opening_end = max((e.frame for e in opening), default=0)
+    num_roads = len(roads)
+    density = profile.traffic_density * profile.spawn_rate_mult * TRAFFIC_SCHEDULE_MULT
+    density *= 1.0 + profile.round_escalation * 0.4 + profile.level * 0.12
+    interval = max(5, int(22 / max(0.45, density * (0.75 + num_roads * 0.02))))
+    next_event_id = max((e.event_id for e in opening), default=-1) + 1
+    ongoing_start = opening_end + 2
+    ongoing = _generate_ongoing_spawns(
+        map_seed,
+        roads,
+        traffic_weights,
+        profile,
+        time_limit_s,
+        fps,
+        ongoing_start,
+        next_event_id,
+    )
+    events = opening + ongoing
     events.sort(key=lambda e: (e.frame, e.road_index, e.event_id))
     return events
 
