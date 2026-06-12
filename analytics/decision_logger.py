@@ -5,6 +5,8 @@ import time
 HESITATION_THRESHOLD_S = 0.45
 BACKTRACK_MIN_PX = 8
 POSITION_SAMPLE_INTERVAL_S = 0.12
+MAX_HEAT_SAMPLES = 150
+MAX_DECISION_LOG_ENTRIES = 96
 
 
 class DecisionLogger:
@@ -63,6 +65,8 @@ class DecisionLogger:
         entry = {"id": decision_id, "t": self._elapsed(), "action": action}
         entry.update(context)
         self.decisions.append(entry)
+        if len(self.decisions) > MAX_DECISION_LOG_ENTRIES:
+            del self.decisions[: len(self.decisions) - MAX_DECISION_LOG_ENTRIES]
         if self._frame_recorder:
             self._frame_recorder.queue_decision(action, decision_id=decision_id, **context)
 
@@ -91,6 +95,8 @@ class DecisionLogger:
                     "light": light_state,
                 }
             )
+            if len(self.heat_samples) > MAX_HEAT_SAMPLES:
+                del self.heat_samples[: len(self.heat_samples) - MAX_HEAT_SAMPLES]
             self._last_sample_time = now
 
         if moved:
@@ -103,14 +109,6 @@ class DecisionLogger:
                     on_crosswalk=on_crosswalk,
                     on_road=on_road,
                 )
-            elif progress > BACKTRACK_MIN_PX:
-                self._record(
-                    "advance",
-                    delta_px=round(progress, 1),
-                    on_crosswalk=on_crosswalk,
-                    on_road=on_road,
-                )
-
             if on_crosswalk and light_state == "red":
                 self._record("cross_on_red", light=light_state)
             elif on_crosswalk and light_state == "green":
@@ -232,7 +230,9 @@ class DecisionLogger:
             "hesitation_events": self.hesitation_events,
             "crossing_attempts": self.crossing_attempts,
             "heat_samples": self.heat_samples,
-            "replay_frames": getattr(self._frame_recorder, "frames", []) if self._frame_recorder else [],
+            "replay_frames": (
+                list(self._frame_recorder.frames) if self._frame_recorder else []
+            ),
             "decision_marks": (
                 self._frame_recorder.decision_marks() if self._frame_recorder else []
             ),

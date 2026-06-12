@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import random
 
-import pygame
-
-from map import MapBase, Road, make_rectangle, BASE_SIZE, ROAD_THICKNESS, ROAD_GAP
-import commonUtils
+from pathwise.geom import Rect
+from pathwise.map import MapBase, Road, make_rectangle, BASE_SIZE, ROAD_THICKNESS, ROAD_GAP
+from pathwise import commonUtils
 
 from map_generation.analytics import build_analytics_zones
 from map_generation.constraints import (
@@ -19,7 +18,7 @@ from map_generation.difficulty import DifficultyProfile, adaptive_difficulty
 from map_generation.noise import fbm, simplex2
 from map_generation.pathfinding import Cell, astar_travel_time, bfs_solvable
 from map_generation.safety import expected_wait_for_safe_crossing, min_time_limit_for_route
-from map_visuals import generate_city_blocks, generate_map_decorations
+from pathwise.map_visuals import generate_city_blocks, generate_map_decorations
 
 VERTICAL = commonUtils.VERTICAL
 HORIZONTAL = commonUtils.HORIZONTAL
@@ -41,7 +40,7 @@ def _effective_jitter(difficulty: DifficultyProfile) -> int:
 
 
 def _spawn_clear(x: int, y: int, roads: list[Road], pad: int = 22) -> bool:
-    probe = pygame.Rect(x - 12, y - 12, 24, 24)
+    probe = Rect(x - 12, y - 12, 24, 24)
     for road in roads:
         if probe.colliderect(road.rect.inflate(pad, pad)):
             return False
@@ -262,7 +261,7 @@ def generate_map_layout(
         gx = _block_center_x(goal_col, v_xs, ORIGIN, world_right)
         gy = _block_center_y(goal_row, h_ys, ORIGIN, world_bottom)
 
-        goal_rect = pygame.Rect(gx - BASE_SIZE // 2, gy - BASE_SIZE // 2, BASE_SIZE, BASE_SIZE)
+        goal_rect = Rect(gx - BASE_SIZE // 2, gy - BASE_SIZE // 2, BASE_SIZE, BASE_SIZE)
         if not _spawn_clear(sx, sy, roads) or not _spawn_clear(gx, gy, roads):
             continue
         if any(goal_rect.colliderect(r.rect.inflate(4, 4)) for r in roads):

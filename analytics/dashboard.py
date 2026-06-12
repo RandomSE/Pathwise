@@ -5,9 +5,21 @@ import json
 import os
 
 from analytics.archetype_scoring import score_session
+from analytics.replay_playback import (
+    MAX_PLAYBACK_GAP_S,
+    MIN_PLAYBACK_GAP_S,
+    REPLAY_STEP_S,
+)
 
 
-def build_dashboard_html(session_path, output_path=None):
+def build_dashboard_html(
+    session_path,
+    output_path=None,
+    *,
+    default_playback_rate: float = 1.0,
+    spectate_anomalies: list | None = None,
+    spectate_metrics: dict | None = None,
+):
     with open(session_path, encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -86,8 +98,26 @@ def build_dashboard_html(session_path, output_path=None):
             "decision_marks": last["decision_marks"],
             "risk_marks": last["risk_marks"],
             "car_archetypes": last["car_archetypes"],
+            "spectate_anomalies": spectate_anomalies or [],
+            "spectate_metrics": spectate_metrics or {},
         }
     )
+    playback_selected = {0.5: "", 1: "", 2: "", 4: "", 8: ""}
+    rate_key = (
+        8.0
+        if default_playback_rate >= 6
+        else 4.0
+        if default_playback_rate >= 3
+        else 2.0
+        if default_playback_rate >= 1.5
+        else 1.0
+        if default_playback_rate >= 0.75
+        else 0.5
+    )
+    playback_selected[rate_key] = " selected"
+    replay_step_s = REPLAY_STEP_S
+    replay_min_gap_s = MIN_PLAYBACK_GAP_S
+    replay_max_gap_s = MAX_PLAYBACK_GAP_S
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -425,10 +455,11 @@ def build_dashboard_html(session_path, output_path=None):
       <div class="replay-controls">
         <label class="subtitle" for="playback-rate">Playback speed</label>
         <select id="playback-rate" title="Playback speed">
-          <option value="0.5">0.5×</option>
-          <option value="1">1×</option>
-          <option value="2" selected>2×</option>
-          <option value="4">4×</option>
+          <option value="0.5"{playback_selected[0.5]}>0.5×</option>
+          <option value="1"{playback_selected[1]}>1×</option>
+          <option value="2"{playback_selected[2]}>2×</option>
+          <option value="4"{playback_selected[4]}>4×</option>
+          <option value="8"{playback_selected[8]}>8×</option>
         </select>
         <span class="replay-shortcuts">Space play · ←→ scrub · [ ] speed · D / R jump decisions / risks</span>
       </div>
@@ -448,6 +479,12 @@ def build_dashboard_html(session_path, output_path=None):
           <select id="frame-risk-jump" class="event-jump"><option value="">Jump to risk…</option></select>
           <div id="replay-risk-log" class="event-log risk-log"></div>
         </div>
+        <div id="spectate-anomaly-panel" style="display:none">
+          <h3>Spectate anomalies</h3>
+          <p id="spectate-metrics-line" class="spectate-metrics" style="display:none"></p>
+          <select id="spectate-anomaly-jump" class="event-jump"><option value="">Jump to anomaly…</option></select>
+          <div id="spectate-anomaly-log" class="event-log"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -456,10 +493,15 @@ def build_dashboard_html(session_path, output_path=None):
     const DATA = {data_json};
     let currentFrameIndex = 0;
     let isPlaying = false;
-    let playTimeoutId = null;
-    const DEFAULT_PLAYBACK_RATE = 2;
+    let playRafId = null;
+    let playheadT = 0;
+    let playAnchorWall = 0;
+    let playAnchorSim = 0;
+    const DEFAULT_PLAYBACK_RATE = {default_playback_rate};
     let playbackRate = DEFAULT_PLAYBACK_RATE;
-    const REPLAY_STEP_S = 1 / 12;
+    const REPLAY_STEP_S = {replay_step_s};
+    const REPLAY_MIN_GAP_S = {replay_min_gap_s};
+    const REPLAY_MAX_GAP_S = {replay_max_gap_s};
     let replayZoom = 1;
     let replayPanX = 0;
     let replayPanY = 0;
@@ -681,9 +723,16 @@ def build_dashboard_html(session_path, output_path=None):
     }}
 
     function lightPhase(light) {{
-      if (!light) return {{ state: "green", in: 0, next: "yellow" }};
-      if (typeof light === "string") return {{ state: light, in: 0, next: "yellow" }};
-      return {{ state: light.s || "green", in: light.in || 0, next: light.next || "yellow" }};
+      if (!light) return {{ state: "green", in: 0, next: "yellow", turnState: "red", turnIn: 0, turnNext: "green" }};
+      if (typeof light === "string") return {{ state: light, in: 0, next: "yellow", turnState: "red", turnIn: 0, turnNext: "green" }};
+      return {{
+        state: light.s || "green",
+        in: light.in || 0,
+        next: light.next || "yellow",
+        turnState: light.ts || "red",
+        turnIn: light.tin || 0,
+        turnNext: light.tnext || "green",
+      }};
     }}
 
     function formatDecisionLine(d) {{
@@ -757,14 +806,11 @@ def build_dashboard_html(session_path, output_path=None):
       </g>`;
     }}
 
-    function carSvg(car, frameTime) {{
-      const x = car.x, y = car.y, w = car.w, h = car.h;
-      const vertical = car.v === 1;
-      const pal = paletteForCar(car);
+    function carBodyContent(w, h, vertical, pal, car, frameTime) {{
       const L = layoutForStyle(pal.style, vertical);
       const wheel = "#212121";
       const rx = Math.min(6, (vertical ? w : h) / 3);
-      let svg = `<g transform="translate(${{x}},${{y}})">`;
+      let svg = `<g>`;
       if (!vertical) {{
         svg += `<rect x="1" y="5" width="${{w - 2}}" height="${{h - 10}}" rx="${{rx}}" fill="${{pal.body}}" stroke="${{pal.trim}}" stroke-width="1"/>`;
         if (pal.style === "pickup") {{
@@ -810,6 +856,20 @@ def build_dashboard_html(session_path, output_path=None):
       }}
       svg += `</g>`;
       return svg;
+    }}
+
+    function carSvg(car, frameTime) {{
+      const w = car.w, h = car.h;
+      const pal = paletteForCar(car);
+      if (car.ang != null && car.cx != null && car.cy != null) {{
+        // Match PIL rotate() in sprites.make_car_rotated_in_box (CCW); SVG is CW.
+        const body = carBodyContent(w, h, false, pal, car, frameTime);
+        const svgAng = -car.ang;
+        return `<g transform="translate(${{car.cx}},${{car.cy}}) rotate(${{svgAng}}) translate(${{-w / 2}},${{-h / 2}})">${{body}}</g>`;
+      }}
+      const vertical = car.v === 1;
+      const body = carBodyContent(w, h, vertical, pal, car, frameTime);
+      return `<g transform="translate(${{car.x}},${{car.y}})">${{body}}</g>`;
     }}
 
     function playerSvg(p) {{
@@ -896,28 +956,59 @@ def build_dashboard_html(session_path, output_path=None):
           }}
         }}
       }}
+      function signalBulbCenters(housing, direction, approach) {{
+        const hx = housing[0], hy = housing[1], hw = housing[2], hh = housing[3];
+        if (direction === "vertical") {{
+          const bx = approach === "east" ? hx + hw - 11 : hx + 11;
+          return [
+            [bx, hy + 10], [bx, hy + 28], [bx, hy + 46],
+          ];
+        }}
+        const by = approach === "south" ? hy + hh - 11 : hy + 11;
+        return [
+          [hx + 10, by], [hx + 28, by], [hx + 46, by],
+        ];
+      }}
+      function signalTurnBulb(housing, direction, approach) {{
+        const hx = housing[0], hy = housing[1], hw = housing[2], hh = housing[3];
+        if (direction === "vertical") {{
+          const bx = approach === "east" ? hx + hw - 11 : hx + 11;
+          return [bx + 18, hy + 28];
+        }}
+        const by = approach === "south" ? hy + hh - 11 : hy + 11;
+        return [hx + 28, by - 18];
+      }}
       const signals = L.crosswalks || [];
       const lights = frame.lights || [];
       signals.forEach((cw, i) => {{
         svg += `<rect x="${{cw.x}}" y="${{cw.y}}" width="${{cw.w}}" height="${{cw.h}}" fill="url(#crosswalkStripe)" stroke="#bdbdbd"/>`;
         const housing = cw.housing;
         if (!housing) return;
+        const approach = cw.approach || "west";
         const phase = lightPhase(lights[i]);
         const colors = bulbColors(phase.state);
         svg += `<rect x="${{housing[0]}}" y="${{housing[1]}}" width="${{housing[2]}}" height="${{housing[3]}}" fill="#191919" stroke="#464646" stroke-width="2" rx="5"/>`;
-        if (cw.direction === "vertical") {{
-          const cx = housing[0] + housing[2] / 2;
-          const tops = [housing[1] + 10, housing[1] + 28, housing[1] + 46];
-          tops.forEach((y, idx) => {{ svg += `<circle cx="${{cx}}" cy="${{y}}" r="6" fill="${{colors[idx]}}"/>`; }});
-        }} else {{
-          const cy = housing[1] + housing[3] / 2;
-          const lefts = [housing[0] + 10, housing[0] + 28, housing[0] + 46];
-          lefts.forEach((x, idx) => {{ svg += `<circle cx="${{x}}" cy="${{cy}}" r="6" fill="${{colors[idx]}}"/>`; }});
+        signalBulbCenters(housing, cw.direction, approach).forEach(([bx, by], idx) => {{
+          svg += `<circle cx="${{bx}}" cy="${{by}}" r="6" fill="${{colors[idx]}}"/>`;
+        }});
+        if (phase.turnState === "green" && phase.state === "red") {{
+          const [tx, ty] = signalTurnBulb(housing, cw.direction, approach);
+          svg += `<circle cx="${{tx}}" cy="${{ty}}" r="7" fill="#2de685"/>`;
         }}
-        const timerY = cw.direction === "vertical" ? housing[1] + housing[3] + 14 : housing[1] + housing[3] / 2 + 4;
-        const timerX = cw.direction === "vertical" ? housing[0] + housing[2] / 2 : housing[0] + housing[2] + 10;
-        const timerLabel = `${{phase.in.toFixed(1)}}s → ${{phase.next}}`;
-        svg += `<text class="light-timer" x="${{timerX}}" y="${{timerY}}" text-anchor="${{cw.direction === "vertical" ? "middle" : "start"}}">${{timerLabel}}</text>`;
+        let timerX, timerY, timerAnchor;
+        if (cw.direction === "vertical") {{
+          timerX = approach === "east" ? housing[0] - 8 : housing[0] + housing[2] + 8;
+          timerY = housing[1] + housing[3] / 2;
+          timerAnchor = approach === "east" ? "end" : "start";
+        }} else {{
+          timerX = housing[0] + housing[2] / 2;
+          timerY = approach === "south" ? housing[1] - 6 : housing[1] + housing[3] + 14;
+          timerAnchor = "middle";
+        }}
+        const timerLabel = phase.turnState === "green" && phase.state === "red"
+          ? `turn ${{phase.turnIn.toFixed(1)}}s → ${{phase.turnNext}}`
+          : `${{phase.in.toFixed(1)}}s → ${{phase.next}}`;
+        svg += `<text class="light-timer" x="${{timerX}}" y="${{timerY}}" text-anchor="${{timerAnchor}}">${{timerLabel}}</text>`;
       }});
       const goal = L.goal;
       svg += `<rect x="${{goal.x - 8}}" y="${{goal.y - 8}}" width="${{goal.w + 16}}" height="${{goal.h + 16}}" fill="#ffdc50" opacity="0.5" rx="10"/>`;
@@ -925,7 +1016,9 @@ def build_dashboard_html(session_path, output_path=None):
       for (const car of frame.cars || []) {{
         svg += carSvg(car, frame.t);
         if (car.honk) {{
-          svg += honkSvg(car.x + car.w / 2, car.y - 4);
+          const hx = car.cx != null ? car.cx : car.x + car.w / 2;
+          const hy = car.cy != null ? car.cy - car.h / 2 - 4 : car.y - 4;
+          svg += honkSvg(hx, hy);
         }}
       }}
       const p = frame.player;
@@ -939,11 +1032,135 @@ def build_dashboard_html(session_path, output_path=None):
       applyReplayViewBox();
     }}
 
+    function lerpNum(a, b, alpha) {{
+      return a + (b - a) * alpha;
+    }}
+
+    function lerpAngleDeg(a, b, alpha) {{
+      let delta = ((b - a + 180) % 360) - 180;
+      return a + delta * alpha;
+    }}
+
+    function framePairAtTime(t) {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return {{ left: 0, right: 0, alpha: 0 }};
+      if (t <= frames[0].t) return {{ left: 0, right: 0, alpha: 0 }};
+      const last = frames.length - 1;
+      if (t >= frames[last].t) return {{ left: last, right: last, alpha: 0 }};
+      let lo = 0;
+      let hi = last;
+      while (lo + 1 < hi) {{
+        const mid = Math.floor((lo + hi) / 2);
+        if (frames[mid].t <= t) lo = mid;
+        else hi = mid;
+      }}
+      const span = frames[hi].t - frames[lo].t;
+      const alpha = span > 1e-9 ? (t - frames[lo].t) / span : 0;
+      return {{ left: lo, right: hi, alpha: Math.max(0, Math.min(1, alpha)) }};
+    }}
+
+    function lerpReplayFrame(left, right, alpha, t) {{
+      if (alpha <= 0) return left;
+      if (alpha >= 1) return right;
+      const simT = t != null ? t : lerpNum(left.t, right.t, alpha);
+      const lp = left.player || {{}};
+      const rp = right.player || {{}};
+      const player = {{
+        x: Math.round(lerpNum(lp.x || 0, rp.x || 0, alpha)),
+        y: Math.round(lerpNum(lp.y || 0, rp.y || 0, alpha)),
+        s: lp.s || rp.s || 28,
+      }};
+      const leftCars = {{}};
+      (left.cars || []).forEach(c => {{ leftCars[c.id] = c; }});
+      const rightCars = {{}};
+      (right.cars || []).forEach(c => {{ rightCars[c.id] = c; }});
+      const cars = [];
+      const ids = new Set([...Object.keys(leftCars), ...Object.keys(rightCars)].map(Number));
+      ids.forEach(id => {{
+        const lc = leftCars[id];
+        const rc = rightCars[id];
+        if (lc && rc) {{
+          const merged = {{ ...lc }};
+          ["x", "y", "cx", "cy"].forEach(k => {{
+            if (lc[k] != null && rc[k] != null) merged[k] = Math.round(lerpNum(lc[k], rc[k], alpha));
+          }});
+          if (lc.ang != null && rc.ang != null) merged.ang = Math.round(lerpAngleDeg(lc.ang, rc.ang, alpha) * 10) / 10;
+          if (lc.sp != null && rc.sp != null) merged.sp = Math.round(lerpNum(lc.sp, rc.sp, alpha) * 100) / 100;
+          cars.push(merged);
+        }} else if (lc && alpha < 0.5) {{
+          cars.push({{ ...lc }});
+        }} else if (rc && alpha >= 0.5) {{
+          cars.push({{ ...rc }});
+        }}
+      }});
+      const out = {{
+        id: left.id,
+        seq: left.seq,
+        t: simT,
+        player,
+        cars,
+        lights: left.lights || right.lights || [],
+        interpolated: true,
+      }};
+      if (alpha >= 0.5 && right.decision) {{
+        out.decision = right.decision;
+        out.is_decision = !!right.is_decision;
+      }} else if (left.decision && alpha < 0.5) {{
+        out.decision = left.decision;
+        out.is_decision = !!left.is_decision;
+      }}
+      return out;
+    }}
+
+    function frameAtTime(t) {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return {{}};
+      const pair = framePairAtTime(t);
+      if (pair.left === pair.right) return frames[pair.left];
+      return lerpReplayFrame(frames[pair.left], frames[pair.right], pair.alpha, t);
+    }}
+
+    function nearestFrameIndex(t) {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return 0;
+      let best = 0;
+      let bestDist = Infinity;
+      for (let i = 0; i < frames.length; i++) {{
+        const d = Math.abs(frames[i].t - t);
+        if (d < bestDist) {{
+          bestDist = d;
+          best = i;
+        }}
+      }}
+      return best;
+    }}
+
+    function renderPlayhead(t, fromPlayback = false) {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return;
+      playheadT = t;
+      const frame = frameAtTime(t);
+      const idx = nearestFrameIndex(t);
+      currentFrameIndex = idx;
+      const slider = document.getElementById("frame-slider");
+      if (slider) slider.value = String(idx);
+      document.getElementById("frame-time").textContent = t.toFixed(1) + "s";
+      document.getElementById("frame-index").textContent = `Frame ${{idx + 1}} / ${{frames.length}}`;
+      const dec = frame.decision;
+      let decLabel = "";
+      if (dec && !isRiskAction(dec.action, dec.risk)) {{
+        decLabel = (dec.id ? dec.id + " — " : "") + dec.label;
+      }}
+      document.getElementById("frame-decision-label").textContent = decLabel;
+      if (!fromPlayback) highlightReplayLogs(frames[idx]);
+      drawFrame(frame);
+    }}
+
     function stopPlayback() {{
       isPlaying = false;
-      if (playTimeoutId !== null) {{
-        clearTimeout(playTimeoutId);
-        playTimeoutId = null;
+      if (playRafId !== null) {{
+        cancelAnimationFrame(playRafId);
+        playRafId = null;
       }}
       const playBtn = document.getElementById("frame-play");
       if (playBtn) {{
@@ -954,27 +1171,32 @@ def build_dashboard_html(session_path, output_path=None):
       }}
     }}
 
-    function scheduleNextFrame() {{
+    function playbackLoop(wallNow) {{
       if (!isPlaying) return;
       const frames = DATA.frames || [];
-      if (currentFrameIndex >= frames.length - 1) {{
+      if (!frames.length) {{
         stopPlayback();
         return;
       }}
-      const current = frames[currentFrameIndex];
-      const next = frames[currentFrameIndex + 1];
-      let deltaS = REPLAY_STEP_S;
-      if (current.seq != null && next.seq != null) {{
-        deltaS = Math.max(1, next.seq - current.seq) * REPLAY_STEP_S;
-      }} else if (current.t != null && next.t != null) {{
-        deltaS = Math.max(REPLAY_STEP_S, next.t - current.t);
+      const elapsed = (wallNow - playAnchorWall) / 1000 * playbackRate;
+      const t = playAnchorSim + elapsed;
+      const endT = frames[frames.length - 1].t;
+      if (t >= endT) {{
+        renderPlayhead(endT, true);
+        stopPlayback();
+        return;
       }}
-      const deltaMs = Math.max(16, (deltaS * 1000) / playbackRate);
-      playTimeoutId = setTimeout(() => {{
-        playTimeoutId = null;
-        updateFrameUI(currentFrameIndex + 1, true);
-        scheduleNextFrame();
-      }}, deltaMs);
+      renderPlayhead(t, true);
+      playRafId = requestAnimationFrame(playbackLoop);
+    }}
+
+    function startPlaybackLoop() {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return;
+      playAnchorWall = performance.now();
+      playAnchorSim = playheadT;
+      if (playRafId !== null) cancelAnimationFrame(playRafId);
+      playRafId = requestAnimationFrame(playbackLoop);
     }}
 
     function togglePlayback() {{
@@ -984,7 +1206,8 @@ def build_dashboard_html(session_path, output_path=None):
         stopPlayback();
         return;
       }}
-      if (currentFrameIndex >= frames.length - 1) {{
+      if (currentFrameIndex >= frames.length - 1 || playheadT >= frames[frames.length - 1].t) {{
+        playheadT = frames[0].t;
         updateFrameUI(0, true);
       }}
       isPlaying = true;
@@ -993,7 +1216,7 @@ def build_dashboard_html(session_path, output_path=None):
       playBtn.title = "Pause replay";
       playBtn.setAttribute("aria-label", "Pause replay");
       playBtn.classList.add("is-playing");
-      scheduleNextFrame();
+      startPlaybackLoop();
     }}
 
     function updateFrameUI(index, fromPlayback = false) {{
@@ -1001,19 +1224,9 @@ def build_dashboard_html(session_path, output_path=None):
       if (!frames.length) return;
       if (!fromPlayback) stopPlayback();
       currentFrameIndex = Math.max(0, Math.min(index, frames.length - 1));
-      const frame = frames[currentFrameIndex];
-      const slider = document.getElementById("frame-slider");
-      slider.value = String(currentFrameIndex);
-      document.getElementById("frame-time").textContent = frame.t.toFixed(1) + "s";
-      document.getElementById("frame-index").textContent = `Frame ${{currentFrameIndex + 1}} / ${{frames.length}}`;
-      const dec = frame.decision;
-      let decLabel = "";
-      if (dec && !isRiskAction(dec.action, dec.risk)) {{
-        decLabel = (dec.id ? dec.id + " — " : "") + dec.label;
-      }}
-      document.getElementById("frame-decision-label").textContent = decLabel;
-      highlightReplayLogs(frame);
-      drawFrame(frame);
+      playheadT = frames[currentFrameIndex].t;
+      renderPlayhead(playheadT, fromPlayback);
+      if (!fromPlayback) highlightReplayLogs(frames[currentFrameIndex]);
     }}
 
     function buildDecisionTicks() {{
@@ -1035,6 +1248,74 @@ def build_dashboard_html(session_path, output_path=None):
       }});
     }}
 
+
+    function frameForSimTime(simT) {{
+      const frames = DATA.frames || [];
+      if (!frames.length) return 0;
+      let best = 0;
+      let bestD = 1e9;
+      for (let i = 0; i < frames.length; i++) {{
+        const ft = frames[i].t;
+        if (ft == null) continue;
+        const d = Math.abs(ft - simT);
+        if (d < bestD) {{
+          bestD = d;
+          best = i;
+        }}
+      }}
+      return best;
+    }}
+
+    function buildSpectateAnomalyTicks() {{
+      const ticksEl = document.getElementById("decision-ticks");
+      const anomalies = DATA.spectate_anomalies || [];
+      const frames = DATA.frames || [];
+      if (!ticksEl || !frames.length || !anomalies.length) return;
+      const max = frames.length - 1;
+      const extra = anomalies.map(a => {{
+        const frame = frameForSimTime(a.sim_t);
+        const pct = (frame / max) * 100;
+        const tip = (a.kind || "anomaly") + " @ " + a.sim_t + "s — " + (a.summary || "");
+        return `<button type="button" class="decision-tick spectate-tick" style="left:${{pct}}%;background:#b86bff" title="${{tip}}" data-frame="${{frame}}"></button>`;
+      }}).join("");
+      ticksEl.insertAdjacentHTML("beforeend", extra);
+      ticksEl.querySelectorAll(".spectate-tick").forEach(btn => {{
+        btn.addEventListener("click", () => updateFrameUI(Number(btn.dataset.frame)));
+      }});
+    }}
+
+    function buildSpectateAnomalyPanel() {{
+      const panel = document.getElementById("spectate-anomaly-panel");
+      const jump = document.getElementById("spectate-anomaly-jump");
+      const log = document.getElementById("spectate-anomaly-log");
+      const metricsLine = document.getElementById("spectate-metrics-line");
+      const anomalies = DATA.spectate_anomalies || [];
+      const metrics = DATA.spectate_metrics || {{}};
+      if (!panel || (!anomalies.length && !Object.keys(metrics).length)) return;
+      panel.style.display = "block";
+      if (metricsLine && Object.keys(metrics).length) {{
+        const arcPre = metrics.turn_arc_pre_separation_frames ?? 0;
+        const arcPost = metrics.turn_arc_overlap_frames ?? 0;
+        const preSep = metrics.pre_separation_overlap_frames ?? 0;
+        metricsLine.style.display = "block";
+        metricsLine.textContent =
+          `Turn arc overlap: pre=${{arcPre}} post=${{arcPost}} · pre-sep shells=${{preSep}} · anomalies=${{metrics.anomaly_count ?? 0}}`;
+      }}
+      if (jump) {{
+        jump.innerHTML = '<option value="">Jump to anomaly…</option>' +
+          anomalies.map((a, i) => {{
+            const frame = frameForSimTime(a.sim_t);
+            return `<option value="${{frame}}">${{a.sim_t.toFixed(1)}}s — ${{a.kind}} — ${{a.summary || ""}}</option>`;
+          }}).join("");
+      }}
+      if (log) {{
+        log.innerHTML = anomalies.length
+          ? anomalies.map(a =>
+              `<div class="event-line"><strong>${{a.sim_t.toFixed(1)}}s</strong> [${{a.kind}}] ${{a.summary || ""}}</div>`
+            ).join("")
+          : '<div class="event-line muted">No anomalies recorded.</div>';
+      }}
+    }}
 
     function buildRiskTicks() {{
       const ticksEl = document.getElementById("risk-ticks");
@@ -1098,6 +1379,8 @@ def build_dashboard_html(session_path, output_path=None):
       populateJumpDropdowns();
       buildDecisionTicks();
       buildRiskTicks();
+      buildSpectateAnomalyTicks();
+      buildSpectateAnomalyPanel();
       resetReplayZoom();
       updateFrameUI(0);
     }}
@@ -1105,14 +1388,23 @@ def build_dashboard_html(session_path, output_path=None):
     function initFrameScrubber() {{
       const slider = document.getElementById("frame-slider");
       setupJumpDropdownListeners();
+      const anomalyJump = document.getElementById("spectate-anomaly-jump");
+      if (anomalyJump && !anomalyJump.dataset.bound) {{
+        anomalyJump.dataset.bound = "1";
+        anomalyJump.addEventListener("change", () => {{
+          const v = anomalyJump.value;
+          if (v !== "") updateFrameUI(Number(v));
+        }});
+      }}
       if (!scrubberInitialized) {{
         scrubberInitialized = true;
         document.getElementById("frame-play").addEventListener("click", togglePlayback);
         document.getElementById("playback-rate").addEventListener("change", (e) => {{
           playbackRate = Number(e.target.value) || 1;
           if (isPlaying) {{
-            if (playTimeoutId !== null) clearTimeout(playTimeoutId);
-            scheduleNextFrame();
+            playAnchorWall = performance.now();
+            playAnchorSim = playheadT;
+            startPlaybackLoop();
           }}
         }});
         slider.addEventListener("input", () => updateFrameUI(Number(slider.value)));
