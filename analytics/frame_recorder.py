@@ -9,6 +9,10 @@ Capture policy:
 
 FIXED_SAMPLE_INTERVAL_S = 1.0 / 12.0
 MIN_FRAME_GAP_S = 0.02
+MAX_REPLAY_GAP_S = 1.0 / 24.0
+# Bound replay payload growth (~30s at 12 Hz + decision headroom).
+MAX_REPLAY_FRAMES = 360
+MIN_DECISION_CAPTURE_GAP_S = 0.2
 
 DECISION_ACTIONS = frozenset(
     {
@@ -61,6 +65,7 @@ class FrameRecorder:
         self._next_periodic_t = 0.0
         self._queued_decision = None
         self._frame_seq = 0
+        self._last_decision_capture_t = -999.0
 
     def queue_decision(self, action, decision_id=None, **context):
         if action not in DECISION_ACTIONS:
@@ -101,7 +106,18 @@ class FrameRecorder:
             payload["risk_label"] = RISK_LABELS.get(risk_key, risk_key)
         self._queued_decision = payload
 
-    def capture(self, elapsed, player_rect, car_sprites, road_states, force=False, game_time=None):
+    def capture(
+        self,
+        elapsed,
+        player_rect,
+        car_sprites,
+        road_states,
+        force=False,
+        game_time=None,
+        *,
+        is_start=False,
+        is_end_frame=False,
+    ):
         decision = self._queued_decision
         self._queued_decision = None
         is_decision = decision is not None
@@ -114,6 +130,14 @@ class FrameRecorder:
         should_capture = force or is_decision or periodic_due
         if not should_capture:
             return
+
+        if is_decision and not force:
+            if elapsed - self._last_decision_capture_t < MIN_DECISION_CAPTURE_GAP_S:
+                is_decision = False
+                decision = None
+                should_capture = periodic_due
+                if not should_capture:
+                    return
 
         if (
             not force
@@ -137,8 +161,11 @@ class FrameRecorder:
             "lights": [
                 {
                     "s": state["light_state"],
+                    "ts": state.get("turn_light_state", "red"),
                     "in": round(state.get("seconds_to_change", 0), 1),
+                    "tin": round(state.get("turn_seconds_to_change", 0), 1),
                     "next": state.get("next_light", "green"),
+                    "tnext": state.get("next_turn_light", "green"),
                 }
                 for state in road_states
             ],
@@ -146,19 +173,161 @@ class FrameRecorder:
         if is_decision:
             frame["decision"] = dict(decision)
             frame["is_decision"] = True
-        if force and not is_decision:
+        if is_start:
+            frame["is_start"] = True
+        if is_end_frame:
             frame["is_end"] = True
 
         self.frames.append(frame)
         self._frame_seq += 1
         self._last_capture_t = elapsed
+        if is_decision:
+            self._last_decision_capture_t = elapsed
+        self._trim_if_needed()
+
+    def _trim_if_needed(self) -> None:
+        """Drop periodic samples in dense regions; never create large sim-time gaps."""
+        while len(self.frames) > MAX_REPLAY_FRAMES:
+            drop_idx = self._pick_trim_candidate()
+            if drop_idx is None:
+                break
+            del self.frames[drop_idx]
+
+    def _pick_trim_candidate(self) -> int | None:
+        over_cap = len(self.frames) > MAX_REPLAY_FRAMES
+        max_drop_gap = (
+            FIXED_SAMPLE_INTERVAL_S * 4.0
+            if over_cap
+            else MAX_REPLAY_GAP_S * 1.25
+        )
+        best_idx = None
+        best_score = -1.0
+        for index, frame in enumerate(self.frames):
+            if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
+                continue
+            if frame.get("synthetic"):
+                continue
+            prev_t = self.frames[index - 1]["t"]
+            next_t = (
+                self.frames[index + 1]["t"]
+                if index + 1 < len(self.frames)
+                else prev_t + FIXED_SAMPLE_INTERVAL_S
+            )
+            gap_if_dropped = next_t - prev_t
+            if gap_if_dropped > max_drop_gap:
+                continue
+            if gap_if_dropped > best_score:
+                best_score = gap_if_dropped
+                best_idx = index
+        if best_idx is None and over_cap:
+            for index, frame in enumerate(self.frames):
+                if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
+                    continue
+                return index
+        return best_idx
+
+    def densify_frames(self, max_gap_s: float = MAX_REPLAY_GAP_S) -> None:
+        """Insert interpolated frames so playback gaps stay small."""
+        if len(self.frames) < 2:
+            return
+        dense: list[dict] = [self.frames[0]]
+        for nxt in self.frames[1:]:
+            cur = dense[-1]
+            gap = nxt["t"] - cur["t"]
+            if gap > max_gap_s:
+                steps = max(1, int(gap / max_gap_s))
+                for step in range(1, steps):
+                    alpha = step / steps
+                    dense.append(self._interpolate_frame(cur, nxt, alpha))
+            dense.append(nxt)
+        if len(dense) > MAX_REPLAY_FRAMES:
+            dense = self._trim_dense_frames(dense)
+        self.frames = dense
+
+    def _interpolate_frame(self, left: dict, right: dict, alpha: float) -> dict:
+        t = round(left["t"] + (right["t"] - left["t"]) * alpha, 3)
+        lp = left["player"]
+        rp = right["player"]
+        player = {
+            "x": round(lp["x"] + (rp["x"] - lp["x"]) * alpha),
+            "y": round(lp["y"] + (rp["y"] - lp["y"]) * alpha),
+            "s": lp.get("s", self.pedestrian_size),
+        }
+        cars_by_id: dict[int, dict] = {c["id"]: dict(c) for c in left.get("cars", [])}
+        for car in right.get("cars", []):
+            cid = car["id"]
+            if cid not in cars_by_id:
+                if alpha >= 0.5:
+                    cars_by_id[cid] = dict(car)
+                continue
+            merged = cars_by_id[cid]
+            for key in ("x", "y", "cx", "cy"):
+                if key in merged and key in car:
+                    merged[key] = round(merged[key] + (car[key] - merged[key]) * alpha)
+            if "ang" in merged and "ang" in car:
+                merged["ang"] = round(merged["ang"] + (car["ang"] - merged["ang"]) * alpha, 1)
+            if "sp" in merged and "sp" in car:
+                merged["sp"] = round(merged["sp"] + (car["sp"] - merged["sp"]) * alpha, 2)
+        return {
+            "id": f"f_interp_{len(self.frames):05d}_{int(alpha * 1000)}",
+            "seq": left.get("seq", 0),
+            "t": t,
+            "player": player,
+            "cars": list(cars_by_id.values()),
+            "lights": left.get("lights", []),
+            "synthetic": True,
+        }
+
+    def _trim_dense_frames(self, frames: list[dict]) -> list[dict]:
+        if len(frames) <= MAX_REPLAY_FRAMES:
+            return frames
+        out = list(frames)
+        while len(out) > MAX_REPLAY_FRAMES:
+            drop_idx = None
+            best_score = -1.0
+            for index, frame in enumerate(out):
+                if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
+                    continue
+                if index == len(out) - 1:
+                    continue
+                if not frame.get("synthetic"):
+                    continue
+                prev_t = out[index - 1]["t"]
+                next_t = out[index + 1]["t"]
+                gap_if_dropped = next_t - prev_t
+                if gap_if_dropped > MAX_REPLAY_GAP_S * 1.25:
+                    continue
+                if gap_if_dropped > best_score:
+                    best_score = gap_if_dropped
+                    drop_idx = index
+            if drop_idx is None:
+                break
+            del out[drop_idx]
+        return out
 
     def capture_start(self, elapsed, player_rect, car_sprites, road_states, game_time=None):
         self._next_periodic_t = FIXED_SAMPLE_INTERVAL_S
-        self.capture(elapsed, player_rect, car_sprites, road_states, force=True, game_time=game_time)
+        self.capture(
+            elapsed,
+            player_rect,
+            car_sprites,
+            road_states,
+            force=True,
+            game_time=game_time,
+            is_start=True,
+        )
 
     def capture_end(self, elapsed, player_rect, car_sprites, road_states, game_time=None):
-        self.capture(elapsed, player_rect, car_sprites, road_states, force=True, game_time=game_time)
+        self.capture(
+            elapsed,
+            player_rect,
+            car_sprites,
+            road_states,
+            force=True,
+            game_time=game_time,
+            is_end_frame=True,
+        )
+        self.densify_frames()
         self._ensure_monotonic_times()
 
     def _ensure_monotonic_times(self):
@@ -209,18 +378,38 @@ class FrameRecorder:
 
 
 def _serialize_car(car, game_time):
+    from pathwise import commonUtils
+
     rect = car.rect
+    vertical = bool(car.vertical)
+    draw_w, draw_h = rect.w, rect.h
+    turn_phase = getattr(car, "_turn_phase", "none")
     payload = {
+        "id": int(getattr(car, "spawn_id", 0)),
         "x": rect.x,
         "y": rect.y,
-        "w": rect.w,
-        "h": rect.h,
-        "v": 1 if car.vertical else 0,
+        "w": draw_w,
+        "h": draw_h,
+        "v": 1 if vertical else 0,
         "a": getattr(car, "archetype_index", 0),
         "sp": round(float(getattr(car, "current_speed", 0)), 2),
         "dir": int(getattr(car, "direction", 1)),
         "ts": int(getattr(car, "turn_signal", 0)),
     }
+    if turn_phase in ("turning", "settling"):
+        # Replay draws the same east-facing base sprite as make_car_rotated_in_box.
+        draw_w, draw_h = commonUtils.CAR_WIDTH, commonUtils.CAR_HEIGHT
+        entry_vertical = bool(getattr(car, "_turn_entry_vertical", vertical))
+        payload["w"] = draw_w
+        payload["h"] = draw_h
+        payload["v"] = 0
+        payload["tv"] = 1 if entry_vertical else 0
+        payload["tp"] = turn_phase
+        payload["ang"] = round(float(getattr(car, "_turn_display_angle", 0.0)), 1)
+        payload["cx"] = round(float(getattr(car, "_turn_px", rect.centerx)))
+        payload["cy"] = round(float(getattr(car, "_turn_py", rect.centery)))
+        payload["x"] = payload["cx"] - draw_w // 2
+        payload["y"] = payload["cy"] - draw_h // 2
     if getattr(car, "is_honking", None) and car.is_honking(game_time):
         payload["honk"] = 1
     return payload

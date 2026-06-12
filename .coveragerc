@@ -1,0 +1,26 @@
+# baseline: 81% as of 2026-06-11 (6830 stmts, 1283 miss, 174 tests)
+# updated: 91.6% as of 2026-06-11 (6814 stmts, ~573 miss, 318 tests) — 95% gated on main.py Car extract
+[run]
+source =
+    pathwise
+    map_generation
+    analytics
+    main
+omit =
+    tests/*
+    venv/*
+    */__pycache__/*
+    */site-packages/*
+    *.html
+    *.jsonl
+    spectate_*.json
+
+[report]
+fail_under = 95
+precision = 1
+show_missing = True
+skip_empty = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:

@@ -1,0 +1,6 @@
+# Arcade renderer (see MIGRATION.md)
+
+arcade>=3.3.3
+
+Pillow>=11.3.0; python_version >= "3.14"
+

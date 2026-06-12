@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import commonUtils
+from pathwise import commonUtils
 
 VERTICAL = commonUtils.VERTICAL
 HORIZONTAL = commonUtils.HORIZONTAL

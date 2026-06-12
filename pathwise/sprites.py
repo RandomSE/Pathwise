@@ -1,11 +1,76 @@
 """Top-down car and pedestrian sprites, car appearance archetypes, and honk visuals."""
 
+from __future__ import annotations
+
 import math
 import random
+from dataclasses import dataclass
 
-import pygame
+import arcade
+from PIL import Image, ImageDraw
 
-from commonUtils import CAR_WIDTH, CAR_HEIGHT, PEDESTRIAN_SIZE
+from .commonUtils import CAR_WIDTH, CAR_HEIGHT, PEDESTRIAN_SIZE
+from .geom import Rect
+
+
+@dataclass(frozen=True)
+class SpriteAsset:
+    """Procedural art packaged for logic (size) and Arcade rendering (texture)."""
+
+    texture: arcade.Texture
+    width: int
+    height: int
+
+    def get_width(self) -> int:
+        return self.width
+
+    def get_height(self) -> int:
+        return self.height
+
+
+def _rgba(color, alpha=255):
+    if len(color) == 4:
+        return color
+    return (*color, alpha)
+
+
+def _new_canvas(width: int, height: int) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    return img, ImageDraw.Draw(img)
+
+
+def _rect_xyxy(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int] | None:
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def _draw_round_rect(draw, xy, fill=None, outline=None, width=1, radius=0):
+    if xy is None:
+        return
+    x0, y0, x1, y1 = xy
+    if x1 <= x0 or y1 <= y0:
+        return
+    if radius > 0:
+        draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
+    elif outline is not None and width:
+        draw.rectangle(xy, fill=fill, outline=outline, width=width)
+    else:
+        draw.rectangle(xy, fill=fill)
+
+
+def _texture_from_image(img: Image.Image, name: str) -> arcade.Texture:
+    return arcade.Texture(img, hash=name)
+
+
+def _asset_from_image(img: Image.Image, name: str) -> SpriteAsset:
+    return SpriteAsset(texture=_texture_from_image(img, name), width=img.width, height=img.height)
+
+
+def _paste_center(canvas: Image.Image, piece: Image.Image) -> None:
+    cx = (canvas.width - piece.width) // 2
+    cy = (canvas.height - piece.height) // 2
+    canvas.alpha_composite(piece, (cx, cy))
 
 WHEEL = (33, 33, 33)
 HEADLIGHT = (255, 249, 196)
@@ -209,11 +274,11 @@ def _layout(style, width, height, vertical):
     return cab
 
 
-def _wheel(surf, cx, cy, rx, ry):
-    pygame.draw.ellipse(surf, WHEEL, (cx - rx, cy - ry, rx * 2, ry * 2))
+def _wheel(draw, cx, cy, rx, ry):
+    draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=_rgba(WHEEL))
 
 
-def _draw_car_body(surf, width, height, vertical, archetype):
+def _draw_car_body(draw, width, height, vertical, archetype):
     body = archetype["body"]
     cabin = archetype["cabin"]
     trim = archetype["trim"]
@@ -226,60 +291,96 @@ def _draw_car_body(surf, width, height, vertical, archetype):
     corner = min(6, (height if not vertical else width) // 3)
     cx, cw, cy, ch = _layout(style, width, height, vertical)
 
+    cab_x = int(width * cx)
+    cab_y = int(height * cy)
+    cab_w = int(width * cw)
+    cab_h = int(height * ch)
+    cab_rect = _rect_xyxy(cab_x, cab_y, cab_w, cab_h)
+
     if not vertical:
-        body_rect = (1, 5, width - 2, height - 10)
-        pygame.draw.rect(surf, body, body_rect, border_radius=corner)
-        pygame.draw.rect(surf, trim, body_rect, width=1, border_radius=corner)
+        _draw_round_rect(
+            draw,
+            _rect_xyxy(1, 5, width - 2, height - 10),
+            fill=_rgba(body),
+            outline=_rgba(trim),
+            width=1,
+            radius=corner,
+        )
         if style == "pickup":
             bed_x = int(width * 0.48)
-            pygame.draw.rect(surf, _darken(body, 18), (bed_x, 7, width - bed_x - 2, height - 14), border_radius=2)
-        cab_rect = (int(width * cx), int(height * cy), int(width * cw), int(height * ch))
-        pygame.draw.rect(surf, cabin, cab_rect, border_radius=3)
-        glass_rect = (
-            cab_rect[0] + int(cab_rect[2] * 0.14),
-            cab_rect[1] + 2,
-            int(cab_rect[2] * 0.72),
-            cab_rect[3] - 4,
+            _draw_round_rect(
+                draw,
+                _rect_xyxy(bed_x, 7, width - bed_x - 2, height - 14),
+                fill=_rgba(_darken(body, 18)),
+                radius=2,
+            )
+        _draw_round_rect(draw, cab_rect, fill=_rgba(cabin), radius=3)
+        glass_rect = _rect_xyxy(
+            cab_x + int(cab_w * 0.14),
+            cab_y + 2,
+            int(cab_w * 0.72),
+            max(1, cab_h - 4),
         )
-        pygame.draw.rect(surf, glass, glass_rect, border_radius=2)
+        _draw_round_rect(draw, glass_rect, fill=_rgba(glass), radius=2)
         if stripe and accent:
-            pygame.draw.rect(surf, accent, (2, height // 2 - 1, width - 4, 2))
-        if roof_rack:
-            pygame.draw.line(surf, trim, (cab_rect[0], cab_rect[1] - 2), (cab_rect[0] + cab_rect[2], cab_rect[1] - 2), 2)
-        _wheel(surf, 7, 3, 4, 2)
-        _wheel(surf, width - 7, 3, 4, 2)
-        _wheel(surf, 7, height - 3, 4, 2)
-        _wheel(surf, width - 7, height - 3, 4, 2)
-        pygame.draw.circle(surf, HEADLIGHT, (width - 5, height // 2), 2)
-        pygame.draw.circle(surf, TAILLIGHT, (5, height // 2), 2)
-        _draw_turn_signal_dots(surf, width, height, vertical=False)
+            _draw_round_rect(
+                draw, _rect_xyxy(2, height // 2 - 1, width - 4, 2), fill=_rgba(accent)
+            )
+        if roof_rack and cab_rect is not None:
+            draw.line(
+                (cab_rect[0], cab_rect[1] - 2, cab_rect[2], cab_rect[1] - 2),
+                fill=_rgba(trim),
+                width=2,
+            )
+        _wheel(draw, 7, 3, 4, 2)
+        _wheel(draw, width - 7, 3, 4, 2)
+        _wheel(draw, 7, height - 3, 4, 2)
+        _wheel(draw, width - 7, height - 3, 4, 2)
+        draw.ellipse((width - 7, height // 2 - 2, width - 3, height // 2 + 2), fill=_rgba(HEADLIGHT))
+        draw.ellipse((3, height // 2 - 2, 7, height // 2 + 2), fill=_rgba(TAILLIGHT))
+        _draw_turn_signal_dots(draw, width, height, vertical=False)
     else:
-        body_rect = (5, 1, width - 10, height - 2)
-        pygame.draw.rect(surf, body, body_rect, border_radius=corner)
-        pygame.draw.rect(surf, trim, body_rect, width=1, border_radius=corner)
+        _draw_round_rect(
+            draw,
+            _rect_xyxy(5, 1, width - 10, height - 2),
+            fill=_rgba(body),
+            outline=_rgba(trim),
+            width=1,
+            radius=corner,
+        )
         if style == "pickup":
             bed_y = int(height * 0.48)
-            pygame.draw.rect(surf, _darken(body, 18), (7, bed_y, width - 14, height - bed_y - 2), border_radius=2)
-        cab_rect = (int(width * cx), int(height * cy), int(width * cw), int(height * ch))
-        pygame.draw.rect(surf, cabin, cab_rect, border_radius=3)
-        glass_rect = (
-            cab_rect[0] + 2,
-            cab_rect[1] + int(cab_rect[3] * 0.14),
-            cab_rect[2] - 4,
-            int(cab_rect[3] * 0.72),
+            _draw_round_rect(
+                draw,
+                _rect_xyxy(7, bed_y, width - 14, height - bed_y - 2),
+                fill=_rgba(_darken(body, 18)),
+                radius=2,
+            )
+        _draw_round_rect(draw, cab_rect, fill=_rgba(cabin), radius=3)
+        glass_rect = _rect_xyxy(
+            cab_x + 2,
+            cab_y + int(cab_h * 0.14),
+            max(1, cab_w - 4),
+            max(1, int(cab_h * 0.86)),
         )
-        pygame.draw.rect(surf, glass, glass_rect, border_radius=2)
+        _draw_round_rect(draw, glass_rect, fill=_rgba(glass), radius=2)
         if stripe and accent:
-            pygame.draw.rect(surf, accent, (width // 2 - 1, 2, 2, height - 4))
-        if roof_rack:
-            pygame.draw.line(surf, trim, (cab_rect[0] - 2, cab_rect[1]), (cab_rect[0] - 2, cab_rect[1] + cab_rect[3]), 2)
-        _wheel(surf, 3, 7, 2, 4)
-        _wheel(surf, width - 3, 7, 2, 4)
-        _wheel(surf, 3, height - 7, 2, 4)
-        _wheel(surf, width - 3, height - 7, 2, 4)
-        pygame.draw.circle(surf, HEADLIGHT, (width // 2, 5), 2)
-        pygame.draw.circle(surf, TAILLIGHT, (width // 2, height - 5), 2)
-        _draw_turn_signal_dots(surf, width, height, vertical=True)
+            _draw_round_rect(
+                draw, _rect_xyxy(width // 2 - 1, 2, 2, height - 4), fill=_rgba(accent)
+            )
+        if roof_rack and cab_rect is not None:
+            draw.line(
+                (cab_rect[0] - 2, cab_rect[1], cab_rect[0] - 2, cab_rect[3]),
+                fill=_rgba(trim),
+                width=2,
+            )
+        _wheel(draw, 3, 7, 2, 4)
+        _wheel(draw, width - 3, 7, 2, 4)
+        _wheel(draw, 3, height - 7, 2, 4)
+        _wheel(draw, width - 3, height - 7, 2, 4)
+        draw.ellipse((width // 2 - 2, 3, width // 2 + 2, 7), fill=_rgba(HEADLIGHT))
+        draw.ellipse((width // 2 - 2, height - 7, width // 2 + 2, height - 3), fill=_rgba(TAILLIGHT))
+        _draw_turn_signal_dots(draw, width, height, vertical=True)
 
 
 def _signal_corner(width, height, vertical: bool, direction: int, side: int) -> tuple[int, int]:
@@ -293,11 +394,11 @@ def _signal_corner(width, height, vertical: bool, direction: int, side: int) -> 
     return (width - 5 if side < 0 else 4, height // 2)
 
 
-def _draw_turn_signal_dots(surf, width, height, vertical: bool):
+def _draw_turn_signal_dots(draw, width, height, vertical: bool):
     """Static dim markers; active blink drawn in draw_turn_signal overlay."""
     for side in (-1, 1):
         pos = _signal_corner(width, height, vertical, 1, side)
-        pygame.draw.circle(surf, TURN_SIGNAL_DIM, pos, 2)
+        draw.ellipse((pos[0] - 2, pos[1] - 2, pos[0] + 2, pos[1] + 2), fill=_rgba(TURN_SIGNAL_DIM))
 
 
 def _left_of_travel_vector(vertical: bool, direction: int) -> tuple[int, int]:
@@ -353,7 +454,7 @@ def _turn_signal_local_offset(
 
 
 def _rotate_offset(ox: float, oy: float, angle_deg: float) -> tuple[float, float]:
-    """Match pygame.transform.rotozoom (CCW, screen y down)."""
+    """Match PIL rotate (CCW, screen y down)."""
     rad = math.radians(angle_deg)
     cos_r = math.cos(rad)
     sin_r = math.sin(rad)
@@ -361,7 +462,7 @@ def _rotate_offset(ox: float, oy: float, angle_deg: float) -> tuple[float, float
 
 
 def turn_signal_screen_pos(
-    car_rect: pygame.Rect,
+    car_rect: Rect,
     vertical: bool,
     direction: int,
     turn_side: int,
@@ -387,7 +488,7 @@ def turn_signal_screen_pos(
 
 
 def draw_turn_signal(
-    surface,
+    window_height: int,
     car_rect,
     vertical: bool,
     direction: int,
@@ -402,25 +503,46 @@ def draw_turn_signal(
     )
     if pos is None:
         return
+    from .pathwise_render import sim_point_to_arcade
+
+    ax, ay = sim_point_to_arcade(pos[0], pos[1], window_height)
     color = TURN_SIGNAL_COLOR if blink_on else TURN_SIGNAL_DIM
-    pygame.draw.circle(surface, color, pos, 3)
-    pygame.draw.circle(surface, (255, 240, 180), pos, 1)
+    arcade.draw_circle_filled(ax, ay, 3, color)
+    arcade.draw_circle_filled(ax, ay, 1, (255, 240, 180))
 
 
-_car_surface_cache: dict[tuple[int, int, int], pygame.Surface] = {}
-_car_angle_surface_cache: dict[tuple[int, int], pygame.Surface] = {}
-_car_box_surface_cache: dict[tuple[int, int, int, int], pygame.Surface] = {}
+_car_surface_cache: dict[tuple[int, int, int], SpriteAsset] = {}
+_car_box_surface_cache: dict[tuple[int, int, int, int], SpriteAsset] = {}
+
+
+def car_surface_cache_key(vertical=False, direction=1, archetype_index=0) -> tuple[int, int, int]:
+    d_sign = 1 if direction >= 0 else -1
+    v_key = 1 if vertical else 0
+    return (v_key, d_sign, int(archetype_index) % ARCHETYPE_COUNT)
+
+
+def car_box_surface_cache_key(
+    archetype_index: int, angle_deg: float, box_w: int, box_h: int
+) -> tuple[int, int, int, int]:
+    angle_q = int(round(angle_deg / 2.0) * 2) % 360
+    ai = int(archetype_index) % ARCHETYPE_COUNT
+    return (ai, angle_q, int(box_w), int(box_h))
+
+
+def clear_texture_caches() -> None:
+    _car_surface_cache.clear()
+    _car_box_surface_cache.clear()
 
 
 def car_travel_angle_deg(vertical: bool, direction: int) -> float:
-    """Degrees for rotozoom from the east-facing horizontal base sprite."""
+    """Degrees for PIL rotate from the east-facing horizontal base sprite."""
     direction = 1 if direction >= 0 else -1
     if not vertical:
         return 0.0 if direction > 0 else 180.0
     return -90.0 if direction > 0 else 90.0
 
 
-def make_car_surface_at_angle(archetype_index: int, angle_deg: float) -> pygame.Surface:
+def make_car_surface_at_angle(archetype_index: int, angle_deg: float) -> SpriteAsset:
     """Rotated car on a square canvas (legacy); prefer make_car_rotated_in_box for turns."""
     side = max(CAR_WIDTH, CAR_HEIGHT)
     return make_car_rotated_in_box(archetype_index, angle_deg, side, side)
@@ -428,29 +550,28 @@ def make_car_surface_at_angle(archetype_index: int, angle_deg: float) -> pygame.
 
 def make_car_rotated_in_box(
     archetype_index: int, angle_deg: float, box_w: int, box_h: int
-) -> pygame.Surface:
-    angle_q = int(round(angle_deg / 2.0) * 2) % 360
-    ai = int(archetype_index) % ARCHETYPE_COUNT
-    key = (ai, angle_q, int(box_w), int(box_h))
+) -> SpriteAsset:
+    key = car_box_surface_cache_key(archetype_index, angle_deg, box_w, box_h)
     cached = _car_box_surface_cache.get(key)
     if cached is not None:
         return cached
+    angle_q = key[1]
+    ai = key[0]
     base = make_car_surface(vertical=False, direction=1, archetype_index=ai)
+    base_img = base.texture.image.copy()
     if angle_q == 0:
-        rotated = base
+        rotated = base_img
     else:
-        # pygame rotates CCW; angles match car_travel_angle_deg (east=0, south=-90, …).
-        rotated = pygame.transform.rotozoom(base, angle_q, 1.0)
-    canvas = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-    canvas.blit(rotated, rotated.get_rect(center=(box_w // 2, box_h // 2)))
-    _car_box_surface_cache[key] = canvas
-    return canvas
+        rotated = base_img.rotate(angle_q, expand=True, resample=Image.Resampling.BICUBIC)
+    canvas, _ = _new_canvas(box_w, box_h)
+    _paste_center(canvas, rotated)
+    asset = _asset_from_image(canvas, f"car_box_{key}")
+    _car_box_surface_cache[key] = asset
+    return asset
 
 
-def make_car_surface(vertical=False, direction=1, archetype_index=0):
-    d_sign = 1 if direction >= 0 else -1
-    v_key = 1 if vertical else 0
-    key = (v_key, d_sign, int(archetype_index) % ARCHETYPE_COUNT)
+def make_car_surface(vertical=False, direction=1, archetype_index=0) -> SpriteAsset:
+    key = car_surface_cache_key(vertical, direction, archetype_index)
     cached = _car_surface_cache.get(key)
     if cached is not None:
         return cached
@@ -460,19 +581,20 @@ def make_car_surface(vertical=False, direction=1, archetype_index=0):
     else:
         width, height = CAR_WIDTH, CAR_HEIGHT
 
-    surf = pygame.Surface((width, height), pygame.SRCALPHA)
+    img, draw = _new_canvas(width, height)
     archetype = get_archetype(archetype_index)
-    _draw_car_body(surf, width, height, vertical, archetype)
+    _draw_car_body(draw, width, height, vertical, archetype)
 
     if not vertical and direction < 0:
-        surf = pygame.transform.flip(surf, True, False)
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
     elif vertical and direction < 0:
-        surf = pygame.transform.flip(surf, False, True)
-    _car_surface_cache[key] = surf
-    return surf
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    asset = _asset_from_image(img, f"car_{key}")
+    _car_surface_cache[key] = asset
+    return asset
 
 
-def player_body_hitbox(world_rect: pygame.Rect) -> pygame.Rect:
+def player_body_hitbox(world_rect: Rect) -> Rect:
     """
     Tight hitbox matching head + torso in make_pedestrian_surface (not the full square).
     """
@@ -486,45 +608,53 @@ def player_body_hitbox(world_rect: pygame.Rect) -> pygame.Rect:
     head_cy = world_rect.top + int(h * 0.36)
     body_cy = world_rect.top + int(h * 0.62)
 
-    head = pygame.Rect(0, 0, head_r * 2, head_r * 2)
+    head = Rect(0, 0, head_r * 2, head_r * 2)
     head.center = (cx, head_cy)
-    body = pygame.Rect(0, 0, shoulder_w, body_h)
+    body = Rect(0, 0, shoulder_w, body_h)
     body.center = (cx, body_cy)
     return head.union(body)
 
 
-def car_collision_rect(rect: pygame.Rect, vertical: bool) -> pygame.Rect:
+def car_collision_rect_into(rect: Rect, vertical: bool, out: Rect) -> Rect:
     """
     Body shell aligned with _draw_car_body (horizontal: (1,5,w-2,h-10), vertical: (5,1,w-10,h-2)).
+    Writes into ``out`` to avoid per-peer allocations in hot collision loops.
     """
-    r = rect.copy()
     if not vertical:
-        r.x += 1
-        r.y += 5
-        r.w -= 2
-        r.h -= 10
+        out.x = rect.x + 1
+        out.y = rect.y + 5
+        out.w = max(1, rect.w - 2)
+        out.h = max(1, rect.h - 10)
     else:
-        r.x += 5
-        r.y += 1
-        r.w -= 10
-        r.h -= 2
-    r.width = max(1, r.width)
-    r.height = max(1, r.height)
-    return r
+        out.x = rect.x + 5
+        out.y = rect.y + 1
+        out.w = max(1, rect.w - 10)
+        out.h = max(1, rect.h - 2)
+    return out
 
 
-def car_collision_rect_turn(rect: pygame.Rect) -> pygame.Rect:
+def car_collision_rect(rect: Rect, vertical: bool) -> Rect:
+    """Allocate a new body-shell rect (prefer car_collision_rect_into in hot paths)."""
+    return car_collision_rect_into(rect, vertical, rect.copy())
+
+
+def car_collision_rect_turn(rect: Rect) -> Rect:
     """Axis-aligned shell while the car sprite is rotated mid-turn."""
-    r = rect.copy()
-    inset = max(2, min(r.width, r.height) // 8)
-    r.inflate(-inset * 2, -inset * 2)
+    inset = max(2, min(rect.width, rect.height) // 8)
+    r = rect.inflate(-inset * 2, -inset * 2)
     r.width = max(1, r.width)
     r.height = max(1, r.height)
     return r
 
 
-def make_pedestrian_surface(size=PEDESTRIAN_SIZE):
-    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+_pedestrian_asset: SpriteAsset | None = None
+
+
+def make_pedestrian_surface(size=PEDESTRIAN_SIZE) -> SpriteAsset:
+    global _pedestrian_asset
+    if _pedestrian_asset is not None and _pedestrian_asset.width == size:
+        return _pedestrian_asset
+    img, draw = _new_canvas(size, size)
     cx = size // 2
     head_r = max(4, int(size * 0.24))
     shoulder_w = int(size * 0.62)
@@ -532,34 +662,66 @@ def make_pedestrian_surface(size=PEDESTRIAN_SIZE):
     head_cy = int(size * 0.36)
     body_cy = int(size * 0.62)
 
-    pygame.draw.ellipse(
-        surf, PLAYER_FILL, (cx - shoulder_w // 2, body_cy - body_h // 2, shoulder_w, body_h)
+    draw.ellipse(
+        (cx - shoulder_w // 2, body_cy - body_h // 2, cx + shoulder_w // 2, body_cy + body_h // 2),
+        fill=_rgba(PLAYER_FILL),
+        outline=_rgba(PLAYER_OUTLINE),
+        width=1,
     )
-    pygame.draw.ellipse(
-        surf, PLAYER_OUTLINE, (cx - shoulder_w // 2, body_cy - body_h // 2, shoulder_w, body_h), 1
+    draw.ellipse(
+        (cx - head_r, head_cy - head_r, cx + head_r, head_cy + head_r),
+        fill=_rgba(PLAYER_FILL),
+        outline=_rgba(PLAYER_OUTLINE),
+        width=1,
     )
-    pygame.draw.circle(surf, PLAYER_FILL, (cx, head_cy), head_r)
-    pygame.draw.circle(surf, PLAYER_OUTLINE, (cx, head_cy), head_r, 1)
-    return surf
+    _pedestrian_asset = _asset_from_image(img, "pedestrian")
+    return _pedestrian_asset
 
 
-def draw_honk_bubble(surface, car_rect, camera_offset, font):
+_honk_label: arcade.Text | None = None
+
+
+def draw_honk_bubble(window_height: int, car_rect, camera_offset):
+    global _honk_label
     shifted = car_rect.move(-camera_offset[0], -camera_offset[1])
     cx = shifted.centerx
     cy = shifted.top - 8
-    label = font.render("HONK!", True, (122, 74, 0))
+    from .pathwise_render import sim_point_to_arcade, sim_rect_to_arcade_lbwh
+
+    if _honk_label is None:
+        _honk_label = arcade.Text(
+            "HONK!",
+            0,
+            0,
+            (122, 74, 0),
+            font_size=20,
+            anchor_x="center",
+            anchor_y="center",
+        )
+    label = _honk_label
     pad_x, pad_y = 8, 4
-    bubble = label.get_rect(center=(cx, cy - 12))
-    bubble.inflate_ip(pad_x * 2, pad_y * 2)
-    pygame.draw.rect(surface, (255, 243, 205), bubble, border_radius=10)
-    pygame.draw.rect(surface, (245, 165, 36), bubble, width=2, border_radius=10)
-    surface.blit(label, label.get_rect(center=bubble.center))
+    bubble_w = label.content_width + pad_x * 2
+    bubble_h = label.content_height + pad_y * 2
+    bubble_cx = cx
+    bubble_cy = cy - 12
+    left = bubble_cx - bubble_w // 2
+    top = bubble_cy - bubble_h // 2
+    lbwh = sim_rect_to_arcade_lbwh(left, top, bubble_w, bubble_h, window_height)
+    arcade.draw_lbwh_rectangle_filled(lbwh[0], lbwh[1], bubble_w, bubble_h, (255, 243, 205))
+    arcade.draw_lbwh_rectangle_outline(lbwh[0], lbwh[1], bubble_w, bubble_h, (245, 165, 36), 2)
+    tx, ty = sim_point_to_arcade(bubble_cx, bubble_cy, window_height)
+    label.x = tx
+    label.y = ty
+    label.draw()
     for offset in (-18, 18):
-        pygame.draw.arc(
-            surface,
+        arc_cx, arc_cy = sim_point_to_arcade(cx + offset, cy - 20, window_height)
+        arcade.draw_arc_outline(
+            arc_cx,
+            arc_cy,
+            20,
+            16,
             (245, 165, 36),
-            (cx + offset - 10, cy - 28, 20, 16),
-            0.2,
-            2.8,
+            11,
+            160,
             2,
         )

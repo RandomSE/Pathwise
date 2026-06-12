@@ -1,0 +1,5 @@
+# Dev / test dependencies (install after requirements.txt)
+-r requirements.txt
+coverage>=7.6.0
+pytest>=8.0.0
+pytest-cov>=6.0.0

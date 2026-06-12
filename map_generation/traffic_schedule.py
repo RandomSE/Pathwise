@@ -6,8 +6,8 @@ import math
 import random
 from dataclasses import dataclass
 
-import commonUtils
-import sprites
+from pathwise import commonUtils
+from pathwise import sprites
 from map_generation.difficulty import DifficultyProfile
 from map_generation.lane_geometry import lane_center_xy, lateral_axis_value
 
@@ -286,10 +286,20 @@ def spawn_poses_for_event(
             frac = max(g0 + 0.03, min(g1 - 0.03, frac))
             if _frac_in_ranges(frac, forbidden):
                 continue
-            poses.append(_approach_pose_from_frac(road, frac, direction, queue_index=float(k)))
+            pose = _approach_pose_from_frac(road, frac, direction, queue_index=float(k))
+            if pose_overlaps_intersection_rects(
+                pose[0], pose[1], pose[3], intersection_rects
+            ):
+                continue
+            poses.append(pose)
     if not poses:
         for k in range(6):
-            poses.append(car_pose_edge_entry(road, direction, queue_index=float(k)))
+            pose = car_pose_edge_entry(road, direction, queue_index=float(k))
+            if pose_overlaps_intersection_rects(
+                pose[0], pose[1], pose[3], intersection_rects
+            ):
+                continue
+            poses.append(pose)
     return poses
 
 
@@ -297,6 +307,30 @@ def _candidate_rect_from_pose(x: int, y: int, vertical: bool) -> tuple[int, int,
     if vertical:
         return (x, y, CAR_HEIGHT, CAR_WIDTH)
     return (x, y, CAR_WIDTH, CAR_HEIGHT)
+
+
+def pose_overlaps_intersection_rects(
+    x: int,
+    y: int,
+    vertical: bool,
+    intersection_rects: list[tuple[int, int, int, int]],
+    *,
+    pad: int = 0,
+) -> bool:
+    """True when a spawn pose shell overlaps any intersection box (no spawns inside)."""
+    if not intersection_rects:
+        return False
+    ax, ay, aw, ah = _candidate_rect_from_pose(x, y, vertical)
+    collide_pad = RECT_COLLIDE_PAD + pad
+    for ix, iy, iw, ih in intersection_rects:
+        if (
+            ax - collide_pad < ix + iw
+            and ax + aw + collide_pad > ix
+            and ay - collide_pad < iy + ih
+            and ay + ah + collide_pad > iy
+        ):
+            return True
+    return False
 
 
 def _candidate_rect(road, along_frac: float, direction: int) -> tuple[int, int, int, int]:
@@ -530,7 +564,7 @@ def _try_place_initial_edge(
         return event_id
     x, y, _, vertical = _approach_pose_from_frac(road, frac, direction, queue_index=0.0)
     rect = _candidate_rect_from_pose(x, y, vertical)
-    if _spawn_rect_overlaps_intersection(road, frac, direction, intersection_rects):
+    if pose_overlaps_intersection_rects(x, y, vertical, intersection_rects):
         return event_id
     if any(_rects_overlap(rect, other) for other in occupied_rects):
         return event_id

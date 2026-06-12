@@ -1,5 +1,7 @@
 """Serialize the played map layout for dashboard replay."""
 
+from pathwise.traffic_signal_layout import housing_as_list
+
 
 def serialize_map_layout(current_map, road_states, world_bounds):
     crosswalks = []
@@ -11,20 +13,12 @@ def serialize_map_layout(current_map, road_states, world_bounds):
             continue
         seen.add(key)
         sign = state["sign_rect"]
-        if state["direction"] == "vertical":
-            housing = [
-                cw.centerx - 11,
-                cw.top - 68,
-                22,
-                56,
-            ]
-        else:
-            housing = [
-                cw.left - 68,
-                cw.centery - 11,
-                56,
-                22,
-            ]
+        approach = state.get("approach", "west")
+        from pathwise import map_visuals
+
+        housing = map_visuals.traffic_housing_rect(
+            cw, state["direction"], approach
+        )
         crosswalks.append(
             {
                 "x": cw.x,
@@ -32,8 +26,9 @@ def serialize_map_layout(current_map, road_states, world_bounds):
                 "w": cw.w,
                 "h": cw.h,
                 "direction": state["direction"],
+                "approach": approach,
                 "sign": [sign.x, sign.y, sign.w, sign.h],
-                "housing": housing,
+                "housing": housing_as_list(housing),
             }
         )
 
