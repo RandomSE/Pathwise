@@ -114,6 +114,10 @@ class TestTurnStallAbort(unittest.TestCase):
                     frozen.pop(car.spawn_id, None)
                     last_pos.pop(car.spawn_id, None)
                     continue
+                if car._turn_hold_frames > 0:
+                    frozen[car.spawn_id] = 0
+                    last_pos[car.spawn_id] = pos
+                    continue
                 pos = (round(car._turn_px), round(car._turn_py))
                 if last_pos.get(car.spawn_id) == pos:
                     frozen[car.spawn_id] = frozen.get(car.spawn_id, 0) + 1

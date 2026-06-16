@@ -48,6 +48,16 @@ class TestFrameRecorderCap(unittest.TestCase):
         self.assertLessEqual(len(recorder.frames), MAX_REPLAY_FRAMES)
 
 
+    def test_trim_skips_index_zero(self):
+        recorder = FrameRecorder(16)
+        recorder.frames = [
+            {"id": "f_00000", "seq": 0, "t": 0.0, "player": {}, "cars": [], "lights": [], "is_start": True},
+            {"id": "f_00001", "seq": 1, "t": 0.5, "player": {}, "cars": [], "lights": []},
+            {"id": "f_00002", "seq": 2, "t": 1.0, "player": {}, "cars": [], "lights": []},
+        ]
+        drop_idx = recorder._pick_trim_candidate()
+        self.assertNotEqual(drop_idx, 0)
+
     def test_densify_frames_fills_large_gaps(self):
         recorder = FrameRecorder(16)
         car = _CarStub(100, 100)

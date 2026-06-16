@@ -31,3 +31,5 @@ perf_report.html
 spectate_log.json
 spectate_report.json
 spectate_dashboard.html
+tmp_spectate/
+tmp_spectate_*/

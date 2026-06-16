@@ -69,6 +69,19 @@ class TestTurnCollisionPolicy(unittest.TestCase):
             0.0,
         )
 
+    def test_turn_arc_midpoint_biases_to_tangent_corner(self):
+        import main as game
+
+        zone = Rect(100, 100, 120, 120)
+        car = game.Car(130, 148, 3.0, vertical=False, spawn_id=11, road_index=0)
+        car._turn_hub = (zone.centerx, zone.centery)
+        car.rect.center = (190, 156)
+        car._turn_phase = "turning"
+        # horizontal entry -> vertical exit should bias x toward exit and y toward entry
+        mid_x, mid_y = car._turn_arc_midpoint([], zone, 182.0, 210.0)
+        self.assertGreater(mid_x, zone.centerx)
+        self.assertLess(mid_y, 190.0)
+
 
 class _ShellPeer:
     def __init__(self, shell: Rect, turn_phase: str = "none"):

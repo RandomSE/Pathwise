@@ -148,6 +148,15 @@ class TestDecisionLoggerBudget(unittest.TestCase):
         self.assertEqual(advance_count, 0)
         self.assertLessEqual(len(logger.heat_samples), MAX_HEAT_SAMPLES)
 
+    def test_advance_recorded_on_meaningful_progress(self):
+        from analytics.decision_logger import BACKTRACK_MIN_PX, DecisionLogger
+
+        logger = DecisionLogger((0, 0), (200, 0), "test", 4)
+        logger.update((BACKTRACK_MIN_PX + 2, 0), ["right"], False, True, "green", False)
+        advances = [d for d in logger.decisions if d.get("action") == "advance"]
+        self.assertEqual(len(advances), 1)
+        self.assertGreater(advances[0]["delta_px"], BACKTRACK_MIN_PX)
+
 
 if __name__ == "__main__":
     unittest.main()

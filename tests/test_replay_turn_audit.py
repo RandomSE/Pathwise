@@ -13,6 +13,7 @@ from analytics.spectate_round import run_spectate_round
 
 SESSION_SEED = 1890416619
 SWEEP_SEEDS = (42, 12345, SESSION_SEED, 999999, 777777)
+TURN_PRIORITY_SEEDS = (42, 12345, SESSION_SEED, 253410532, 999999)
 
 
 class TestReplayTurnAudit(unittest.TestCase):
@@ -88,6 +89,22 @@ class TestReplayTurnAudit(unittest.TestCase):
                     self.assertLess(overlap_stats["max_streak"], 3)
                     self.assertLessEqual(jump_stats["max_overshoot_px"], 0.0)
                     self.assertTrue(os.path.isfile(result.dashboard_path))
+
+    def test_turn_priority_seed_sweep_has_no_turn_arc_overlap_anomalies(self):
+        for seed in TURN_PRIORITY_SEEDS:
+            with self.subTest(seed=seed):
+                with tempfile.TemporaryDirectory() as tmp:
+                    result = run_spectate_round(
+                        seed=seed,
+                        autopilot=True,
+                        output_dir=tmp,
+                    )
+                    metrics = result.report["metrics"]
+                    self.assertEqual(
+                        metrics["by_kind"].get("turn_arc_overlap", 0),
+                        0,
+                        msg=f"seed {seed} turn_arc_overlap anomalies",
+                    )
 
 
 if __name__ == "__main__":
