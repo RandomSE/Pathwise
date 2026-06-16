@@ -7,6 +7,8 @@ Capture policy:
 - Each frame and decision has a stable unique id.
 """
 
+from pathwise import commonUtils
+
 FIXED_SAMPLE_INTERVAL_S = 1.0 / 12.0
 MIN_FRAME_GAP_S = 0.02
 MAX_REPLAY_GAP_S = 1.0 / 24.0
@@ -26,6 +28,7 @@ DECISION_ACTIONS = frozenset(
         "cross_on_green",
         "risk_event",
         "backtrack",
+        "advance",
         "car_honk",
         "zone_enter",
     }
@@ -42,6 +45,7 @@ DECISION_LABELS = {
     "cross_on_green": "Cross on green",
     "risk_event": "Risk",
     "backtrack": "Backtrack",
+    "advance": "Forward progress",
     "car_honk": "Car honk",
     "zone_enter": "Challenge zone",
 }
@@ -203,6 +207,8 @@ class FrameRecorder:
         best_idx = None
         best_score = -1.0
         for index, frame in enumerate(self.frames):
+            if index == 0:
+                continue
             if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
                 continue
             if frame.get("synthetic"):
@@ -286,9 +292,9 @@ class FrameRecorder:
             drop_idx = None
             best_score = -1.0
             for index, frame in enumerate(out):
-                if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
+                if index == 0 or index == len(out) - 1:
                     continue
-                if index == len(out) - 1:
+                if frame.get("is_start") or frame.get("is_decision") or frame.get("is_end"):
                     continue
                 if not frame.get("synthetic"):
                     continue
@@ -378,8 +384,6 @@ class FrameRecorder:
 
 
 def _serialize_car(car, game_time):
-    from pathwise import commonUtils
-
     rect = car.rect
     vertical = bool(car.vertical)
     draw_w, draw_h = rect.w, rect.h
@@ -404,6 +408,10 @@ def _serialize_car(car, game_time):
         payload["h"] = draw_h
         payload["v"] = 0
         payload["tv"] = 1 if entry_vertical else 0
+        entry_direction = int(
+            getattr(car, "_turn_entry_direction", getattr(car, "direction", 1))
+        )
+        payload["ed"] = entry_direction
         payload["tp"] = turn_phase
         payload["ang"] = round(float(getattr(car, "_turn_display_angle", 0.0)), 1)
         payload["cx"] = round(float(getattr(car, "_turn_px", rect.centerx)))

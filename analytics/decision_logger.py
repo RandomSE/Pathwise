@@ -109,6 +109,13 @@ class DecisionLogger:
                     on_crosswalk=on_crosswalk,
                     on_road=on_road,
                 )
+            elif progress > BACKTRACK_MIN_PX:
+                self._record(
+                    "advance",
+                    delta_px=round(progress, 1),
+                    on_crosswalk=on_crosswalk,
+                    on_road=on_road,
+                )
             if on_crosswalk and light_state == "red":
                 self._record("cross_on_red", light=light_state)
             elif on_crosswalk and light_state == "green":

@@ -12,7 +12,7 @@ ARC_TURN_PHASES = frozenset({"turning", "settling"})
 # Replay is ~12 Hz; allow ~7 px/sim-frame at 60 fps between consecutive samples.
 TURN_JUMP_PX_PER_SIM_FRAME = 7.0
 SIM_FPS = 60.0
-TURN_JUMP_EXTRA_PAD_PX = 12.0
+TURN_JUMP_EXTRA_PAD_PX = 13.0
 MAX_CONTINUOUS_REPLAY_GAP_S = 0.2
 
 

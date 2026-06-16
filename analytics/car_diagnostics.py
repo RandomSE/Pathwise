@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,10 @@ STALL_SECONDS = 10.0
 STALL_MOVE_EPS = 1.5
 BACKWARD_ALONG_EPS = 2.5
 BACKWARD_COOLDOWN_S = 3.0
+SHELL_COLLISION_COOLDOWN_S = 1.0
+CROSS_STALL_COOLDOWN_S = 2.0
+CROSS_STALL_DIST_PX = 140.0
+CROSS_STALL_SPEED = 0.2
 
 
 def displacement_along_travel(
@@ -42,6 +47,12 @@ class _CarTrack:
     stall_started_at: float | None = None
     last_backward_log_at: float = -1e9
     stalled_logged: bool = False
+    last_turn_phase: str = "none"
+    turn_arc_starts: int = 0
+    last_turn_zone_key: tuple | None = None
+    multi_rotation_logged: bool = False
+    shell_collision_logged_at: float = -1e9
+    cross_stall_logged_at: float = -1e9
 
 
 @dataclass
@@ -147,6 +158,97 @@ class CarDiagnosticsLogger:
         vertical, direction = self._effective_travel(car)
         along = displacement_along_travel(dx, dy, vertical, direction)
         phase = getattr(car, "_turn_phase", "none")
+        zone_key = getattr(car, "_turn_zone_key", None)
+        if phase == "turning" and track.last_turn_phase != "turning":
+            track.turn_arc_starts += 1
+            if (
+                track.turn_arc_starts > 1
+                and zone_key is not None
+                and zone_key == track.last_turn_zone_key
+                and not track.multi_rotation_logged
+            ):
+                track.multi_rotation_logged = True
+                self._log_anomaly(
+                    car,
+                    kind="multi_turn_rotation",
+                    game_time=game_time,
+                    round_frame=round_frame,
+                    dx=dx,
+                    dy=dy,
+                    along_travel=along,
+                    moved=moved,
+                    intersection_zones=intersection_zones,
+                    move_peers=move_peers,
+                    player_center=player_center,
+                    extra={
+                        "turn_arc_starts": track.turn_arc_starts,
+                        "turn_zone_key": list(zone_key) if zone_key else None,
+                    },
+                )
+        track.last_turn_phase = phase
+        if zone_key is not None:
+            track.last_turn_zone_key = zone_key
+
+        from pathwise.geom import collide
+
+        my_shell = getattr(car, "_collision_shell", car.rect)
+        for other in move_peers:
+            if other is car or not getattr(other, "alive", lambda: True)():
+                continue
+            if collide(my_shell, other._collision_shell):
+                if game_time - track.shell_collision_logged_at >= SHELL_COLLISION_COOLDOWN_S:
+                    track.shell_collision_logged_at = game_time
+                    self._log_anomaly(
+                        car,
+                        kind="shell_collision",
+                        game_time=game_time,
+                        round_frame=round_frame,
+                        dx=dx,
+                        dy=dy,
+                        along_travel=along,
+                        moved=moved,
+                        intersection_zones=intersection_zones,
+                        move_peers=move_peers,
+                        player_center=player_center,
+                        extra={"other_spawn_id": getattr(other, "spawn_id", None)},
+                    )
+                break
+
+        if float(getattr(car, "current_speed", 0.0)) < CROSS_STALL_SPEED:
+            for other in move_peers:
+                if other is car or not getattr(other, "alive", lambda: True)():
+                    continue
+                if float(getattr(other, "current_speed", 0.0)) >= CROSS_STALL_SPEED:
+                    continue
+                ox, oy = other.rect.centerx, other.rect.centery
+                dist = ((ox - cx) ** 2 + (oy - cy) ** 2) ** 0.5
+                if dist > CROSS_STALL_DIST_PX:
+                    continue
+                ov, od = self._effective_travel(other)
+                if vertical == ov and direction == od:
+                    continue
+                if game_time - track.cross_stall_logged_at >= CROSS_STALL_COOLDOWN_S:
+                    track.cross_stall_logged_at = game_time
+                    self._log_anomaly(
+                        car,
+                        kind="cross_direction_stall",
+                        game_time=game_time,
+                        round_frame=round_frame,
+                        dx=dx,
+                        dy=dy,
+                        along_travel=along,
+                        moved=moved,
+                        intersection_zones=intersection_zones,
+                        move_peers=move_peers,
+                        player_center=player_center,
+                        extra={
+                            "other_spawn_id": getattr(other, "spawn_id", None),
+                            "other_travel": travel_label(ov, od),
+                            "distance_px": round(dist, 1),
+                        },
+                    )
+                break
+
         backward = phase not in ("turning", "settling") and is_backward_along_travel(
             along
         )
@@ -313,6 +415,7 @@ class CarDiagnosticsLogger:
         move_peers: list,
         player_center: tuple[float, float] | None,
         stall_duration_s: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         payload = {
             "event": kind,
@@ -335,9 +438,14 @@ class CarDiagnosticsLogger:
             ),
             "nearby_cars": self._nearby_snapshot(car, move_peers, player_center),
         }
+        if extra:
+            payload.update(extra)
         self._append(payload)
 
     def _append(self, payload: dict[str, Any]) -> None:
+        parent = os.path.dirname(os.path.abspath(self.path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 

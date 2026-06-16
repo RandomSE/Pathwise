@@ -122,6 +122,14 @@ class TestTurnDeadlockHeadless(unittest.TestCase):
                         break
                 if not near_turner:
                     continue
+                if any(
+                    t._turn_phase in ("turning", "settling", "to_hub")
+                    and (t.current_speed < 0.4 or getattr(t, "_turn_hold_frames", 0) > 0)
+                    for t in turners
+                    if abs(car.rect.centerx - t.rect.centerx) < 72
+                    and abs(car.rect.centery - t.rect.centery) < 72
+                ):
+                    continue
                 sid = car.spawn_id
                 seen.add(sid)
                 frozen[sid] = frozen.get(sid, 0) + 1

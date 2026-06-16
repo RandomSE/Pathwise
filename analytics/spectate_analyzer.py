@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pathwise.geom import Rect, rects_overlap
+from pathwise.sim_constants import INTERSECTION_STUCK_CREEP_FRAMES
 
 
 NEAR_TURNER_DIST = 72
@@ -211,6 +212,9 @@ class SpectateTracker:
             if not near:
                 self._frozen_near_turner[car.spawn_id] = 0
                 continue
+            if _lawful_wait_near_turner(car, turners):
+                self._frozen_near_turner[car.spawn_id] = 0
+                continue
             sid = car.spawn_id
             seen_frozen.add(sid)
             streak = self._frozen_near_turner.get(sid, 0) + 1
@@ -283,8 +287,16 @@ class SpectateTracker:
             for car in alive:
                 if car.current_speed >= GRIDLOCK_SPEED_THRESH:
                     continue
-                if _car_in_any_zone(car, intersection_zones):
-                    slow_in_ix += 1
+                if not _car_in_any_zone(car, intersection_zones):
+                    continue
+                # Cars already in the gridlock-despawn pipeline are self-healing.
+                if (
+                    car._turn_phase == "none"
+                    and car.turn_signal == 0
+                    and getattr(car, "_gridlock_frames", 0) >= INTERSECTION_STUCK_CREEP_FRAMES
+                ):
+                    continue
+                slow_in_ix += 1
             if slow_in_ix >= GRIDLOCK_MIN_CARS:
                 self._gridlock_streak += 1
             else:
@@ -350,6 +362,21 @@ def _near_any_turner(car, turners: list) -> bool:
             and abs(cy - other.rect.centery) < NEAR_TURNER_DIST
         ):
             return True
+    return False
+
+
+def _lawful_wait_near_turner(car, turners: list) -> bool:
+    """Straight traffic stopped while a turner holds is expected, not gridlock."""
+    if car.current_speed > FROZEN_SPEED_THRESH:
+        return False
+    if car._turn_phase != "none" or car.turn_signal != 0:
+        return False
+    if not _near_any_turner(car, turners):
+        return False
+    for turner in turners:
+        if turner._turn_phase in ("turning", "settling", "to_hub"):
+            if turner.current_speed < 0.4 or getattr(turner, "_turn_hold_frames", 0) > 0:
+                return True
     return False
 
 

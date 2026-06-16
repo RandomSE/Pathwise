@@ -102,6 +102,56 @@ class TestRectClipBehavior(unittest.TestCase):
         b = Rect(20, 20, 10, 10)
         self.assertEqual(a.clip(b), Rect(20, 20, 0, 0))
 
+    def test_invalid_constructor_raises(self):
+        with self.assertRaises(TypeError):
+            Rect(1, 2, 3)
+
+    def test_collidepoint_tuple_and_pair(self):
+        r = Rect(0, 0, 10, 10)
+        self.assertTrue(r.collidepoint((5, 5)))
+        self.assertTrue(r.collidepoint(5, 5))
+        with self.assertRaises(TypeError):
+            r.collidepoint(1, 2, 3)
+
+    def test_clamp_ip_branches(self):
+        outer = Rect(0, 0, 100, 100)
+        inner = Rect(-10, -10, 120, 120)
+        inner.clamp_ip(outer)
+        self.assertEqual(inner.left, outer.left)
+        inner = Rect(90, 90, 20, 20)
+        inner.clamp_ip(outer)
+        self.assertEqual(inner.right, outer.right)
+
+
+class TestPedestrianMovement(unittest.TestCase):
+    def test_all_direction_keys(self):
+        from pathwise.input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KeyState
+        from pathwise.pedestrian import Pedestrian
+
+        ped = Pedestrian((100, 100))
+        start_y = ped.rect.y
+        keys = KeyState()
+        keys.press(KEY_LEFT)
+        ped.update(keys)
+        keys.release(KEY_LEFT)
+        keys.press(KEY_DOWN)
+        ped.update(keys)
+        self.assertGreater(ped.rect.y, start_y)
+
+
+class TestPathwiseRenderHelpers(unittest.TestCase):
+    def test_draw_sprite_asset(self):
+        from unittest.mock import MagicMock, patch
+
+        from pathwise.geom import Rect
+        from pathwise.pathwise_render import draw_sprite_asset
+
+        asset = MagicMock()
+        asset.texture = MagicMock()
+        with patch("pathwise.pathwise_render.draw_sim_texture_rect") as draw_tex:
+            draw_sprite_asset(asset, Rect(0, 0, 20, 20), (0, 0), 600)
+            draw_tex.assert_called_once()
+
 
 class TestRectOverlapArea(unittest.TestCase):
     def test_disjoint(self):

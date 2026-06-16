@@ -129,8 +129,12 @@ def run_spectate_round(
     sample_stride: int = 1,
 ) -> SpectateResult:
     import main as game
+    from analytics.car_diagnostics import car_diagnostics
 
     os.makedirs(output_dir, exist_ok=True)
+    os.environ["PATHWISE_CAR_DIAGNOSTICS"] = "1"
+    car_diagnostics.path = os.path.join(output_dir, "traffic_events.jsonl")
+    car_diagnostics.begin_session(session_seed=seed)
     _configure_session(game, seed, preset)
 
     clock = SyntheticClock(t=1_000_000.0, dt=SIM_DT_S)
@@ -260,8 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-o",
         "--output-dir",
-        default=".",
-        help="Directory for spectate_log.json, spectate_report.json, spectate_dashboard.html",
+        default=None,
+        help="Directory for outputs (default: tmp_spectate/<seed>)",
     )
     parser.add_argument(
         "--playback-rate",
@@ -285,11 +289,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.pop("PATHWISE_PERF_PROFILE", None)
     os.environ.pop("PATHWISE_CAR_DIAGNOSTICS", None)
 
+    output_dir = args.output_dir if args.output_dir is not None else os.path.join("tmp_spectate", str(args.seed))
     result = run_spectate_round(
         seed=args.seed,
         preset=args.preset,
         autopilot=not args.no_autopilot,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         playback_rate=args.playback_rate,
         max_frames=args.max_frames,
     )

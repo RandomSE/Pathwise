@@ -111,5 +111,96 @@ class TestTurnPathCollision(unittest.TestCase):
         )
 
 
+    def test_turn_intent_survives_long_intersection_block(self):
+        """Blocked mid-arc turn must keep blinker/plan — not straight-through abort."""
+        import main as game
+
+        zone = Rect(200, 200, 100, 100)
+        blocker = game.Car(248, 248, 3.0, vertical=False, spawn_id=1)
+        blocker._turn_phase = "none"
+        blocker._sync_collision_shell(force=True)
+
+        turner = game.Car(240, 240, 3.0, vertical=False, spawn_id=9)
+        turner._turn_phase = "turning"
+        turner._turn_exit = (0, 1, True)
+        turner.turn_signal = 1
+        turner._turn_arc_len = 120.0
+        turner._turn_arc_travel = 40.0
+        turner._turn_px = float(zone.centerx)
+        turner._turn_py = float(zone.centery)
+        turner._turn_angle_start = 0.0
+        turner._turn_angle_end = 90.0
+        turner._set_turn_visual(30.0, turner._turn_px, turner._turn_py)
+        turner._sync_collision_shell(force=True)
+        turner.rect.center = (int(turner._turn_px), int(turner._turn_py))
+
+        for _ in range(game.TURN_HOLD_RETRY_FRAMES * 2 - 1):
+            turner._freeze_blocked_turn_in_intersection(
+                [zone],
+                [],
+                [blocker],
+                Rect(0, 0, 1, 1),
+                True,
+                zone,
+            )
+
+        self.assertEqual(turner._turn_phase, "turning")
+        self.assertEqual(turner.turn_signal, 1)
+        self.assertIsNotNone(turner._turn_exit)
+        self.assertGreater(turner._turn_hold_frames, 0)
+
+        turner._turn_hold_frames = game.TURN_HOLD_RETRY_FRAMES * 2
+        turner._pause_turn_commitment()
+        self.assertEqual(turner._turn_phase, "turning")
+        self.assertEqual(turner.turn_signal, 1)
+
+        turner2 = game.Car(240, 240, 3.0, vertical=False, spawn_id=10)
+        turner2._turn_phase = "turning"
+        turner2._turn_exit = (0, 1, True)
+        turner2.turn_signal = 1
+        turner2._turn_arc_len = 120.0
+        turner2._turn_arc_travel = 40.0
+        turner2._turn_px = float(zone.centerx)
+        turner2._turn_py = float(zone.centery)
+        turner2._set_turn_visual(30.0, turner2._turn_px, turner2._turn_py)
+        turner2._sync_collision_shell(force=True)
+        turner2._exit_turn_visual_keep_plan()
+        self.assertEqual(turner2._turn_phase, "none")
+        self.assertEqual(turner2.turn_signal, 1)
+        self.assertIsNotNone(turner2._turn_exit)
+        self.assertEqual(turner2._turn_hold_frames, game.TURN_PEER_YIELD_FRAMES)
+
+    def test_steer_turn_uses_eased_segment_window(self):
+        import main as game
+
+        car = game.Car(200, 200, 3.0, vertical=False, spawn_id=44, road_index=0)
+        car._turn_phase = "turning"
+        car._turn_exit = (0, 1, True)
+        car._turn_arc_len = 100.0
+        car._turn_arc_travel = 20.0
+        car.current_speed = 2.4
+        car._turn_angle_start = 0.0
+        car._turn_angle_end = 90.0
+        car._turn_arc_start = (200.0, 200.0)
+        car._turn_arc_mid = (220.0, 220.0)
+        car._turn_arc_end = (240.0, 240.0)
+        seen = {}
+
+        def _capture_segment(self, peers, player_body_rect, ped_legal_crossing, t_from, t_to, intersection_zones=None):
+            seen["from"] = t_from
+            seen["to"] = t_to
+            return False
+
+        car._turn_segment_clear = _capture_segment.__get__(car, type(car))
+        car._steer_through_turn([], [], [], Rect(0, 0, 1, 1), True)
+
+        step = max(car.base_speed * game.TURN_MIN_STEP_FRAC, 2.4) * game.TURN_DRIFT_SPEED_FRAC
+        raw_from = 20.0 / 100.0
+        raw_to = min(1.0, (20.0 + step) / 100.0)
+        self.assertIn("from", seen)
+        self.assertAlmostEqual(seen["from"], game._smoothstep(raw_from), places=5)
+        self.assertAlmostEqual(seen["to"], game._smoothstep(raw_to), places=5)
+
+
 if __name__ == "__main__":
     unittest.main()
