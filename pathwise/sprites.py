@@ -80,8 +80,6 @@ PLAYER_OUTLINE = (255, 255, 255)
 
 ARCHETYPE_COUNT = 100
 WHITE_ARCHETYPE_COUNT = 50
-TURN_SIGNAL_COLOR = (255, 214, 64)
-TURN_SIGNAL_DIM = (180, 140, 40)
 
 WHITE_STYLES = ("sedan", "sport", "compact", "suv", "wagon", "pickup", "van", "hatch")
 WHITE_TONES = (
@@ -338,7 +336,6 @@ def _draw_car_body(draw, width, height, vertical, archetype):
         _wheel(draw, width - 7, height - 3, 4, 2)
         draw.ellipse((width - 7, height // 2 - 2, width - 3, height // 2 + 2), fill=_rgba(HEADLIGHT))
         draw.ellipse((3, height // 2 - 2, 7, height // 2 + 2), fill=_rgba(TAILLIGHT))
-        _draw_turn_signal_dots(draw, width, height, vertical=False)
     else:
         _draw_round_rect(
             draw,
@@ -380,135 +377,10 @@ def _draw_car_body(draw, width, height, vertical, archetype):
         _wheel(draw, width - 3, height - 7, 2, 4)
         draw.ellipse((width // 2 - 2, 3, width // 2 + 2, 7), fill=_rgba(HEADLIGHT))
         draw.ellipse((width // 2 - 2, height - 7, width // 2 + 2, height - 3), fill=_rgba(TAILLIGHT))
-        _draw_turn_signal_dots(draw, width, height, vertical=True)
-
-
-def _signal_corner(width, height, vertical: bool, direction: int, side: int) -> tuple[int, int]:
-    """side: -1 left, 1 right in driver's frame (before direction flip)."""
-    if not vertical:
-        if direction > 0:
-            return (width // 2, 4 if side < 0 else height - 5)
-        return (width // 2, height - 5 if side < 0 else 4)
-    if direction > 0:
-        return (4 if side < 0 else width - 5, height // 2)
-    return (width - 5 if side < 0 else 4, height // 2)
-
-
-def _draw_turn_signal_dots(draw, width, height, vertical: bool):
-    """Static dim markers; active blink drawn in draw_turn_signal overlay."""
-    for side in (-1, 1):
-        pos = _signal_corner(width, height, vertical, 1, side)
-        draw.ellipse((pos[0] - 2, pos[1] - 2, pos[0] + 2, pos[1] + 2), fill=_rgba(TURN_SIGNAL_DIM))
-
-
-def _left_of_travel_vector(vertical: bool, direction: int) -> tuple[int, int]:
-    """Screen-space unit-ish vector to the left of travel (y down)."""
-    direction = 1 if direction >= 0 else -1
-    if not vertical:
-        fx, fy = direction, 0
-    else:
-        fx, fy = 0, direction
-    return fy, -fx
-
-
-def _corner_side_for_screen_vector(
-    vertical: bool, direction: int, vx: int, vy: int
-) -> int:
-    """Pick sprite corner (-1/+1) that points most toward screen vector (vx, vy)."""
-    direction = 1 if direction >= 0 else -1
-    bw, bh = _body_dimensions(vertical)
-    best_side = -1
-    best_dot = -1e9
-    for side in (-1, 1):
-        lx, ly = _signal_corner(bw, bh, vertical, direction, side)
-        dot = (lx - bw * 0.5) * vx + (ly - bh * 0.5) * vy
-        if dot > best_dot:
-            best_dot = dot
-            best_side = side
-    return best_side
-
-
-def turn_signal_corner_side(vertical: bool, direction: int, turn_side: int) -> int:
-    """Blinker on the body side that faces the turn (top-down), not driver-side LH."""
-    if turn_side == 0:
-        return 0
-    lvx, lvy = _left_of_travel_vector(vertical, direction)
-    if turn_side > 0:
-        lvx, lvy = -lvx, -lvy
-    return _corner_side_for_screen_vector(vertical, direction, lvx, lvy)
-
-
 def _body_dimensions(vertical: bool) -> tuple[int, int]:
     if vertical:
         return CAR_HEIGHT, CAR_WIDTH
     return CAR_WIDTH, CAR_HEIGHT
-
-
-def _turn_signal_local_offset(
-    vertical: bool, direction: int, corner_side: int
-) -> tuple[float, float]:
-    """Offset from body center to blinker on the unrotated body (east-facing base)."""
-    bw, bh = _body_dimensions(vertical)
-    lx, ly = _signal_corner(bw, bh, vertical, direction, corner_side)
-    return lx - bw * 0.5, ly - bh * 0.5
-
-
-def _rotate_offset(ox: float, oy: float, angle_deg: float) -> tuple[float, float]:
-    """Match PIL rotate (CCW, screen y down)."""
-    rad = math.radians(angle_deg)
-    cos_r = math.cos(rad)
-    sin_r = math.sin(rad)
-    return ox * cos_r - oy * sin_r, ox * sin_r + oy * cos_r
-
-
-def turn_signal_screen_pos(
-    car_rect: Rect,
-    vertical: bool,
-    direction: int,
-    turn_side: int,
-    camera_offset: tuple[int, int],
-    angle_deg: float | None = None,
-) -> tuple[int, int] | None:
-    """World blinker position; pass angle_deg while the car sprite is rotated in a square box."""
-    corner_side = turn_signal_corner_side(vertical, direction, turn_side)
-    if corner_side == 0:
-        return None
-    ox, oy = _turn_signal_local_offset(vertical, direction, corner_side)
-    if angle_deg is not None:
-        ox, oy = _rotate_offset(ox, oy, angle_deg)
-        sx = car_rect.centerx + ox - camera_offset[0]
-        sy = car_rect.centery + oy - camera_offset[1]
-        return int(round(sx)), int(round(sy))
-    bw, bh = _body_dimensions(vertical)
-    lx, ly = _signal_corner(bw, bh, vertical, direction, corner_side)
-    return (
-        car_rect.x + lx - camera_offset[0],
-        car_rect.y + ly - camera_offset[1],
-    )
-
-
-def draw_turn_signal(
-    window_height: int,
-    car_rect,
-    vertical: bool,
-    direction: int,
-    turn_side: int,
-    blink_on: bool,
-    camera_offset,
-    angle_deg: float | None = None,
-):
-    """Amber indicator on the driver's side for the intended turn (left-hand traffic)."""
-    pos = turn_signal_screen_pos(
-        car_rect, vertical, direction, turn_side, camera_offset, angle_deg
-    )
-    if pos is None:
-        return
-    from .pathwise_render import sim_point_to_arcade
-
-    ax, ay = sim_point_to_arcade(pos[0], pos[1], window_height)
-    color = TURN_SIGNAL_COLOR if blink_on else TURN_SIGNAL_DIM
-    arcade.draw_circle_filled(ax, ay, 3, color)
-    arcade.draw_circle_filled(ax, ay, 1, (255, 240, 180))
 
 
 _car_surface_cache: dict[tuple[int, int, int], SpriteAsset] = {}
@@ -639,12 +511,8 @@ def car_collision_rect(rect: Rect, vertical: bool) -> Rect:
 
 
 def car_collision_rect_turn(rect: Rect) -> Rect:
-    """Axis-aligned shell while the car sprite is rotated mid-turn."""
-    inset = max(2, min(rect.width, rect.height) // 8)
-    r = rect.inflate(-inset * 2, -inset * 2)
-    r.width = max(1, r.width)
-    r.height = max(1, r.height)
-    return r
+    """Compatibility helper after turn removal."""
+    return car_collision_rect(rect, False)
 
 
 _pedestrian_asset: SpriteAsset | None = None

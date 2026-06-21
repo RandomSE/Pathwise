@@ -1,15 +1,20 @@
 import unittest
 
 from analytics.traffic_lights import (
+    FORBIDDEN_PERPENDICULAR_PAIRS,
     GREEN_FRAC,
     RED_FRAC,
     YELLOW_FRAC,
+    alternation_cycle_length,
+    arm_light_state_at,
     cycle_durations,
     light_state_at,
-    perpendicular_arm_offset,
+    perpendicular_light_states_at,
     perpendicular_phase_offsets,
+    perpendicular_pair_legal,
     protected_turn_light_at,
     seconds_to_change,
+    seconds_to_change_arm,
 )
 
 
@@ -35,15 +40,31 @@ class TestTrafficLightTiming(unittest.TestCase):
 
     def test_perpendicular_arms_opposite(self):
         g, y, r = cycle_durations(20.0)
-        v_off, h_off = perpendicular_phase_offsets(0.0, g, y)
-        for t in range(200):
-            elapsed = t * 0.1
-            v_state = light_state_at(elapsed + v_off, g, y, r)
-            h_state = light_state_at(elapsed + h_off, g, y, r)
+        alt = alternation_cycle_length(g, y)
+        for i in range(400):
+            elapsed = (i / 400.0) * alt
+            v_state, h_state = perpendicular_light_states_at(elapsed, 0.0, g, y)
+            self.assertTrue(
+                perpendicular_pair_legal(v_state, h_state),
+                msg=f"t={elapsed} v={v_state} h={h_state}",
+            )
             if v_state == "green":
-                self.assertNotEqual(h_state, "green", msg=f"t={elapsed}")
+                self.assertEqual(h_state, "red", msg=f"t={elapsed}")
             if h_state == "green":
-                self.assertNotEqual(v_state, "green", msg=f"t={elapsed}")
+                self.assertEqual(v_state, "red", msg=f"t={elapsed}")
+            if v_state == "yellow":
+                self.assertEqual(h_state, "red", msg=f"t={elapsed}")
+            if h_state == "yellow":
+                self.assertEqual(v_state, "red", msg=f"t={elapsed}")
+
+    def test_no_forbidden_perpendicular_pairs_full_cycle(self):
+        g, y, r = cycle_durations(20.0)
+        alt = alternation_cycle_length(g, y)
+        steps = 500
+        for i in range(steps):
+            elapsed = (i / steps) * alt
+            pair = perpendicular_light_states_at(elapsed, 0.0, g, y)
+            self.assertNotIn(pair, FORBIDDEN_PERPENDICULAR_PAIRS, msg=f"t={elapsed}")
 
     def test_seconds_to_change_counts_down(self):
         g, y, r = cycle_durations(20.0)
@@ -52,23 +73,30 @@ class TestTrafficLightTiming(unittest.TestCase):
         self.assertAlmostEqual(secs, g)
         self.assertEqual(nxt, "yellow")
 
-    def test_protected_turn_green_when_perpendicular_red(self):
+    def test_protected_turn_matches_approach_straight_signal(self):
         g, y, r = cycle_durations(20.0)
-        v_off, h_off = perpendicular_phase_offsets(0.0, g, y)
         elapsed = 0.0
-        perp_state = light_state_at(elapsed + h_off, g, y, r)
-        self.assertEqual(perp_state, "red")
-        turn_state, turn_secs = protected_turn_light_at(elapsed, v_off, g, y, r)
-        self.assertEqual(turn_state, "green")
-        self.assertGreater(turn_secs, 0.0)
+        straight = arm_light_state_at(
+            elapsed, 0.0, arm_vertical=True, green_s=g, yellow_s=y
+        )
+        turn_state, _ = protected_turn_light_at(elapsed, 0.0, g, y, r, arm_vertical=True)
+        self.assertEqual(turn_state, straight)
 
-    def test_protected_turn_red_when_perpendicular_green(self):
+    def test_protected_turn_red_when_approach_red(self):
         g, y, r = cycle_durations(20.0)
-        v_off, h_off = perpendicular_phase_offsets(0.0, g, y)
-        elapsed = g + 0.5
-        perp_state = light_state_at(elapsed + h_off, g, y, r)
-        self.assertEqual(perp_state, "green")
-        turn_state, _ = protected_turn_light_at(elapsed, v_off, g, y, r)
+        alt = alternation_cycle_length(g, y)
+        elapsed = g + y + 0.1
+        while elapsed < alt:
+            straight = arm_light_state_at(
+                elapsed, 0.0, arm_vertical=True, green_s=g, yellow_s=y
+            )
+            if straight == "red":
+                break
+            elapsed += 0.05
+        turn_state, _ = protected_turn_light_at(
+            elapsed, 0.0, g, y, r, arm_vertical=True
+        )
+        self.assertEqual(straight, "red")
         self.assertEqual(turn_state, "red")
 
 

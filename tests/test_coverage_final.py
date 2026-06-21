@@ -44,7 +44,18 @@ class TestFrameRecorderEdgeCases(unittest.TestCase):
         rec = FrameRecorder(28)
         rec.queue_decision("not_a_real_action")
         player = Rect(0, 0, 20, 20)
-        states = [{"light_state": "green", "turn_light_state": "red", "seconds_to_change": 1.0}]
+        states = [
+            {
+                "crosswalk": Rect(0, 0, 40, 12),
+                "direction": "horizontal",
+                "light_state": "green",
+                "turn_light_state": "red",
+                "seconds_to_change": 1.0,
+                "turn_seconds_to_change": 1.0,
+                "next_light": "yellow",
+                "next_turn_light": "red",
+            }
+        ]
         for i in range(500):
             rec.capture(float(i) * 0.05, player, [], states, force=(i % 50 == 0))
 

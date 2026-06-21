@@ -26,6 +26,8 @@ from pathwise.car import (
 from pathwise.geom import Rect, rect_overlap_area, rects_overlap
 from pathwise.sim_constants import *  # noqa: F403
 
+_SPAWN_ALONG_MIN_GAP = CAR_WIDTH * 2 + MIN_ALONG_GAP + 20
+
 # Round-scoped globals wired by main.start_round
 CAR_SPEED_MULT = 1.0
 _round_city_block_rects: tuple[Rect, ...] = ()
@@ -191,9 +193,9 @@ def _spawn_forward_lane_clear(
     direction: int,
     peers,
 ) -> bool:
-    """True when no same-lane car is too close along the travel axis."""
+    """True when no same-lane car is too close along the travel axis (either direction)."""
     along_len = CAR_HEIGHT if vertical else CAR_WIDTH
-    need_gap = along_len + MIN_ALONG_GAP + 6
+    need_gap = max(along_len + MIN_ALONG_GAP + 6, _SPAWN_ALONG_MIN_GAP)
     for other in peers:
         if other.vertical != vertical or other.direction != direction:
             continue
@@ -207,6 +209,12 @@ def _spawn_forward_lane_clear(
             continue
         if abs(ahead) < need_gap:
             return False
+        if ahead < 0:
+            closing = -ahead
+            closing_speed = max(other.current_speed, CAR_CREEP_SPEED * 0.5)
+            meet = need_gap + closing_speed * CAR_SPAWN_RAMP_FRAMES
+            if closing < meet:
+                return False
     return True
 
 
@@ -270,7 +278,8 @@ def _spawn_probe_blocked(
                 ahead = (other.rect.centerx - rect.centerx) * direction
                 lane_gap = abs(other.rect.centery - rect.centery)
             along_len = CAR_HEIGHT if vertical else CAR_WIDTH
-            if lane_gap < CAR_FOLLOW_LANE_GAP and abs(ahead) < along_len + MIN_ALONG_GAP:
+            along_need = max(along_len + MIN_ALONG_GAP + 6, _SPAWN_ALONG_MIN_GAP)
+            if lane_gap < CAR_FOLLOW_LANE_GAP and abs(ahead) < along_need:
                 return True
     return False
 
@@ -363,7 +372,9 @@ def _spawn_car_from_event(
         ):
             continue
         if spatial is not None and scratch is not None:
-            lane_peers = spatial.nearby(probe_shell, CAR_NEARBY_PAD, scratch)
+            lane_peers = spatial.nearby(
+                probe_shell, CAR_NEARBY_PAD + _SPAWN_ALONG_MIN_GAP, scratch
+            )
         else:
             lane_peers = cars_group
         if not _spawn_forward_lane_clear(probe_rect, vertical, direction, lane_peers):
@@ -386,6 +397,15 @@ def _spawn_car_from_event(
         )
         cars_group.add(candidate)
         all_sprites_group.add(candidate)
+        if intersection_zones:
+            pad = INTERSECTION_APPROACH_SPAWN_PAD
+            for zone in intersection_zones:
+                if rects_overlap(
+                    candidate._collision_shell,
+                    zone.inflate(pad, pad),
+                ):
+                    candidate._spawn_clear_ix_frames = 90
+                    break
         return True
     return False
 

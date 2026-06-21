@@ -18,6 +18,9 @@ SHELL_COLLISION_COOLDOWN_S = 1.0
 CROSS_STALL_COOLDOWN_S = 2.0
 CROSS_STALL_DIST_PX = 140.0
 CROSS_STALL_SPEED = 0.2
+PROXIMITY_THRESH_PX = 16
+PROXIMITY_STREAK_FRAMES = 30
+PROXIMITY_STREAK_COOLDOWN_S = 3.0
 
 
 def displacement_along_travel(
@@ -47,12 +50,9 @@ class _CarTrack:
     stall_started_at: float | None = None
     last_backward_log_at: float = -1e9
     stalled_logged: bool = False
-    last_turn_phase: str = "none"
-    turn_arc_starts: int = 0
-    last_turn_zone_key: tuple | None = None
-    multi_rotation_logged: bool = False
     shell_collision_logged_at: float = -1e9
     cross_stall_logged_at: float = -1e9
+    proximity_streak_logged_at: float = -1e9
 
 
 @dataclass
@@ -60,6 +60,8 @@ class CarDiagnosticsLogger:
     path: str = DEFAULT_DIAG_PATH
     stall_seconds: float = STALL_SECONDS
     _tracks: dict[int, _CarTrack] = field(default_factory=dict)
+    _proximity_pair_streak: dict[tuple[int, int], int] = field(default_factory=dict)
+    _proximity_logged_pairs: set[tuple[int, int]] = field(default_factory=set)
     _round_index: int = 0
     _round_frame: int = 0
     _session_seed: int | None = None
@@ -76,6 +78,8 @@ class CarDiagnosticsLogger:
     ) -> None:
         self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._tracks.clear()
+        self._proximity_pair_streak.clear()
+        self._proximity_logged_pairs.clear()
         with open(self.path, "w", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
@@ -109,6 +113,8 @@ class CarDiagnosticsLogger:
         if self._session_started_at is None:
             self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._tracks.clear()
+        self._proximity_pair_streak.clear()
+        self._proximity_logged_pairs.clear()
         self._append(
             {
                 "event": "round_start",
@@ -157,38 +163,6 @@ class CarDiagnosticsLogger:
 
         vertical, direction = self._effective_travel(car)
         along = displacement_along_travel(dx, dy, vertical, direction)
-        phase = getattr(car, "_turn_phase", "none")
-        zone_key = getattr(car, "_turn_zone_key", None)
-        if phase == "turning" and track.last_turn_phase != "turning":
-            track.turn_arc_starts += 1
-            if (
-                track.turn_arc_starts > 1
-                and zone_key is not None
-                and zone_key == track.last_turn_zone_key
-                and not track.multi_rotation_logged
-            ):
-                track.multi_rotation_logged = True
-                self._log_anomaly(
-                    car,
-                    kind="multi_turn_rotation",
-                    game_time=game_time,
-                    round_frame=round_frame,
-                    dx=dx,
-                    dy=dy,
-                    along_travel=along,
-                    moved=moved,
-                    intersection_zones=intersection_zones,
-                    move_peers=move_peers,
-                    player_center=player_center,
-                    extra={
-                        "turn_arc_starts": track.turn_arc_starts,
-                        "turn_zone_key": list(zone_key) if zone_key else None,
-                    },
-                )
-        track.last_turn_phase = phase
-        if zone_key is not None:
-            track.last_turn_zone_key = zone_key
-
         from pathwise.geom import collide
 
         my_shell = getattr(car, "_collision_shell", car.rect)
@@ -213,6 +187,20 @@ class CarDiagnosticsLogger:
                         extra={"other_spawn_id": getattr(other, "spawn_id", None)},
                     )
                 break
+
+        self._observe_proximity_streaks(
+            car,
+            my_shell=my_shell,
+            game_time=game_time,
+            round_frame=round_frame,
+            dx=dx,
+            dy=dy,
+            along=along,
+            moved=moved,
+            intersection_zones=intersection_zones,
+            move_peers=move_peers,
+            player_center=player_center,
+        )
 
         if float(getattr(car, "current_speed", 0.0)) < CROSS_STALL_SPEED:
             for other in move_peers:
@@ -249,9 +237,7 @@ class CarDiagnosticsLogger:
                     )
                 break
 
-        backward = phase not in ("turning", "settling") and is_backward_along_travel(
-            along
-        )
+        backward = is_backward_along_travel(along)
 
         if backward:
             if game_time - track.last_backward_log_at >= BACKWARD_COOLDOWN_S:
@@ -301,12 +287,6 @@ class CarDiagnosticsLogger:
         track.last_center = (cx, cy)
 
     def _effective_travel(self, car) -> tuple[bool, int]:
-        phase = getattr(car, "_turn_phase", "none")
-        if phase in ("to_hub", "turning", "settling") and getattr(car, "_turn_exit", None):
-            return (
-                bool(getattr(car, "_turn_entry_vertical", car.vertical)),
-                int(getattr(car, "_turn_entry_direction", car.direction)),
-            )
         return bool(car.vertical), int(car.direction)
 
     def _car_snapshot(
@@ -320,14 +300,6 @@ class CarDiagnosticsLogger:
         stall_duration_s: float | None = None,
     ) -> dict[str, Any]:
         vertical, direction = self._effective_travel(car)
-        turn_exit = getattr(car, "_turn_exit", None)
-        turn_hub = getattr(car, "_turn_hub", None)
-        hub_off = None
-        if turn_hub is not None and hasattr(car, "_hub_travel_offset"):
-            try:
-                hub_off = round(float(car._hub_travel_offset()), 2)
-            except Exception:
-                hub_off = None
         snap: dict[str, Any] = {
             "spawn_id": getattr(car, "spawn_id", None),
             "road_index": getattr(car, "road_index", None),
@@ -339,18 +311,6 @@ class CarDiagnosticsLogger:
             "current_speed": round(float(getattr(car, "current_speed", 0.0)), 3),
             "speed": round(float(getattr(car, "speed", 0.0)), 3),
             "base_speed": round(float(getattr(car, "base_speed", 0.0)), 3),
-            "turn_phase": getattr(car, "_turn_phase", "none"),
-            "turn_signal": int(getattr(car, "turn_signal", 0)),
-            "turn_exit": (
-                {"road_index": turn_exit[0], "direction": turn_exit[1], "vertical": turn_exit[2]}
-                if turn_exit
-                else None
-            ),
-            "turn_hub": list(turn_hub) if turn_hub else None,
-            "hub_travel_offset": hub_off,
-            "turn_arc_travel": round(float(getattr(car, "_turn_arc_travel", 0.0)), 2),
-            "turn_arc_len": round(float(getattr(car, "_turn_arc_len", 0.0)), 2),
-            "turn_blocked_frames": int(getattr(car, "_turn_blocked_frames", 0)),
             "intersection_stuck_frames": int(getattr(car, "_intersection_stuck_frames", 0)),
             "stopped_frames": int(getattr(car, "_stopped_frames", 0)),
             "spawn_age_frames": int(getattr(car, "_spawn_age", 0)),
@@ -385,8 +345,6 @@ class CarDiagnosticsLogger:
                     "vertical": bool(other.vertical),
                     "direction": int(other.direction),
                     "current_speed": round(float(getattr(other, "current_speed", 0.0)), 3),
-                    "turn_phase": getattr(other, "_turn_phase", "none"),
-                    "turn_signal": int(getattr(other, "turn_signal", 0)),
                 }
             )
         out.sort(key=lambda item: item["distance_px"])
@@ -399,6 +357,139 @@ class CarDiagnosticsLogger:
             return bool(car._rect_in_intersection(car.rect, intersection_zones))
         shell = getattr(car, "_collision_shell", car.rect)
         return any(z.colliderect(shell) for z in intersection_zones)
+
+    @staticmethod
+    def _shell_gap_px(a: Rect, b: Rect) -> float:
+        dx = max(0, max(a.left - b.right, b.left - a.right))
+        dy = max(0, max(a.top - b.bottom, b.top - a.bottom))
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _shells_in_proximity(self, a: Rect, b: Rect) -> bool:
+        from pathwise.geom import collide
+
+        if collide(a, b):
+            return False
+        return self._shell_gap_px(a, b) <= PROXIMITY_THRESH_PX
+
+    def _lawful_queue_pair(self, car, other) -> bool:
+        if float(getattr(car, "current_speed", 0.0)) > 0.35:
+            return False
+        if float(getattr(other, "current_speed", 0.0)) > 0.35:
+            return False
+        if car.road_index is None or other.road_index is None:
+            return False
+        if car.road_index != other.road_index:
+            return False
+        if bool(car.vertical) != bool(other.vertical):
+            return False
+        if int(car.direction) != int(other.direction):
+            return False
+        direction = 1 if int(car.direction) >= 0 else -1
+        if bool(car.vertical):
+            ahead = (other.rect.centery - car.rect.centery) * direction
+            lane_gap = abs(other.rect.centerx - car.rect.centerx)
+        else:
+            ahead = (other.rect.centerx - car.rect.centerx) * direction
+            lane_gap = abs(other.rect.centery - car.rect.centery)
+        if ahead <= 0 or lane_gap > 28:
+            return False
+        return True
+
+    def _stopped_before_intersection(self, car, intersection_zones) -> bool:
+        if float(getattr(car, "current_speed", 0.0)) > 0.2:
+            return False
+        if self._in_intersection(car, intersection_zones):
+            return False
+        return int(getattr(car, "_stopped_frames", 0)) >= 12
+
+    def _lawful_turn_peer_proximity(self, car, other) -> bool:
+        del car, other
+        return False
+
+    def _proximity_pair_lawful(
+        self, car, other, intersection_zones, move_peers
+    ) -> bool:
+        if self._lawful_queue_pair(car, other):
+            return True
+        if self._lawful_queue_pair(other, car):
+            return True
+        if self._stopped_before_intersection(car, intersection_zones):
+            return True
+        if self._stopped_before_intersection(other, intersection_zones):
+            return True
+        if self._lawful_turn_peer_proximity(car, other):
+            return True
+        return False
+
+    def _observe_proximity_streaks(
+        self,
+        car,
+        *,
+        my_shell,
+        game_time: float,
+        round_frame: int,
+        dx: float,
+        dy: float,
+        along: float,
+        moved: float,
+        intersection_zones,
+        move_peers: list,
+        player_center: tuple[float, float] | None,
+    ) -> None:
+        spawn_id = int(getattr(car, "spawn_id", 0))
+        active_pairs: set[tuple[int, int]] = set()
+        for other in move_peers:
+            if other is car or not getattr(other, "alive", lambda: True)():
+                continue
+            other_shell = getattr(other, "_collision_shell", other.rect)
+            if not self._shells_in_proximity(my_shell, other_shell):
+                continue
+            if self._proximity_pair_lawful(car, other, intersection_zones, move_peers):
+                continue
+            oid = int(getattr(other, "spawn_id", 0))
+            pair = (min(spawn_id, oid), max(spawn_id, oid))
+            active_pairs.add(pair)
+            streak = self._proximity_pair_streak.get(pair, 0) + 1
+            self._proximity_pair_streak[pair] = streak
+            if (
+                streak >= PROXIMITY_STREAK_FRAMES
+                and pair not in self._proximity_logged_pairs
+            ):
+                track = self._tracks.get(spawn_id)
+                if (
+                    track is not None
+                    and game_time - track.proximity_streak_logged_at
+                    >= PROXIMITY_STREAK_COOLDOWN_S
+                ):
+                    track.proximity_streak_logged_at = game_time
+                    self._proximity_logged_pairs.add(pair)
+                    self._log_anomaly(
+                        car,
+                        kind="proximity_streak",
+                        game_time=game_time,
+                        round_frame=round_frame,
+                        dx=dx,
+                        dy=dy,
+                        along_travel=along,
+                        moved=moved,
+                        intersection_zones=intersection_zones,
+                        move_peers=move_peers,
+                        player_center=player_center,
+                        extra={
+                            "other_spawn_id": oid,
+                            "pair": list(pair),
+                            "streak_frames": streak,
+                            "gap_px": round(
+                                self._shell_gap_px(my_shell, other_shell), 1
+                            ),
+                            "proximity_thresh_px": PROXIMITY_THRESH_PX,
+                        },
+                    )
+        for pair in list(self._proximity_pair_streak):
+            if pair[0] != spawn_id and pair[1] != spawn_id:
+                continue
+            if pair not in active_pairs:
+                self._proximity_pair_streak.pop(pair, None)
 
     def _log_anomaly(
         self,

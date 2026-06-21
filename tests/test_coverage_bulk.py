@@ -96,7 +96,6 @@ class TestTrafficLightsExtended(unittest.TestCase):
         from analytics.traffic_lights import (
             cycle_durations,
             light_state_at,
-            protected_turn_light_at,
             seconds_to_change,
         )
 
@@ -105,8 +104,6 @@ class TestTrafficLightsExtended(unittest.TestCase):
         self.assertAlmostEqual(g + y + r, 10.0)
         state, secs, nxt = seconds_to_change(5.0, 0.0, g, y, r)
         self.assertIn(state, ("green", "yellow", "red"))
-        turn, _ = protected_turn_light_at(0.0, 0.0, 0, 0, 0)
-        self.assertEqual(turn, "green")
 
 
 class TestConstraints(unittest.TestCase):
@@ -126,26 +123,6 @@ class TestConstraints(unittest.TestCase):
         self.assertFalse(traffic_density_balanced([0, 1]))
         self.assertTrue(traffic_density_balanced([1, 2]))
         self.assertFalse(road_positions_valid([0, 5], [0, 100], min_gap=10))
-
-
-class TestSpritesSignals(unittest.TestCase):
-    def test_turn_signal_helpers(self):
-        from pathwise.sprites import (
-            draw_turn_signal,
-            turn_signal_corner_side,
-            turn_signal_screen_pos,
-        )
-
-        self.assertEqual(turn_signal_corner_side(False, 1, 0), 0)
-        side = turn_signal_corner_side(False, 1, -1)
-        self.assertIn(side, (-1, 1))
-        rect = Rect(100, 100, 60, 30)
-        pos = turn_signal_screen_pos(rect, False, 1, 1, (0, 0), angle_deg=45.0)
-        self.assertIsNotNone(pos)
-        pos2 = turn_signal_screen_pos(rect, True, -1, -1, (10, 10))
-        self.assertIsNotNone(pos2)
-        with patch("pathwise.sprites.arcade.draw_circle_filled"):
-            draw_turn_signal(600, rect, False, 1, 1, True, (0, 0), angle_deg=0.0)
 
 
 class TestTrafficScheduleExtended(unittest.TestCase):
@@ -232,7 +209,18 @@ class TestPerfProfilerAndFrameRecorder(unittest.TestCase):
 
         rec = FrameRecorder(28)
         player = Rect(0, 0, 20, 20)
-        states = [{"light_state": "green", "turn_light_state": "red", "seconds_to_change": 1.0}]
+        states = [
+            {
+                "crosswalk": Rect(0, 0, 40, 12),
+                "direction": "horizontal",
+                "light_state": "green",
+                "turn_light_state": "red",
+                "seconds_to_change": 1.0,
+                "turn_seconds_to_change": 1.0,
+                "next_light": "yellow",
+                "next_turn_light": "red",
+            }
+        ]
         for i in range(400):
             rec.capture(float(i) * 0.1, player, [], states, force=(i == 0))
         rec.densify_frames(max_gap_s=0.5)

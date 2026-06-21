@@ -53,26 +53,29 @@ class TestIntersectionEntryGate(unittest.TestCase):
     def test_yellow_blocks_if_cannot_clear_in_time(self):
         import main as game
 
-        zone = Rect(100, 100, 80, 80)
-        car = game.Car(35, 115, 3.0, vertical=False, spawn_id=3)
-        car.direction = 1
+        zone = Rect(200, 300, 100, 100)
+        crosswalk = Rect(zone.left, zone.bottom + 6, zone.w, 22)
+        car = game.Car(zone.centerx, 440, 3.0, vertical=True, spawn_id=3)
+        car.direction = -1
         car.current_speed = 0.5
+        car.rect.top = crosswalk.bottom + 8
         car._sync_collision_shell(force=True)
         state = {
-            "crosswalk": Rect(90, 123, 14, 14),
-            "stop_axis": 95,
+            "crosswalk": crosswalk,
             "light_state": "yellow",
             "seconds_to_change": 0.4,
+            "direction": "vertical",
+            "approach": "south",
             "approach_rect": zone.inflate(200, 200),
         }
         next_rect = car.rect.copy()
-        next_rect.x += 2
+        next_rect.y -= 2
         self.assertTrue(
             car._intersection_entry_blocked(
                 next_rect, [state], [zone], [], []
             )
         )
-        self.assertEqual(car._clear_distance_through_zone(zone), 85.0)
+        self.assertGreater(car._clear_distance_through_zone(zone), 80.0)
 
     def test_can_clear_converts_frame_speed_to_seconds(self):
         import main as game
@@ -113,7 +116,7 @@ class TestIntersectionEntryGate(unittest.TestCase):
             )
         )
 
-    def test_turning_car_proceeds_on_turn_light_while_straight_red(self):
+    def test_turning_car_blocked_on_straight_red(self):
         import main as game
 
         zone = Rect(100, 100, 80, 80)
@@ -134,7 +137,7 @@ class TestIntersectionEntryGate(unittest.TestCase):
         }
         next_rect = car.rect.copy()
         next_rect.x += 8
-        self.assertFalse(
+        self.assertTrue(
             car._intersection_entry_blocked(
                 next_rect, [state], [zone], [], []
             )

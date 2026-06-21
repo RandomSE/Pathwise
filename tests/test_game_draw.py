@@ -69,27 +69,5 @@ class TestTrafficLightOverlays(unittest.TestCase):
         args = circle_world.call_args_list[0][0]
         self.assertEqual(args[2], camera)
 
-    @patch("pathwise.game_draw.draw_sim_rect_outline")
-    @patch("pathwise.game_draw.arcade.Text")
-    @patch("pathwise.game_draw.draw_sim_circle_filled_world")
-    @patch("pathwise.game_draw.draw_sim_rect_filled")
-    def test_turn_light_drawn_when_protected_green(
-        self,
-        _rect_fill,
-        circle_world,
-        _text_cls,
-        _outline,
-    ):
-        crosswalk = Rect(100, 200, 14, 90)
-        state = _road_state("vertical")
-        state["light_state"] = "red"
-        state["turn_light_state"] = "green"
-        view_rect = Rect(0, 0, 800, 600)
-        draw_traffic_light_overlays(
-            600, [state], (0, 0), light_green_duration=20.0, view_rect=view_rect
-        )
-        self.assertGreaterEqual(circle_world.call_count, 4)
-
-
 if __name__ == "__main__":
     unittest.main()

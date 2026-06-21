@@ -11,45 +11,18 @@ from pathwise.map import Road
 
 class TestIntersectionRouting(unittest.TestCase):
     def test_routing_helpers(self):
-        import random
-
         from map_generation.intersection_routing import (
-            choose_exit,
             drive_from_vector,
-            exit_options,
             left_vector,
-            pick_turn_side,
-            pivot_center_at_intersection,
             travel_vector,
-            turn_side_from_exit,
-            turn_target_point,
-            turn_vector,
         )
-
-        roads = [
-            Road(Rect(100, 0, 50, 400), "vertical"),
-            Road(Rect(0, 200, 400, 50), "horizontal"),
-        ]
-        zone = Rect(90, 190, 70, 70)
         vec = travel_vector(True, 1)
         self.assertEqual(len(vec), 2)
         lv = left_vector(False, 1)
         self.assertEqual(len(lv), 2)
         vertical, direction = drive_from_vector(0, 1)
         self.assertTrue(vertical)
-        tv = turn_vector(False, 1, 1)
-        self.assertEqual(len(tv), 2)
-        opts = exit_options(roads, zone, False, 1, 1)
-        self.assertIsInstance(opts, list)
-        hub = pivot_center_at_intersection(roads, zone, 0, 1, False)
-        self.assertEqual(len(hub), 2)
-        target = turn_target_point(roads, 0, 1, False)
-        self.assertEqual(len(target), 2)
-        side = pick_turn_side(random.Random(1), turn_chance=1.0)
-        self.assertIn(side, (-1, 0, 1))
-        exit_info = choose_exit(roads, zone, False, 1, side, (120, 210), 0)
-        if exit_info:
-            turn_side_from_exit(False, 1, exit_info[2], exit_info[1])
+        self.assertEqual(direction, 1)
 
 
 class TestMapGenerator(unittest.TestCase):

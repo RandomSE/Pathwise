@@ -66,29 +66,6 @@ class TestMainCarUnit(unittest.TestCase):
         cap = car._soft_overlap_creep_cap(next_rect, [blocker], [blocker], [])
         self.assertIsNotNone(cap)
 
-    def test_planned_move_conflicts_active_turn(self):
-        zone = Rect(100, 100, 90, 90)
-        car = self.game.Car(120, 120, 2.0, vertical=False, spawn_id=1)
-        peer = self.game.Car(125, 125, 0.0, vertical=False, spawn_id=2)
-        peer._turn_phase = "turning"
-        peer._sync_collision_shell(force=True)
-        car._sync_collision_shell(force=True)
-        car._turn_phase = "none"
-        nxt = car.rect.move(2, 0)
-        self.assertIsInstance(
-            car._planned_move_conflicts_active_turn(nxt, [peer], [zone]), bool
-        )
-
-    def test_both_active_turn_peers(self):
-        zone = Rect(100, 100, 80, 80)
-        a = self.game.Car(110, 110, 1.0, vertical=False, spawn_id=1)
-        b = self.game.Car(112, 112, 1.0, vertical=False, spawn_id=2)
-        a._turn_phase = "to_hub"
-        b._turn_phase = "turning"
-        a._sync_collision_shell(force=True)
-        b._sync_collision_shell(force=True)
-        self.assertTrue(a._both_active_turn_peers_at_intersection(b, [zone]))
-
     def test_save_session_log_empty(self):
         self.game.round_results = []
         self.assertIsNone(self.game.save_session_log())
@@ -148,31 +125,6 @@ class TestSpritesHonk(unittest.TestCase):
         text_cls.return_value = label
         draw_honk_bubble(600, Rect(100, 100, 60, 30), (0, 0))
         draw_honk_bubble(600, Rect(100, 100, 60, 30), (0, 0))
-
-
-class TestSpectateAnalyzerPostSeparation(unittest.TestCase):
-    def test_turn_arc_overlap_emitted_after_streak(self):
-        from analytics.spectate_analyzer import SpectateTracker, TURN_ARC_OVERLAP_FRAMES
-
-        import main as game
-
-        tracker = SpectateTracker()
-        a = game.Car(100, 100, 1.0, vertical=False, spawn_id=1)
-        b = game.Car(112, 100, 1.0, vertical=False, spawn_id=2)
-        a._turn_phase = "turning"
-        b._turn_phase = "turning"
-        a._sync_collision_shell(force=True)
-        b._sync_collision_shell(force=True)
-        tracker._turn_arc_pair_streak[(1, 2)] = TURN_ARC_OVERLAP_FRAMES
-        tracker._turn_arc_overlap_cooldown = 0
-        emitted = tracker.observe_pre_separation(
-            frame=99,
-            sim_t=1.5,
-            cars=[a, b],
-            intersection_zones=[],
-        )
-        self.assertEqual(len(emitted), 1)
-        self.assertEqual(emitted[0].kind, "turn_arc_overlap")
 
 
 class TestDecisionLoggerHesitation(unittest.TestCase):

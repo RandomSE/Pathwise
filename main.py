@@ -20,16 +20,7 @@ from pathwise.entity_group import Entity, EntityGroup
 from pathwise.input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KeyState, key_labels_from_state
 from pathwise.session_seed import resolve_session_seed
 from map_generation.difficulty import DifficultyProfile
-from map_generation.intersection_routing import (
-    choose_exit,
-    pick_turn_side,
-    pivot_center_at_intersection,
-    travel_vector,
-    turn_side_from_exit,
-)
-from map_generation.turn_clearance import bezier_point as _bezier_xy
-from map_generation.turn_clearance import corridor_bounds as _turn_corridor_bounds
-from map_generation.turn_clearance import sample_bezier as _sample_bezier_xy
+from map_generation.intersection_routing import travel_vector
 from map_generation.lane_geometry import lane_center_xy
 from map_generation.traffic_schedule import (
     INTERSECTION_SPAWN_PAD,
@@ -53,7 +44,9 @@ from analytics.traffic_lights import (
     cycle_durations,
     light_state_at,
     perpendicular_phase_offsets,
-    protected_turn_light_at,
+    arm_light_state_at,
+    seconds_to_change_arm,
+    alternation_cycle_length,
 )
 from analytics.car_diagnostics import car_diagnostics
 from analytics.perf_profiler import PerfProfiler, perf_profile_enabled
@@ -78,6 +71,7 @@ from pathwise.car import (
     _frame_nearby_scratch,
     _frame_player_car_scratch,
     _lane_peers_for,
+    _fleet_has_shell_overlap,
     _resolve_all_shell_overlaps,
 )
 from pathwise.pedestrian import Pedestrian
@@ -253,29 +247,21 @@ def should_honk_at_player_precomputed(
 
 
 def update_light_timers(road_states, elapsed):
-    cycle = _LIGHT_GREEN + _LIGHT_YELLOW + _LIGHT_RED
     for state in road_states:
-        t = (elapsed + state["phase_offset"]) % cycle
-        light = state["light_state"]
-        if light == "green":
-            state["seconds_to_change"] = _LIGHT_GREEN - t
-            state["next_light"] = "yellow"
-        elif light == "yellow":
-            state["seconds_to_change"] = _LIGHT_GREEN + _LIGHT_YELLOW - t
-            state["next_light"] = "red"
-        else:
-            state["seconds_to_change"] = cycle - t
-            state["next_light"] = "green"
-        turn_state, turn_secs = protected_turn_light_at(
+        arm_vertical = state["direction"] == "vertical"
+        light, secs, nxt = seconds_to_change_arm(
             elapsed,
             state["phase_offset"],
-            _LIGHT_GREEN,
-            _LIGHT_YELLOW,
-            _LIGHT_RED,
+            arm_vertical=arm_vertical,
+            green_s=_LIGHT_GREEN,
+            yellow_s=_LIGHT_YELLOW,
         )
-        state["turn_light_state"] = turn_state
-        state["turn_seconds_to_change"] = turn_secs
-        state["next_turn_light"] = "red" if turn_state == "green" else "green"
+        state["light_state"] = light
+        state["seconds_to_change"] = secs
+        state["next_light"] = nxt
+        state["turn_light_state"] = "red"
+        state["turn_seconds_to_change"] = secs
+        state["next_turn_light"] = nxt
 
 
 def serialize_lights_for_frame(road_states):
@@ -661,13 +647,50 @@ def _build_road_states_by_index(road_states: list, road_count: int) -> list[list
     return grouped
 
 
+def _car_approach_label(car) -> str:
+    vertical = bool(getattr(car, "vertical", False))
+    direction = int(getattr(car, "direction", 1))
+    if vertical:
+        return APPROACH_NORTH if direction > 0 else APPROACH_SOUTH
+    return APPROACH_WEST if direction > 0 else APPROACH_EAST
+
+
+def _oriented_road_states_for_car(car) -> list:
+    return road_states_h if car.vertical else road_states_v
+
+
 def _road_states_for_car(car, fallback_states: list) -> list:
+    oriented = fallback_states
     if car.road_index is None:
-        return fallback_states
+        return oriented
     if car.road_index < 0 or car.road_index >= len(road_states_by_index):
-        return fallback_states
+        return oriented
     tagged = road_states_by_index[car.road_index]
-    return tagged if tagged else fallback_states
+    if not tagged:
+        return oriented
+    if not hasattr(car, "_in_crossing_lane"):
+        return tagged
+    approach_label = _car_approach_label(car)
+    orient = "horizontal" if getattr(car, "vertical", False) else "vertical"
+    extra: list = []
+    seen = {id(state) for state in tagged}
+    brake = RED_SIGNAL_BRAKE_DIST * 2
+    for state in oriented:
+        if id(state) in seen:
+            continue
+        if state.get("direction") != orient or state.get("approach") != approach_label:
+            continue
+        crosswalk = state["crosswalk"]
+        if not car._in_crossing_lane(crosswalk):
+            continue
+        stop_axis = car._signal_stop_axis(crosswalk)
+        if abs(car._distance_to_signal_stop(stop_axis)) > brake:
+            continue
+        seen.add(id(state))
+        extra.append(state)
+    if extra:
+        return tagged + extra
+    return tagged
 
 
 def build_intersection_zones(roads):
@@ -689,8 +712,14 @@ def lane_center_for_road(road, direction, vertical):
     return cx
 
 
-def get_light_state(elapsed_seconds):
-    return light_state_at(elapsed_seconds, _LIGHT_GREEN, _LIGHT_YELLOW, _LIGHT_RED)
+def get_light_state(elapsed_seconds, direction: str = "vertical", phase_offset: float = 0.0):
+    return arm_light_state_at(
+        elapsed_seconds,
+        phase_offset,
+        arm_vertical=(direction == "vertical"),
+        green_s=_LIGHT_GREEN,
+        yellow_s=_LIGHT_YELLOW,
+    )
 
 
 def get_player_light_state(player_rect, states):
@@ -872,7 +901,6 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
 
     with perf_profiler.section("lights_and_crossings"):
         for state in road_states:
-            state["light_state"] = get_light_state(elapsed + state["phase_offset"])
             state["player_waiting"] = False
             road_rect = state["road_rect"]
             crosswalk = state["crosswalk"]
@@ -981,7 +1009,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                 _lane_peers_for(car, lane_buckets, lane_scratch)
                 car.straight_cruise_update(
                     _road_states_for_car(
-                        car, road_states_v if car.vertical else road_states_h
+                        car, _oriented_road_states_for_car(car)
                     ),
                     world_bounds,
                     lane_scratch,
@@ -1002,24 +1030,49 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                     car._spawn_age += 1
                     signed = car.current_speed * car.direction
                     if signed != 0:
+                        next_rect = car.rect.copy()
                         if car.vertical:
-                            car.rect.y += int(signed)
+                            next_rect.y += int(signed)
                         else:
-                            car.rect.x += int(signed)
+                            next_rect.x += int(signed)
+                        oriented = _oriented_road_states_for_car(car)
+                        states = _road_states_for_car(car, oriented)
+                        move_blocked = False
+                        if intersection_zones:
+                            if car._intersection_entry_blocked(
+                                next_rect,
+                                states,
+                                intersection_zones,
+                                [],
+                                [],
+                            ):
+                                move_blocked = True
+                            elif car._intersection_advance_blocked_on_red(
+                                next_rect, states, intersection_zones
+                            ):
+                                move_blocked = True
+                            elif car._crosswalk_advance_blocked(
+                                next_rect, states, intersection_zones
+                            ):
+                                move_blocked = True
+                        if move_blocked:
+                            car.current_speed = 0.0
+                            car.speed = 0.0
+                        else:
+                            car.rect = next_rect
                     car._sync_collision_shell()
                     _frame_car_spatial.relocate_car(car)
                     continue
             _lane_peers_for(car, lane_buckets, lane_scratch)
             peer_pad = 72 if car._turn_phase == "none" and car.turn_signal == 0 else IX_QUERY_PAD
-            if car._turn_phase in ("to_hub", "turning", "settling") or car.turn_signal != 0:
-                peer_pad += TURN_PEER_QUERY_PAD
+            peer_query = car._collision_shell
             move_peers = _frame_car_spatial.nearby(
-                car._collision_shell, peer_pad, move_scratch
+                peer_query, peer_pad, move_scratch
             )
             car._frame_move_peers = move_peers
             car.update(
                 _road_states_for_car(
-                    car, road_states_v if car.vertical else road_states_h
+                    car, _oriented_road_states_for_car(car)
                 ),
                 world_bounds,
                 intersection_zones,
@@ -1042,16 +1095,20 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     with perf_profiler.section("car_shell_separation"):
         if before_shell_separation is not None:
             before_shell_separation(car_list)
+        sep_stride = max(1, sim_tuning.SHELL_SEP_EVERY_N_FRAMES)
         if (
-            round_frame % sim_tuning.SHELL_SEP_EVERY_N_FRAMES == 0
+            round_frame % sep_stride == 0
             or len(car_list) <= sim_tuning.SHELL_SEP_FLEET_THRESHOLD
         ):
-            _resolve_all_shell_overlaps(car_list)
-            if any(
-                c.alive() and c._turn_phase in ("turning", "settling")
-                for c in car_list
+            _resolve_all_shell_overlaps(
+                car_list, _frame_car_spatial, _frame_nearby_scratch
+            )
+            if _fleet_has_shell_overlap(
+                car_list, _frame_car_spatial, _frame_nearby_scratch
             ):
-                _resolve_all_shell_overlaps(car_list)
+                _resolve_all_shell_overlaps(
+                    car_list, _frame_car_spatial, _frame_nearby_scratch
+                )
 
     with perf_profiler.section("car_diagnostics"):
         if ENABLE_CAR_DIAGNOSTICS:

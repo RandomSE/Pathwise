@@ -1,10 +1,19 @@
-"""Traffic signal timing helpers (45% green / 10% yellow / 45% red, perpendicular phases)."""
+"""Traffic signal timing: 4-phase perpendicular pairs (no green+yellow conflicts)."""
 
 from __future__ import annotations
 
 GREEN_FRAC = 0.45
 YELLOW_FRAC = 0.10
 RED_FRAC = 0.45
+
+FORBIDDEN_PERPENDICULAR_PAIRS = frozenset(
+    {
+        ("green", "green"),
+        ("green", "yellow"),
+        ("yellow", "green"),
+        ("yellow", "yellow"),
+    }
+)
 
 
 def cycle_durations(
@@ -26,12 +35,18 @@ def cycle_durations(
     )
 
 
+def alternation_cycle_length(green_s: float, yellow_s: float) -> float:
+    """One green+yellow burst per arm; perpendicular arms alternate."""
+    return 2.0 * (green_s + yellow_s)
+
+
 def light_state_at(
     elapsed_seconds: float,
     green_s: float,
     yellow_s: float,
     red_s: float,
 ) -> str:
+    """Legacy single-arm timeline (green → yellow → red)."""
     cycle = green_s + yellow_s + red_s
     if cycle <= 0:
         return "green"
@@ -41,6 +56,48 @@ def light_state_at(
     if t < green_s + yellow_s:
         return "yellow"
     return "red"
+
+
+def perpendicular_light_states_at(
+    elapsed_seconds: float,
+    phase_offset: float,
+    green_s: float,
+    yellow_s: float,
+) -> tuple[str, str]:
+    """
+    4-phase intersection timing:
+      V green / H red → V yellow / H red → H green / V red → H yellow / V red
+    Yellow on one arm always implies the other arm is red.
+    """
+    alt = alternation_cycle_length(green_s, yellow_s)
+    if alt <= 0:
+        return "red", "red"
+    t = (elapsed_seconds + phase_offset) % alt
+    if t < green_s:
+        return "green", "red"
+    if t < green_s + yellow_s:
+        return "yellow", "red"
+    if t < 2.0 * green_s + yellow_s:
+        return "red", "green"
+    return "red", "yellow"
+
+
+def arm_light_state_at(
+    elapsed_seconds: float,
+    phase_offset: float,
+    *,
+    arm_vertical: bool,
+    green_s: float,
+    yellow_s: float,
+) -> str:
+    vertical, horizontal = perpendicular_light_states_at(
+        elapsed_seconds, phase_offset, green_s, yellow_s
+    )
+    return vertical if arm_vertical else horizontal
+
+
+def perpendicular_pair_legal(vertical_state: str, horizontal_state: str) -> bool:
+    return (vertical_state, horizontal_state) not in FORBIDDEN_PERPENDICULAR_PAIRS
 
 
 def seconds_to_change(
@@ -60,13 +117,43 @@ def seconds_to_change(
     return state, cycle - t, "green"
 
 
+def seconds_to_change_arm(
+    elapsed_seconds: float,
+    phase_offset: float,
+    *,
+    arm_vertical: bool,
+    green_s: float,
+    yellow_s: float,
+) -> tuple[str, float, str]:
+    alt = alternation_cycle_length(green_s, yellow_s)
+    t = (elapsed_seconds + phase_offset) % alt
+    state = arm_light_state_at(
+        elapsed_seconds,
+        phase_offset,
+        arm_vertical=arm_vertical,
+        green_s=green_s,
+        yellow_s=yellow_s,
+    )
+    if state == "green":
+        return state, green_s - t, "yellow"
+    if state == "yellow":
+        if t < green_s + yellow_s:
+            return state, (green_s + yellow_s) - t, "red"
+        return state, alt - t, "green"
+    if t < green_s + yellow_s:
+        return state, (green_s + yellow_s) - t, "green"
+    if t < 2.0 * green_s + yellow_s:
+        return state, (2.0 * green_s + yellow_s) - t, "yellow"
+    return state, alt - t, "green"
+
+
 def perpendicular_arm_offset(
     approach_offset: float,
     green_s: float,
     yellow_s: float,
 ) -> float:
-    """Phase offset of the perpendicular through-arm at the same intersection."""
-    return approach_offset + green_s + yellow_s
+    """Kept for API compat; 4-phase timing uses direction, not perpendicular offset."""
+    return approach_offset
 
 
 def protected_turn_light_at(
@@ -75,23 +162,18 @@ def protected_turn_light_at(
     green_s: float,
     yellow_s: float,
     red_s: float,
+    *,
+    arm_vertical: bool = True,
 ) -> tuple[str, float]:
-    """
-    Protected turn signal: green while perpendicular through-traffic is red.
-
-    Returns (turn_light_state, seconds_to_change).
-    """
-    cycle = green_s + yellow_s + red_s
-    if cycle <= 0:
-        return "green", 0.0
-    perp_off = perpendicular_arm_offset(approach_phase_offset, green_s, yellow_s)
-    perp_t = (elapsed_seconds + perp_off) % cycle
-    perp_state = light_state_at(elapsed_seconds + perp_off, green_s, yellow_s, red_s)
-    if perp_state == "red":
-        return "green", cycle - perp_t
-    if perp_state == "green":
-        return "red", (green_s - perp_t) + yellow_s
-    return "red", green_s + yellow_s - perp_t
+    """Turn arrow follows the approach straight signal (no protected green on red)."""
+    state, secs, _nxt = seconds_to_change_arm(
+        elapsed_seconds,
+        approach_phase_offset,
+        arm_vertical=arm_vertical,
+        green_s=green_s,
+        yellow_s=yellow_s,
+    )
+    return state, secs
 
 
 def perpendicular_phase_offsets(
@@ -99,10 +181,5 @@ def perpendicular_phase_offsets(
     green_s: float,
     yellow_s: float,
 ) -> tuple[float, float]:
-    """
-    Vertical-arm and horizontal-arm offsets for one intersection.
-
-    When the vertical arm is green, the horizontal arm is in its red interval.
-    """
-    half = green_s + yellow_s
-    return base_offset, base_offset + half
+    """Both arms share the same elapsed clock; direction picks the active phase."""
+    return base_offset, base_offset
