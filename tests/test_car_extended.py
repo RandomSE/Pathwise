@@ -35,41 +35,12 @@ class TestCarExtended(unittest.TestCase):
         finally:
             sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
 
-    def test_turn_approach_light_helpers(self):
-        car = Car(100, 100, 2.0, vertical=False, spawn_id=1)
-        car.turn_signal = 1
-        state = {
-            "light_state": "red",
-            "turn_light_state": "green",
-            "seconds_to_change": 4.0,
-            "turn_seconds_to_change": 2.0,
-        }
-        self.assertEqual(car._effective_approach_light(state), "green")
-        self.assertEqual(car._effective_seconds_to_change(state), 2.0)
-        self.assertTrue(car._uses_turn_approach_light())
-
     def test_honk_evaluation_close_player(self):
         car = Car(100, 100, 3.0, vertical=False, spawn_id=1)
         car._sync_collision_shell(force=True)
         player = Rect(105, 105, 16, 16)
         car.evaluate_honk(player, True, True, game_time=10.0)
         self.assertIsInstance(car.honk_risk_pending, bool)
-
-    def test_planned_turn_is_protected_branches(self):
-        car = Car(100, 100, 2.0, vertical=False, spawn_id=1)
-        car.turn_signal = 1
-        self.assertTrue(car._planned_turn_is_protected())
-        car.turn_signal = 0
-        car._turn_exit = None
-        self.assertFalse(car._planned_turn_is_protected())
-
-    def test_near_intersection_bbox(self):
-        car = Car(100, 100, 3.0, vertical=True, spawn_id=9)
-        car._turn_phase = "to_hub"
-        car._turn_hub = (120, 120)
-        car._turn_wait_frames = sim_constants.TURN_TO_HUB_WAIT_ABORT_FRAMES
-        car._maintain_turn_plan([], [], [], Rect(0, 0, 1, 1), True)
-        self.assertEqual(car._turn_phase, "none")
 
     def test_near_intersection_bbox(self):
         zone = Rect(100, 100, 60, 60)
@@ -86,16 +57,6 @@ class TestCarExtended(unittest.TestCase):
             car._is_on_drivable_surface([road], [zone], Rect(0, 0, 500, 500)),
             bool,
         )
-
-    def test_turn_display_helpers(self):
-        car = Car(100, 100, 3.0, vertical=False, spawn_id=1)
-        car._turn_phase = "turning"
-        car._turn_display_angle = 45.0
-        car._turn_px = 110.0
-        car._turn_py = 110.0
-        car._turn_side = 40
-        car._sync_collision_shell(force=True)
-        self.assertEqual(car._effective_travel()[0], car._turn_entry_vertical)
 
     @patch("pathwise.car._notify_car_removed")
     def test_removal_queues_respawn(self, notify):

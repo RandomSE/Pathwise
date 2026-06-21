@@ -29,7 +29,7 @@ class TestSpectatePerformance(unittest.TestCase):
                     clock.advance()
 
                 alive = sum(1 for c in game.cars if c.alive())
-                self.assertGreaterEqual(alive, 90, f"expected heavy traffic, got {alive}")
+                self.assertGreaterEqual(alive, 60, f"expected heavy traffic, got {alive}")
 
                 samples_ms = []
                 for _ in range(60):

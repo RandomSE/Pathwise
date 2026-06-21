@@ -3,15 +3,42 @@
 from pathwise.traffic_signal_layout import housing_as_list
 
 
-def serialize_map_layout(current_map, road_states, world_bounds):
-    crosswalks = []
+def crosswalk_geometry_key(crosswalk) -> tuple[int, int, int, int]:
+    return (crosswalk.x, crosswalk.y, crosswalk.w, crosswalk.h)
+
+
+def dedupe_road_states_by_crosswalk(road_states):
+    """First road_state per physical crosswalk rect (matches replay layout order)."""
     seen = set()
+    out = []
     for state in road_states:
-        cw = state["crosswalk"]
-        key = (cw.x, cw.y, cw.w, cw.h)
+        key = crosswalk_geometry_key(state["crosswalk"])
         if key in seen:
             continue
         seen.add(key)
+        out.append(state)
+    return out
+
+
+def serialize_lights_for_replay(road_states) -> list[dict]:
+    """One light record per map_layout crosswalk (deduped by geometry)."""
+    return [
+        {
+            "s": state["light_state"],
+            "ts": state.get("turn_light_state", "red"),
+            "in": round(state.get("seconds_to_change", 0), 1),
+            "tin": round(state.get("turn_seconds_to_change", 0), 1),
+            "next": state.get("next_light", "green"),
+            "tnext": state.get("next_turn_light", "green"),
+        }
+        for state in dedupe_road_states_by_crosswalk(road_states)
+    ]
+
+
+def serialize_map_layout(current_map, road_states, world_bounds):
+    crosswalks = []
+    for state in dedupe_road_states_by_crosswalk(road_states):
+        cw = state["crosswalk"]
         sign = state["sign_rect"]
         approach = state.get("approach", "west")
         from pathwise import map_visuals

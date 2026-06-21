@@ -7,55 +7,23 @@ import random
 
 from dataclasses import dataclass
 
-from map_generation.intersection_routing import (
-    choose_exit,
-    pick_turn_side,
-    pivot_center_at_intersection,
-    travel_vector,
-    turn_side_from_exit,
-)
-from map_generation.lane_geometry import clamp_keep_left_xy, lane_center_xy
-from map_generation.turn_clearance import bezier_point as _bezier_xy
-from map_generation.turn_clearance import corridor_bounds as _turn_corridor_bounds
-from map_generation.turn_clearance import sample_bezier as _sample_bezier_xy
+from map_generation.lane_geometry import lane_center_xy
 from map_generation.traffic_schedule import MIN_ALONG_GAP, RECT_COLLIDE_PAD
 from pathwise import sprites
 from pathwise.entity_group import Entity
 from pathwise.geom import Rect, collide, clip_rect, contains_rect, rect_overlap_area, rects_overlap
+from pathwise.traffic_signal_layout import (
+    APPROACH_EAST,
+    APPROACH_NORTH,
+    APPROACH_SOUTH,
+    APPROACH_WEST,
+)
 from pathwise.sim_constants import *  # noqa: F403
 import pathwise.sim_constants as _tune
 
 _car_removed_callback = None
 _traffic_map_seed = 0
 _intersection_zones_shell: list = []
-
-
-def _smoothstep(t: float) -> float:
-    t = max(0.0, min(1.0, t))
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _lerp_angle_deg(a: float, b: float, t: float) -> float:
-    delta = (b - a + 180.0) % 360.0 - 180.0
-    return a + delta * t
-
-
-def _turn_arc_delta_deg(start: float, end: float, turn_side: int) -> float:
-    """Signed rotation from start→end that follows blinker side (not shortest arc)."""
-    delta = (end - start + 180.0) % 360.0 - 180.0
-    if turn_side == 0:
-        return delta
-    if turn_side > 0 and delta < 0:
-        delta += 360.0
-    elif turn_side < 0 and delta > 0:
-        delta -= 360.0
-    return delta
-
-
-def _lerp_turn_angle_deg(
-    start: float, end: float, t: float, turn_side: int
-) -> float:
-    return start + _turn_arc_delta_deg(start, end, turn_side) * t
 
 
 def _rect_overlap_area(a: Rect, b: Rect) -> int:
@@ -209,30 +177,55 @@ _frame_car_list_scratch: list = []
 _frame_draw_sprites_scratch: list = []
 
 
-def _resolve_all_shell_overlaps(car_list: list) -> None:
+def _separation_peers(
+    car,
+    alive: list,
+    spatial: "CarSpatialIndex | None",
+    scratch: list,
+) -> list:
+    if spatial is not None:
+        return spatial.nearby(car._collision_shell, _tune.SHELL_SEP_PEER_PAD, scratch)
+    return alive
+
+
+def _fleet_has_shell_overlap(
+    cars: list,
+    spatial: "CarSpatialIndex | None",
+    scratch: list,
+) -> bool:
+    alive = [c for c in cars if c.alive()]
+    for car in alive:
+        peers = _separation_peers(car, alive, spatial, scratch)
+        for other in peers:
+            if other is car:
+                continue
+            if collide(car._collision_shell, other._collision_shell):
+                return True
+    return False
+
+
+def _resolve_all_shell_overlaps(
+    car_list: list,
+    spatial: "CarSpatialIndex | None" = None,
+    scratch: list | None = None,
+) -> None:
     """One deterministic separation pass after all cars move."""
     if not ENABLE_CAR_CAR_SOFT_AVOIDANCE:
         return
     alive = sorted((c for c in car_list if c.alive()), key=lambda c: c.spawn_id)
-    _resolve_arc_turn_shell_overlaps(alive)
     sep_passes = 1 if len(alive) > _tune.SHELL_SEP_FLEET_THRESHOLD else _tune.SHELL_PENETRATION_PASSES
     for car in alive:
-        # Arc turners stay on the Bezier; post-frame nudging causes visible path jitter.
-        if car._turn_phase in ("turning", "settling"):
-            continue
         car._resolve_shell_penetration(
             alive,
             max_nudge=SHELL_PENETRATION_MAX_NUDGE,
             passes=sep_passes,
         )
     for car in alive:
-        if car._turn_phase in ("turning", "settling") or car.current_speed >= 0.25:
+        if car.current_speed >= 0.25:
             continue
         car._sync_collision_shell()
         for other in alive:
             if other is car or other.current_speed >= 0.25:
-                continue
-            if other._turn_phase in ("turning", "settling"):
                 continue
             if collide(car._collision_shell, other._collision_shell):
                 car._resolve_shell_penetration(
@@ -243,48 +236,6 @@ def _resolve_all_shell_overlaps(car_list: list) -> None:
                 break
 
 
-def _resolve_arc_turn_shell_overlaps(car_list: list) -> None:
-    """When two arc turners overlap, lower spawn_id keeps priority; higher backs up."""
-    turners = [
-        c
-        for c in car_list
-        if c.alive() and c._turn_phase in ("turning", "settling")
-    ]
-    for car in turners:
-        for _ in range(6):
-            blocked = False
-            car._sync_collision_shell()
-            for other in car_list:
-                if other is car or not other.alive():
-                    continue
-                if other._turn_phase in ("to_hub", "turning", "settling"):
-                    continue
-                if other.current_speed >= 0.35:
-                    continue
-                if not collide(car._collision_shell, other._collision_shell):
-                    continue
-                car._backup_turn_arc(max(car.base_speed * 0.35, 0.75))
-                car.speed = 0.0
-                car.current_speed = 0.0
-                blocked = True
-            if not blocked:
-                break
-    if len(turners) < 2:
-        return
-    turners.sort(key=lambda c: c.spawn_id)
-    for i, car in enumerate(turners):
-        for other in turners[i + 1 :]:
-            if not rects_overlap(car._collision_shell, other._collision_shell):
-                continue
-            if rect_overlap_area(car._collision_shell, other._collision_shell) < 6:
-                continue
-            if car.spawn_id < other.spawn_id:
-                other._yield_turn_arc_from_peer_overlap([car])
-            else:
-                car._yield_turn_arc_from_peer_overlap([other])
-
-
-# --- Entities ---
 class Car(Entity):
     def __init__(
         self,
@@ -322,43 +273,24 @@ class Car(Entity):
         self._stopped_frames = 0
         self._intersection_stuck_frames = 0
         self._gridlock_frames = 0
-        self._turn_wait_frames = 0
-        self._turn_overlap_frames = 0
+        self._spawn_age = 0
+        self._spawn_clear_ix_frames = 0
+        self._exit_lane_snap_steps = 0
+        self._exit_lane_target = None
+        # Straight-only mode keeps minimal turn fields for legacy readers.
+        self.turn_signal = 0
+        self._turn_phase = "none"
+        self._turn_display_angle = 0.0
+        self._turn_exit = None
         self._turn_hold_frames = 0
         self._turn_reservation_frames = 0
-        self._spawn_age = 0
-        self.turn_signal = 0
-        self._turn_zone_key = None
-        self._turn_exit = None
-        self._turn_hub = None
-        self._turn_phase = "none"
-        self._turn_blend = 0.0
-        self._turn_px = 0.0
-        self._turn_py = 0.0
-        self._turn_side = max(CAR_WIDTH, CAR_HEIGHT)
-        self._turn_arc_len = 0.0
-        self._turn_arc_travel = 0.0
-        self._turn_angle_start = 0.0
-        self._turn_angle_end = 0.0
-        self._turn_angle_draw_q = -999
-        self._turn_display_angle = 0.0
-        self._turn_arc_start = (0.0, 0.0)
-        self._turn_arc_mid = (0.0, 0.0)
-        self._turn_arc_end = (0.0, 0.0)
-        self._turn_settle_blend = 0.0
-        self._turn_settle_target = (0.0, 0.0)
-        self._turn_entry_vertical = vertical
-        self._turn_entry_direction = self.direction
+        self._turn_abort_cooldown = 0
+        self._turn_peer_retreat_cooldown = 0
+        self._turn_snap_travel = 0.0
         self._turn_blocked_frames = 0
         self._turn_stall_frames = 0
         self._turn_stall_center = None
-        self._turn_peer_stall_frames = 0
         self._turn_arc_age = 0
-        self._turn_arc_side = 0
-        self._turn_snap_travel = 0.0
-        self._turn_snap_px = 0.0
-        self._turn_snap_py = 0.0
-        self._turn_abort_cooldown = 0
         self._off_road_frames = 0
         self._spatial_stamp = 0
         self._spatial_cell_keys: tuple = ()
@@ -371,21 +303,9 @@ class Car(Entity):
         self.speed = 0.0
 
     def _effective_travel(self) -> tuple[bool, int]:
-        if self._turn_phase in ("to_hub", "turning", "settling") and self._turn_exit:
-            return self._turn_entry_vertical, self._turn_entry_direction
         return self.vertical, self.direction
 
     def _sync_collision_shell(self, force: bool = False):
-        if self._turn_phase in ("turning", "settling"):
-            cx, cy = round(self._turn_px), round(self._turn_py)
-            key = (cx, cy, self._turn_side, 2)
-            if not force and key == self._shell_sync_key:
-                return
-            self._shell_sync_key = key
-            body = Rect(0, 0, self._turn_side, self._turn_side)
-            body.center = (cx, cy)
-            self._collision_shell = sprites.car_collision_rect_turn(body)
-            return
         key = (self.rect.x, self.rect.y, 0, self.vertical)
         if not force and key == self._shell_sync_key:
             return
@@ -512,290 +432,25 @@ class Car(Entity):
                 desired_speed = min(desired_speed, max(follow_cap, CAR_CREEP_SPEED))
         return desired_speed
 
-    def _other_in_active_turn(self, other) -> bool:
-        """Only committed turn phases block peers — blinkers alone must not gridlock."""
-        return other._turn_phase in ("to_hub", "turning", "settling")
 
-    def _committed_intersection_turn(self, intersection_zones) -> bool:
-        """Turn plan committed only when executing the arc or signaling inside the box."""
-        if self._turn_phase in ("turning", "settling"):
-            return True
-        if not intersection_zones:
-            return False
-        if self._turn_phase == "to_hub":
-            if self._rect_in_intersection(self.rect, intersection_zones):
-                return self.current_speed >= 0.12
-            if self._turn_hub is not None and self.current_speed >= 0.12:
-                hx, hy = self._turn_hub
-                dist = math.hypot(self.rect.centerx - hx, self.rect.centery - hy)
-                lead = TURN_HUB_DIST + TURN_SIGNAL_LEAD_DIST // 3
-                return dist <= lead + 8
-            return False
-        return (
-            self.turn_signal != 0
-            and self._turn_exit is not None
-            and self._turn_phase == "to_hub"
-            and self._rect_in_intersection(self.rect, intersection_zones)
-            and self.current_speed >= 0.12
-        )
+    def _other_in_active_turn(self, other) -> bool:
+        return False
+
+    def _committed_intersection_turn(self, intersection_zones=None) -> bool:
+        return False
 
     def _conflicts_with_committed_turner(
-        self, other, intersection_zones, *, pad: int = 10
+        self, other, intersection_zones=None, *, pad: int = 10, road_states=None
     ) -> bool:
-        if not other._committed_intersection_turn(intersection_zones):
-            return False
-        if intersection_zones and not self._approaching_or_in_intersection(
-            intersection_zones
-        ):
-            return False
-        if rects_overlap(self._collision_shell, other._collision_shell):
-            return True
-        return rects_overlap(
-            self._collision_shell.inflate(pad, pad),
-            other._collision_shell.inflate(pad, pad),
-        )
+        return False
 
     def _planned_move_conflicts_active_turn(
         self, next_rect, peers, intersection_zones
     ) -> bool:
-        """Block on turner shells; corridor reservation only for same-axis + active arc."""
-        if self._turn_phase in ("to_hub", "turning", "settling"):
-            return False
-        my = sprites.car_collision_rect_into(
-            next_rect, self.vertical, self._body_rect_scratch
-        )
-        for other in peers:
-            if other is self:
-                continue
-            oc = other._collision_shell
-            if other._committed_intersection_turn(intersection_zones):
-                if rects_overlap(my.inflate(28, 28), oc):
-                    return True
-                if other._turn_phase in ("turning", "settling") and intersection_zones:
-                    reserved = other._turn_reserved_rect(intersection_zones)
-                    if reserved is not None and rects_overlap(my, reserved):
-                        return True
-                continue
-            if rects_overlap(my, oc):
-                if other._turn_phase in ("to_hub", "turning", "settling"):
-                    return True
-                continue
-            if other._turn_phase not in ("turning", "settling"):
-                continue
-            if other.vertical != self.vertical:
-                continue
-            if intersection_zones:
-                reserved = other._turn_reserved_rect(intersection_zones)
-                if reserved is not None and rects_overlap(my, reserved):
-                    return True
         return False
 
-    def _both_active_turn_peers_at_intersection(
-        self, other, intersection_zones
-    ) -> bool:
-        if self._turn_phase not in ("to_hub", "turning", "settling"):
-            return False
-        if other._turn_phase not in ("to_hub", "turning", "settling"):
-            return False
-        if not intersection_zones:
-            return True
-        self_ix = self._rect_in_intersection(self.rect, intersection_zones) or (
-            self._approaching_or_in_intersection(intersection_zones)
-        )
-        other_ix = other._rect_in_intersection(other.rect, intersection_zones) or (
-            other._approaching_or_in_intersection(intersection_zones)
-        )
-        return self_ix and other_ix
-
-    def _turn_side_for_exit_plan(
-        self, exit_plan=None, *, entry_vertical=None, entry_direction=None
-    ) -> int:
-        """Map a committed exit arm to left/right/straight for replanning."""
-        plan = exit_plan if exit_plan is not None else self._turn_exit
-        if plan is None:
-            return 0
-        _idx, d, exit_vertical = plan
-        ev = (
-            self._turn_entry_vertical
-            if entry_vertical is None
-            else entry_vertical
-        )
-        ed = (
-            self._turn_entry_direction
-            if entry_direction is None
-            else entry_direction
-        )
-        return turn_side_from_exit(ev, ed, exit_vertical, d)
-
-    def _replan_turn_at_zone(
-    self,
-    roads,
-    zone,
-    key,
-    peers,
-    player_body_rect,
-    ped_legal_crossing: bool,
-    *,
-    intended_exit=None,
-    intended_signal: int = 0,
-        ) -> bool: 
-            """Retry turn planning without flipping blinker to the opposite direction."""
-            if self._turn_phase in ("turning", "settling"):
-                if intended_exit is not None and intended_exit == self._turn_exit:
-                    self._prime_turn_arc_geometry(roads, zone)
-                    return True
-                return False
-            if intended_exit is not None and intended_signal != 0:
-                turn_side = self._turn_side_for_exit_plan(intended_exit)
-                if turn_side != 0:
-                    return self._apply_turn_plan_for_side(
-                        roads,
-                        zone,
-                        key,
-                        turn_side,
-                        peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                    )
-            # Only retry the intended signal or straight — NEVER the opposite direction.
-            if intended_signal != 0:
-                candidates = [intended_signal, 0]
-            else:
-                candidates = [0]
-            for turn_side in candidates:
-                if self._apply_turn_plan_for_side(
-                    roads,
-                    zone,
-                    key,
-                    turn_side,
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                ):
-                    return True
-            return False
-
-    def _probe_turn_shell_overlaps_peer(self, peers, cx: float, cy: float) -> bool:
-        shell = self._turn_probe_shell(cx, cy)
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if collide(shell, other._collision_shell):
-                return True
+    def _exit_blocked_by_active_turn(self, next_rect, peers, intersection_zones) -> bool:
         return False
-
-    def _turn_replay_rect(self) -> Rect:
-        """Match replay draw bounds used by frame_recorder for arc turners."""
-        if self._turn_phase in ("turning", "settling"):
-            cx = round(float(self._turn_px))
-            cy = round(float(self._turn_py))
-        else:
-            cx, cy = self.rect.center
-        return Rect(cx - CAR_WIDTH // 2, cy - CAR_HEIGHT // 2, CAR_WIDTH, CAR_HEIGHT)
-
-    def _turn_replay_rect_overlaps_peer(self, peers) -> bool:
-        if self._turn_phase not in ("turning", "settling"):
-            return False
-        my = self._turn_replay_rect()
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if other._turn_phase not in ("turning", "settling"):
-                continue
-            if rects_overlap(my, other._turn_replay_rect()):
-                return True
-        return False
-
-    def _turn_shell_overlaps_peer(
-        self, peers, intersection_zones=None
-    ) -> bool:
-        shell = self._collision_shell
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if collide(shell, other._collision_shell):
-                return True
-        return False
-
-    def _backup_turn_arc(self, backup_px: float) -> None:
-        if self._turn_phase != "turning" or self._turn_arc_len <= 0:
-            return
-        self._turn_arc_travel = max(0.0, self._turn_arc_travel - backup_px)
-        t = self._turn_arc_travel / max(1e-6, self._turn_arc_len)
-        ease = _smoothstep(min(1.0, t))
-        cx, cy = self._bezier_point(ease)
-        angle = _lerp_angle_deg(
-            self._turn_angle_start, self._turn_angle_end, ease
-        )
-        self._set_turn_visual(angle, cx, cy)
-        self._sync_collision_shell(force=True)
-
-    def _yield_turn_arc_from_peer_overlap(self, peers) -> bool:
-        """Lower spawn_id has priority; back up along the arc until shells separate."""
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if other._turn_phase not in ("turning", "settling"):
-                continue
-            if not collide(self._collision_shell, other._collision_shell):
-                continue
-            if other.spawn_id < self.spawn_id:
-                self._backup_turn_arc(max(self.base_speed * 0.5, 1.0))
-                self.speed = 0.0
-                self.current_speed = 0.0
-                return True
-        return False
-
-    def _mitigate_turn_peer_deadlock(
-        self, peers, intersection_zones, roads
-    ) -> None:
-        """Higher spawn_id yields when two turners overlap in the same intersection."""
-        if self._turn_phase not in ("to_hub", "turning", "settling"):
-            self._turn_peer_stall_frames = 0
-            return
-        blocked_by_priority_peer = False
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if not self._both_active_turn_peers_at_intersection(
-                other, intersection_zones
-            ):
-                continue
-            if not rects_overlap(self._collision_shell, other._collision_shell):
-                continue
-            if other.spawn_id < self.spawn_id:
-                blocked_by_priority_peer = True
-                break
-        if blocked_by_priority_peer:
-            self._turn_peer_stall_frames += 1
-            self._yield_turn_arc_from_peer_overlap(peers)
-        elif self.current_speed >= 0.45:
-            self._turn_peer_stall_frames = max(0, self._turn_peer_stall_frames - 2)
-        else:
-            self._turn_peer_stall_frames = 0
-        yield_frames = TURN_PEER_YIELD_FRAMES
-        if self._turn_phase in ("turning", "settling"):
-            yield_frames = max(8, TURN_PEER_YIELD_FRAMES // 2)
-        if self._turn_peer_stall_frames >= yield_frames:
-            if self._turn_phase in ("turning", "settling") and intersection_zones:
-                zone = self._intersection_zone_at(intersection_zones)
-                if zone is not None:
-                    self._freeze_blocked_turn_in_intersection(
-                        intersection_zones,
-                        roads,
-                        peers,
-                        Rect(0, 0, 1, 1),
-                        True,
-                        zone,
-                    )
-            elif self._turn_phase not in ("turning", "settling"):
-                self._hold_turn_and_replan(
-                    intersection_zones,
-                    roads,
-                    peers,
-                )
-            self._turn_peer_stall_frames = 0
-
     def _soft_overlap_creep_cap(
         self, next_rect, move_peers, lane_peers, intersection_zones=None
     ) -> float | None:
@@ -869,671 +524,87 @@ class Car(Entity):
             return None
         return self.rect.left - zone.right
 
-    def _zone_on_entry_route(self, zone, roads) -> bool:
-        if self.road_index is not None and 0 <= self.road_index < len(roads):
-            return collide(roads[self.road_index].rect, zone)
-        for road in roads:
-            if self._matches_road_travel(road) and collide(road.rect, zone):
-                return True
-        return False
-
-    def _intersection_zone_for_turn_planning(self, intersection_zones, roads):
-        if not intersection_zones:
-            return None
-        in_zone = self._intersection_zone_at(intersection_zones)
-        if in_zone is not None:
-            return in_zone
-        best = None
-        best_d = 1e9
-        for zone in intersection_zones:
-            if not self._zone_on_entry_route(zone, roads):
-                continue
-            d = self._distance_to_intersection_entry(zone)
-            if d is None or d < 0 or d > TURN_SIGNAL_LEAD_DIST:
-                continue
-            if d < best_d:
-                best_d = d
-                best = zone
-        return best
-
     def _approaching_or_in_intersection(self, intersection_zones, extra: int = 0) -> bool:
         if not intersection_zones:
             return False
         if self._rect_in_intersection(self.rect, intersection_zones):
             return True
-        lead = TURN_SIGNAL_LEAD_DIST + extra
+        lead = IX_QUERY_PAD + extra
         for zone in intersection_zones:
             d = self._distance_to_intersection_entry(zone)
             if d is not None and 0 <= d < lead:
                 return True
         return False
 
-    def _pivot_exit_clear(
-        self,
-        roads,
-        zone,
-        exit_plan,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-    ) -> bool:
-        idx, d, vertical = exit_plan
-        px, py = pivot_center_at_intersection(roads, zone, idx, d, vertical)
-        if vertical:
-            pw, ph = CAR_HEIGHT, CAR_WIDTH
-        else:
-            pw, ph = CAR_WIDTH, CAR_HEIGHT
-        probe = Rect(0, 0, pw, ph)
-        probe.center = (px, py)
-        probe_shell = sprites.car_collision_rect(probe, vertical)
-        if ENABLE_CAR_CAR_COLLISION:
-            for other in peers:
-                if other is self:
-                    continue
-                if collide(probe_shell, other._collision_shell):
-                    return False
-            if not ped_legal_crossing and collide(probe_shell, player_body_rect):
-                return False
-        return True
-
-    def _planned_turn_is_protected(self) -> bool:
-        if self.turn_signal != 0:
-            return True
-        if not self._turn_exit:
-            return False
-        idx, d, exit_vertical = self._turn_exit
-        entry_v = (
-            self._turn_entry_vertical
-            if self._turn_phase in ("turning", "settling")
-            else self.vertical
-        )
-        entry_d = (
-            self._turn_entry_direction
-            if self._turn_phase in ("turning", "settling")
-            else self.direction
-        )
-        return turn_side_from_exit(entry_v, entry_d, exit_vertical, d) != 0
-
-    def _uses_turn_approach_light(self) -> bool:
-        if self.turn_signal != 0:
-            return True
-        if self._turn_phase in ("to_hub", "turning", "settling"):
-            return self._planned_turn_is_protected()
-        return False
-
     def _effective_approach_light(self, state: dict) -> str:
-        if self._uses_turn_approach_light():
-            return state.get("turn_light_state", state.get("light_state", "green"))
         return state.get("light_state", "green")
 
     def _effective_seconds_to_change(self, state: dict) -> float:
-        if self._uses_turn_approach_light():
-            return float(state.get("turn_seconds_to_change", 0.0))
         return float(state.get("seconds_to_change", 0.0))
 
-    def _maintain_turn_plan(
-        self,
-        roads,
-        intersection_zones,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        road_states=None,
-    ) -> None:
-        """Drop stale turn plans that block traffic or never start."""
-        if self._turn_phase == "to_hub":
-            self._turn_wait_frames += 1
-            if self._turn_wait_frames >= TURN_TO_HUB_WAIT_ABORT_FRAMES:
-                self._turn_phase = "none"
-                self._turn_hub = None
-                self._turn_wait_frames = 0
-                self._turn_blocked_frames = 0
-                self._hold_turn_and_replan(
-                    intersection_zones,
-                    roads,
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                )
-                return
-            if self._turn_exit and not self._turn_path_clear(
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones=intersection_zones,
-            ):
-                if self._turn_wait_frames >= TURN_PATH_BLOCKED_ABORT_FRAMES:
-                    self._hold_turn_and_replan(
-                        intersection_zones,
-                        roads,
-                        peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                    )
-                return
-            return
-        if self._turn_phase in ("turning", "settling"):
-            overlapped = self._turn_replay_rect_overlaps_peer(
-                peers
-            ) or self._turn_shell_overlaps_peer(peers, intersection_zones)
-            if overlapped:
-                self._turn_overlap_frames += 1
-            elif self._turn_overlap_frames > 0:
-                self._turn_overlap_frames = max(0, self._turn_overlap_frames - 2)
-            if not self._turn_path_clear(
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                t_max=0.35,
-                intersection_zones=intersection_zones,
-            ):
-                self._turn_overlap_frames += 1
-            if self._turn_overlap_frames >= 1:
-                yield_to_peer = False
-                for other in peers:
-                    if other is self or not other.alive():
-                        continue
-                    if other._turn_phase not in ("turning", "settling"):
-                        continue
-                    if not (
-                        rects_overlap(
-                            self._turn_replay_rect(), other._turn_replay_rect()
-                        )
-                        or collide(self._collision_shell, other._collision_shell)
-                    ):
-                        continue
-                    if other.spawn_id < self.spawn_id:
-                        yield_to_peer = True
-                        break
-                if yield_to_peer:
-                    self._exit_turn_visual_keep_plan()
-            return
-        if self.turn_signal == 0 and self._turn_exit is None:
-            self._turn_wait_frames = 0
-            return
-        if self.current_speed >= 0.35:
-            self._turn_wait_frames = 0
-            return
-        stalled_in_ix = (
-            intersection_zones
+    def _car_approach_label(self) -> str:
+        if self.vertical:
+            return APPROACH_NORTH if self.direction > 0 else APPROACH_SOUTH
+        return APPROACH_WEST if self.direction > 0 else APPROACH_EAST
+
+    def _signal_orient_and_label(self) -> tuple[str, str]:
+        use_entry = self._turn_phase in ("to_hub", "turning", "settling") or (
+            getattr(self, "_use_entry_approach_signal", False)
             and self._turn_phase == "none"
-            and self.turn_signal != 0
-            and self._rect_in_intersection(self.rect, intersection_zones)
-            and self.current_speed < 0.2
         )
-        stuck_turn_plan = (
-            self._turn_phase == "none"
-            and self.turn_signal != 0
-            and self._turn_exit is not None
-            and self.current_speed < 0.2
-        )
-        if road_states and self._uses_turn_approach_light() and not (
-            stalled_in_ix or stuck_turn_plan
-        ):
-            approach = self._nearest_approach_state(road_states)
-            if (
-                approach is not None
-                and self._effective_approach_light(approach) == "green"
-                and self._turn_path_clear(
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                    intersection_zones=intersection_zones,
-                )
-            ):
-                self._turn_wait_frames = max(0, self._turn_wait_frames - 3)
-                return
-        self._turn_wait_frames += 1
-        if self._turn_exit and not self._turn_path_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=intersection_zones,
-        ):
-            if self._turn_wait_frames >= TURN_PATH_BLOCKED_ABORT_FRAMES:
-                self._hold_turn_and_replan(
-                    intersection_zones,
-                    roads,
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                )
-            return
-        if self._turn_wait_frames >= TURN_SIGNAL_STUCK_FRAMES:
-            zone = self._intersection_zone_for_turn_planning(
-                intersection_zones, roads
+        if use_entry:
+            entry_v = (
+                self._turn_entry_vertical
+                if self._turn_phase != "to_hub"
+                else self.vertical
             )
-            if zone is None:
-                zone = self._intersection_zone_at(intersection_zones)
-            if (
-                zone is not None
-                and (
-                    self._occupies_intersection(zone)
-                    or (
-                        stuck_turn_plan
-                        and self._turn_wait_frames >= TURN_SIGNAL_STUCK_FRAMES * 2
-                    )
-                )
-                and self._turn_wait_frames >= TURN_SIGNAL_STUCK_FRAMES * 2
-            ):
-                key = (zone.x, zone.y, zone.w, zone.h)
-                committed = False
-                for turn_side in (-1, 1, 0):
-                    if turn_side == self.turn_signal:
-                        continue
-                    if not self._apply_turn_plan_for_side(
-                        roads,
-                        zone,
-                        key,
-                        turn_side,
-                        peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                    ):
-                        continue
-                    if turn_side == 0 or self._begin_turn_steer(
-                        roads,
-                        zone,
-                        peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                        intersection_zones=intersection_zones,
-                    ):
-                        committed = True
-                        break
-                if not committed:
-                    self._apply_turn_plan_for_side(
-                        roads,
-                        zone,
-                        key,
-                        0,
-                        peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                    )
-                self._turn_wait_frames = 0
-            else:
-                self._hold_turn_and_replan(
-                    intersection_zones,
-                    roads,
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                )
-
-    def _hold_turn_and_replan(
-        self,
-        intersection_zones,
-        roads,
-        peers=None,
-        player_body_rect=None,
-        ped_legal_crossing: bool = True,
-    ) -> None:
-        """Blocked turn: stop and wait — keep blinker/plan, retry when path may clear."""
-        peers = peers or []
-        if player_body_rect is None:
-            player_body_rect = Rect(0, 0, 1, 1)
-        # Mid-arc: never cancel/replan (replay continuity); pause on the Bezier instead.
-        if self._turn_phase in ("turning", "settling"):
-            zone = self._intersection_zone_for_turn_planning(intersection_zones, roads)
-            if zone is None:
-                zone = self._intersection_zone_at(intersection_zones)
-            if zone is not None:
-                self._freeze_blocked_turn_in_intersection(
-                    intersection_zones,
-                    roads,
-                    peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                    zone,
-                )
-            else:
-                self.speed = 0.0
-                self.current_speed = 0.0
-                self._set_turn_visual(
-                    self._turn_display_angle, self._turn_px, self._turn_py
-                )
-                self._sync_collision_shell(force=True)
-            return
-        zone = self._intersection_zone_for_turn_planning(intersection_zones, roads)
-        if zone is None:
-            zone = self._intersection_zone_at(intersection_zones)
-        in_ix = zone is not None and self._occupies_intersection(zone)
-        committed_turn = self._turn_phase in ("turning", "settling") or (
-            self._turn_phase == "to_hub" and in_ix
-        )
-        if committed_turn and in_ix:
-            self._freeze_blocked_turn_in_intersection(
-                intersection_zones,
-                roads,
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                zone,
+            entry_d = (
+                self._turn_entry_direction
+                if self._turn_phase != "to_hub"
+                else self.direction
             )
-            return
+        else:
+            entry_v = self.vertical
+            entry_d = self.direction
+        orient = "vertical" if entry_v else "horizontal"
+        if entry_v:
+            label = APPROACH_NORTH if entry_d > 0 else APPROACH_SOUTH
+        else:
+            label = APPROACH_WEST if entry_d > 0 else APPROACH_EAST
+        return orient, label
 
-        intended_signal = self.turn_signal
-        intended_exit = self._turn_exit
-        was_visual_turn = self._turn_phase in ("turning", "settling")
-        if was_visual_turn:
-            self._cancel_turn_visual()
-        if self._turn_phase == "to_hub":
-            self._turn_phase = "none"
-            self._turn_hub = None
-        self._turn_wait_frames = 0
-        self._turn_overlap_frames = 0
-        self._turn_blocked_frames = 0
-        self._turn_stall_frames = 0
-        self._turn_stall_center = None
-        self._turn_hold_frames += 1
-        if self._turn_hold_frames >= TURN_HOLD_ZONE_RESET_FRAMES:
-            self._turn_zone_key = None
-        self.turn_signal = intended_signal
-        self._turn_exit = intended_exit
-        if zone is not None and not was_visual_turn:
-            # Only clamp if the car hasn't moved far past the zone entry edge;
-            # large overshoots mean the car is already inside the box and should
-            # clear it rather than be snapped backward (which causes a teleport).
-            if self.vertical:
-                if self.direction > 0:
-                    overshoot = self.rect.bottom - (zone.top - STOP_LINE_GAP)
-                else:
-                    overshoot = (zone.bottom + STOP_LINE_GAP) - self.rect.top
-            else:
-                if self.direction > 0:
-                    overshoot = self.rect.right - (zone.left - STOP_LINE_GAP)
-                else:
-                    overshoot = (zone.right + STOP_LINE_GAP) - self.rect.left
-            if overshoot <= max(CAR_WIDTH, CAR_HEIGHT):
-                self._clamp_before_intersection(zone)
-        if zone is not None and (
-            self._turn_hold_frames == 1
-            or self._turn_hold_frames % TURN_HOLD_RETRY_FRAMES == 0
-        ):
-            key = (zone.x, zone.y, zone.w, zone.h)
-            self._replan_turn_at_zone(
-                roads,
-                zone,
-                key,
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intended_exit=intended_exit,
-                intended_signal=intended_signal,
-            )
-        self.current_speed = 0.0
-        self.speed = 0.0
+    def _on_approach_crosswalk(self, crosswalk: Rect) -> bool:
+        return crosswalk.collidepoint(
+            self.rect.centerx, self.rect.centery
+        ) or collide(self.rect, crosswalk)
 
-    def _exit_turn_visual_keep_plan(self) -> None:
-        """Drop arc sprite only; keep blinker/exit so the turn retries when the box clears."""
-        if self._turn_phase not in ("turning", "settling") or not self._turn_exit:
-            return
-        signal = self.turn_signal
-        exit_plan = self._turn_exit
-        zone_key = self._turn_zone_key
-        snap = (
-            self._turn_arc_travel,
-            self._turn_arc_len,
-            self._turn_angle_start,
-            self._turn_angle_end,
-            self._turn_arc_start,
-            self._turn_arc_mid,
-            self._turn_arc_end,
-            self._turn_entry_vertical,
-            self._turn_entry_direction,
-            float(self._turn_px),
-            float(self._turn_py),
-            self._turn_arc_side,
-        )
-        self._cancel_turn_visual()
-        (
-            self._turn_arc_travel,
-            self._turn_arc_len,
-            self._turn_angle_start,
-            self._turn_angle_end,
-            self._turn_arc_start,
-            self._turn_arc_mid,
-            self._turn_arc_end,
-            self._turn_entry_vertical,
-            self._turn_entry_direction,
-            self._turn_snap_px,
-            self._turn_snap_py,
-            self._turn_arc_side,
-        ) = snap
-        self._turn_snap_travel = self._turn_arc_travel
-        self.turn_signal = signal
-        self._turn_exit = exit_plan
-        self._turn_zone_key = zone_key
-        self._turn_hold_frames = TURN_PEER_YIELD_FRAMES
-        self._turn_stall_frames = 0
-        self._turn_blocked_frames = 0
-        self._turn_overlap_frames = 0
-        self._turn_arc_age = 0
-        self.speed = 0.0
-        self.current_speed = 0.0
-
-    def _resume_snapped_turn_arc(self, peers=None) -> bool:
-        if self._turn_phase != "none" or self._turn_arc_len <= 0 or self._turn_snap_travel <= 0:
+    def _approach_crosswalk_relevant(self, crosswalk: Rect) -> bool:
+        """Signals for crosswalks behind travel are ignored (open-road cruise)."""
+        if not self._in_crossing_lane(crosswalk):
             return False
-        self._turn_arc_travel = self._turn_snap_travel
-        t = self._turn_arc_travel / max(1e-6, self._turn_arc_len)
-        ease = _smoothstep(min(1.0, t))
-        angle = _lerp_turn_angle_deg(
-            self._turn_angle_start,
-            self._turn_angle_end,
-            ease,
-            self._turn_arc_side,
-        )
-        self._turn_phase = "turning"
-        self._set_turn_visual(angle, self._turn_snap_px, self._turn_snap_py)
-        self._sync_collision_shell(force=True)
-        if peers:
-            for other in peers:
-                if other is self or not other.alive():
-                    continue
-                if other._turn_phase in ("turning", "settling") and rects_overlap(
-                    self._turn_replay_rect(), other._turn_replay_rect()
-                ):
-                    self._turn_phase = "none"
-                    self._turn_hold_frames = TURN_PEER_YIELD_FRAMES
-                    return False
-        return True
-
-    def _can_resume_turn_arc(
-        self,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        intersection_zones,
-    ) -> bool:
-        if self._turn_hold_frames <= 0 or not self._turn_exit:
+        if self._on_approach_crosswalk(crosswalk):
+            return True
+        stop_axis = self._signal_stop_axis(crosswalk)
+        stop_dist = self._distance_to_signal_stop(stop_axis)
+        if stop_dist < -STOP_LINE_GAP:
             return False
-        if self._turn_phase == "none":
-            if self._turn_snap_travel <= 0:
-                return False
-            for other in peers:
-                if other is self or not other.alive():
-                    continue
-                if other._turn_phase in ("turning", "settling"):
-                    if rects_overlap(self.rect, other._turn_replay_rect()):
-                        return False
-                    if collide(self.rect, other._collision_shell):
-                        return False
-            return self._turn_path_clear(
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones=intersection_zones,
-            )
-        if self._turn_phase not in ("turning", "settling"):
-            return False
-        if self._turn_shell_overlaps_peer(peers, intersection_zones):
-            return False
-        return self._turn_path_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=intersection_zones,
-        )
+        return stop_dist <= RED_SIGNAL_BRAKE_DIST * 2.5
 
-    def _try_resume_turn_after_block(
-        self,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        intersection_zones,
-    ) -> None:
-        if self._turn_hold_frames <= 0:
-            return
-        if not self._can_resume_turn_arc(
-            peers, player_body_rect, ped_legal_crossing, intersection_zones
-        ):
-            return
-        self._turn_hold_frames = 0
-        self._turn_stall_frames = 0
-        self._turn_blocked_frames = 0
-        self._turn_stall_center = None
-        self._turn_peer_stall_frames = 0
-        self._turn_arc_age = 0
-        if self._turn_phase == "none":
-            self._resume_snapped_turn_arc(peers)
+    def _states_for_our_approach(self, road_states) -> list:
+        orient, label = self._signal_orient_and_label()
+        return [
+            s
+            for s in road_states
+            if s.get("direction") == orient and s.get("approach") == label
+        ]
 
-    def _freeze_blocked_turn_in_intersection(
-        self,
-        intersection_zones,
-        roads,
-        peers,
-        player_body_rect,
-        ped_legal_crossing,
-        zone,
-    ) -> None:
-        """Pause mid-turn inside the intersection without snapping back to the stop line."""
-        if self._turn_hold_frames >= TURN_HOLD_RETRY_FRAMES * 2:
-            if self._turn_shell_overlaps_peer(peers, intersection_zones):
-                self._exit_turn_visual_keep_plan()
-            else:
-                self._pause_turn_commitment()
-            return
-        self._yield_turn_arc_from_peer_overlap(peers)
-        intended_signal = self.turn_signal
-        intended_exit = self._turn_exit
-        self._turn_hold_frames += 1
-        self._turn_wait_frames = 0
-        self._turn_blocked_frames = max(0, self._turn_blocked_frames - 2)
-        self._turn_stall_frames = 0
-        self._turn_stall_center = None
-        self._turn_overlap_frames = max(0, self._turn_overlap_frames - 2)
-        self.turn_signal = intended_signal
-        self._turn_exit = intended_exit
-        self.speed = 0.0
-        self.current_speed = 0.0
-        if self._turn_phase == "turning" and self._turn_arc_len > 0:
-            t = self._turn_arc_travel / max(1e-6, self._turn_arc_len)
-            ease = _smoothstep(min(1.0, t))
-            angle = _lerp_turn_angle_deg(
-                self._turn_angle_start,
-                self._turn_angle_end,
-                ease,
-                self._turn_arc_side,
-            )
-            self._set_turn_visual(angle, self._turn_px, self._turn_py)
-        elif self._turn_phase == "settling":
-            self._set_turn_visual(
-                self._turn_display_angle, self._turn_px, self._turn_py
-            )
-        self._sync_collision_shell(force=True)
-        if self._turn_hold_frames % TURN_HOLD_RETRY_FRAMES == 0:
-            key = (zone.x, zone.y, zone.w, zone.h)
-            self._replan_turn_at_zone(
-                roads,
-                zone,
-                key,
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intended_exit=intended_exit,
-                intended_signal=intended_signal,
-            )
-        self._try_resume_turn_after_block(
-            peers, player_body_rect, ped_legal_crossing, intersection_zones
-        )
-
-    def _pause_turn_commitment(self) -> None:
-        """Hold the arc pose and turn plan until cross traffic clears — do not go straight."""
-        self._turn_hold_frames = max(1, self._turn_hold_frames)
-        self._turn_stall_frames = 0
-        self._turn_blocked_frames = 0
-        self._turn_overlap_frames = max(0, self._turn_overlap_frames - 2)
-        self._turn_peer_stall_frames = 0
-        self.speed = 0.0
-        self.current_speed = 0.0
-        if self._turn_phase == "turning" and self._turn_arc_len > 0:
-            t = self._turn_arc_travel / max(1e-6, self._turn_arc_len)
-            ease = _smoothstep(min(1.0, t))
-            angle = _lerp_turn_angle_deg(
-                self._turn_angle_start,
-                self._turn_angle_end,
-                ease,
-                self._turn_arc_side,
-            )
-            self._set_turn_visual(angle, self._turn_px, self._turn_py)
-            self._sync_collision_shell(force=True)
-        elif self._turn_phase == "settling":
-            self._set_turn_visual(
-                self._turn_display_angle, self._turn_px, self._turn_py
-            )
-            self._sync_collision_shell(force=True)
-
-    def _cancel_turn_visual(self) -> None:
-        px = float(self._turn_px) if self._turn_phase in ("turning", "settling") else float(
-            self.rect.centerx
-        )
-        py = float(self._turn_py) if self._turn_phase in ("turning", "settling") else float(
-            self.rect.centery
-        )
-        self._turn_phase = "none"
-        self._turn_hub = None
-        self._turn_blend = 0.0
-        self._turn_arc_len = 0.0
-        self._turn_arc_travel = 0.0
-        self._turn_angle_start = 0.0
-        self._turn_angle_end = 0.0
-        self._turn_angle_draw_q = -999
-        self._turn_settle_blend = 0.0
-        self._turn_entry_vertical = self.vertical
-        self._turn_entry_direction = self.direction
-        self._refresh_car_sprite()
-        self.rect.center = (round(px), round(py))
-        self._sync_collision_shell(force=True)
-
-    def _abort_turn(self):
-        was_visual_turn = self._turn_phase in ("turning", "settling")
-        self.turn_signal = 0
-        self._turn_wait_frames = 0
-        self._turn_overlap_frames = 0
-        self._turn_hold_frames = 0
-        self._turn_exit = None
-        self._turn_phase = "none"
-        self._turn_hub = None
-        self._turn_zone_key = None
-        self._turn_blend = 0.0
-        self._turn_arc_len = 0.0
-        self._turn_arc_travel = 0.0
-        self._turn_angle_start = 0.0
-        self._turn_angle_end = 0.0
-        self._turn_angle_draw_q = -999
-        self._turn_settle_blend = 0.0
-        self._turn_entry_vertical = self.vertical
-        self._turn_entry_direction = self.direction
-        self._turn_blocked_frames = 0
-        self._turn_stall_frames = 0
-        self._turn_stall_center = None
-        self._turn_peer_stall_frames = 0
-        self._turn_abort_cooldown = TURN_ABORT_COOLDOWN_FRAMES
-        if was_visual_turn:
-            self._refresh_car_sprite()
-            self._sync_collision_shell(force=True)
+    def _straight_light_at_approach(self, road_states) -> str | None:
+        if not road_states:
+            return None
+        approach = self._approach_state_for_signal(road_states)
+        if approach is None:
+            return None
+        return approach.get("light_state", "green")
 
     def _occupies_intersection(self, zone: Rect) -> bool:
         """True when body, shell, or arc center is inside the intersection box."""
@@ -1721,7 +792,6 @@ class Car(Entity):
             for other in peers:
                 if other is self or not other.alive():
                     continue
-                other._sync_collision_shell()
                 oc = other._collision_shell
                 if not collide(my, oc):
                     continue
@@ -1779,10 +849,15 @@ class Car(Entity):
                         self.rect.x += (oc.right + g) - my.left
 
     def _rect_in_intersection(self, rect, intersection_zones):
-        for zone in intersection_zones:
-            if rects_overlap(zone, rect):
-                return True
-        return False
+        if not intersection_zones:
+            return False
+        key = (rect.left, rect.top, rect.right, rect.bottom)
+        cached = getattr(self, "_ix_rect_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        hit = any(rects_overlap(zone, rect) for zone in intersection_zones)
+        self._ix_rect_cache = (key, hit)
+        return hit
 
     def _near_intersection_bbox(self, intersection_zones, margin: int = 120) -> bool:
         if not intersection_zones:
@@ -2025,428 +1100,28 @@ class Car(Entity):
         self.rect.center = center
         self._shell_sync_key = None
 
-    def _hub_travel_offset(self) -> float:
-        """Signed distance from hub along entry travel (+ = past hub)."""
-        if self._turn_hub is None:
-            return 0.0
-        hx, hy = self._turn_hub
-        fx, fy = travel_vector(self.vertical, self.direction)
-        return (self.rect.centerx - hx) * fx + (self.rect.centery - hy) * fy
-
-    def _snap_to_hub_approach(self, max_past: float = 0.0):
-        """Pull back if the car rolled past the hub while waiting to turn."""
-        if self._turn_hub is None:
-            return
-        off = self._hub_travel_offset()
-        if off <= max_past:
-            return
-        hx, hy = self._turn_hub
-        fx, fy = travel_vector(self.vertical, self.direction)
-        self.rect.center = (
-            round(self.rect.centerx - (off - max_past) * fx),
-            round(self.rect.centery - (off - max_past) * fy),
-        )
-
-    def _cap_next_rect_to_hub(self, next_rect: Rect) -> Rect:
-        """While approaching the hub, do not drive through before the turn starts."""
-        if self._turn_phase != "to_hub" or self._turn_hub is None:
-            return next_rect
-        hx, hy = self._turn_hub
-        fx, fy = travel_vector(self.vertical, self.direction)
-        cx, cy = next_rect.center
-        off = (cx - hx) * fx + (cy - hy) * fy
-        if off > TURN_HUB_HOLD_DIST:
-            cx -= (off - TURN_HUB_HOLD_DIST) * fx
-            cy -= (off - TURN_HUB_HOLD_DIST) * fy
-            next_rect.center = (round(cx), round(cy))
-        return next_rect
-
-    def _turn_arc_midpoint(
-        self, roads, zone, exit_x: float, exit_y: float
-    ) -> tuple[float, float]:
-        """Bezier control point: tangent-corner biased to keep turns tight."""
-        hx, hy = self._turn_hub or (zone.centerx, zone.centery)
-        off = self._hub_travel_offset()
-        if off <= 2:
-            return float(hx), float(hy)
-        px, py = float(self.rect.centerx), float(self.rect.centery)
-        # Use the intersection of entry and exit tangents, then keep a small
-        # hub influence so we avoid abrupt corner snaps in dense traffic.
-        if self.vertical:
-            corner_x, corner_y = px, exit_y
-        else:
-            corner_x, corner_y = exit_x, py
-        bias = float(TURN_ARC_CORNER_BIAS)
-        mid_x = corner_x * bias + hx * (1.0 - bias)
-        mid_y = corner_y * bias + hy * (1.0 - bias)
-        pad = max(6.0, TURN_RESERVE_PAD * 0.35)
-        mid_x = max(zone.left + pad, min(zone.right - pad, mid_x))
-        mid_y = max(zone.top + pad, min(zone.bottom - pad, mid_y))
-        return mid_x, mid_y
-
-    def _clamp_turn_point_keep_left(
-        self, roads, cx: float, cy: float, ease: float
-    ) -> tuple[float, float]:
-        """Nudge turn probes toward keep-left — avoid crossing the yellow line."""
-        if not self._turn_exit:
-            return cx, cy
-        nudge = 0.55 + 0.35 * _smoothstep(ease)
-        entry_road = None
-        if self.road_index is not None and 0 <= self.road_index < len(roads):
-            entry_road = roads[self.road_index]
-        idx, d, _exit_vertical = self._turn_exit
-        exit_road = roads[idx] if 0 <= idx < len(roads) else None
-        if entry_road is not None:
-            cx, cy = clamp_keep_left_xy(
-                entry_road, self._turn_entry_direction, cx, cy, strength=nudge
-            )
-        if exit_road is not None and ease >= 0.2:
-            exit_strength = nudge * _smoothstep((ease - 0.2) / 0.8)
-            cx, cy = clamp_keep_left_xy(exit_road, d, cx, cy, strength=exit_strength)
-        return cx, cy
-
-    def _complete_turn_on_exit_lane(self, roads) -> None:
-        """Swap to exit-lane sprite and resume straight travel."""
-        idx, d, exit_vertical = self._turn_exit
-        exit_dir = 1 if d >= 0 else -1
-        self.road_index = idx
-        self.vertical = exit_vertical
-        self.direction = exit_dir
-        self._refresh_car_sprite()
-        self.rect.center = (round(self._turn_px), round(self._turn_py))
-        self._snap_center_to_left_lane(roads, max_nudge=None)
-        self.turn_signal = 0
-        self._turn_phase = "none"
-        self._turn_exit = None
-        self._turn_hub = None
-        self._turn_blend = 0.0
-        self._turn_arc_len = 0.0
-        self._turn_arc_travel = 0.0
-        self._turn_angle_draw_q = -999
-        self._turn_settle_blend = 0.0
-        self._turn_hold_frames = 0
-        self._turn_stall_frames = 0
-        self._turn_overlap_frames = 0
-        self._last_good_center = self.rect.center
-        self.current_speed = self.base_speed
-        self.speed = self.base_speed * exit_dir
-        self._turn_reservation_frames = max(8, _tune.TURN_RESERVATION_HOLD_FRAMES // 2)
-        self._sync_collision_shell(force=True)
-
-    def _bezier_point(self, t: float) -> tuple[float, float]:
-        return _bezier_xy(t, self._turn_arc_start, self._turn_arc_mid, self._turn_arc_end)
-
-    def _turn_probe_rect(self, px: float, py: float) -> Rect:
-        body = Rect(0, 0, self._turn_side, self._turn_side)
-        body.center = (round(px), round(py))
-        return body
-
-    def _turn_probe_shell(self, px: float, py: float) -> Rect:
-        return sprites.car_collision_rect_turn(self._turn_probe_rect(px, py))
-
-    def _prime_turn_arc_geometry(self, roads, zone):
-        if not self._turn_exit:
-            return
-        idx, d, _exit_vertical = self._turn_exit
-        ex, ey = lane_center_xy(roads[idx], d)
-        mx, my = self._turn_arc_midpoint(roads, zone, float(ex), float(ey))
-        self._turn_arc_start = (float(self.rect.centerx), float(self.rect.centery))
-        self._turn_arc_mid = (mx, my)
-        self._turn_arc_end = (float(ex), float(ey))
-
-    def _turn_path_points(self, t_max: float = 1.0) -> list[tuple[float, float]]:
-        count = max(2, TURN_PATH_SAMPLES)
-        if t_max >= 1.0:
-            pts = _sample_bezier_xy(
-                self._turn_arc_start, self._turn_arc_mid, self._turn_arc_end, count
-            )
-            return pts
-        return [
-            self._bezier_point((i / (count - 1)) * t_max) for i in range(count)
-        ]
-
-    def _turn_path_conflict_rect(self, pad: int = TURN_CORRIDOR_PAD) -> Rect | None:
-        if not self._turn_exit:
-            return None
-        pts = self._turn_path_points(1.0)
-        left, top, right, bottom = _turn_corridor_bounds(pts, pad)
-        return Rect(
-            int(left),
-            int(top),
-            max(1, int(right - left)),
-            max(1, int(bottom - top)),
-        )
-
-    def _travel_distance_to_rect(self, other, target: Rect) -> float | None:
-        """Distance until `other` enters target along its travel axis."""
-        if other.vertical:
-            if other.direction > 0:
-                if other.rect.top >= target.bottom:
-                    return None
-                return max(0.0, float(target.top - other.rect.bottom))
-            if other.rect.bottom <= target.top:
-                return None
-            return max(0.0, float(other.rect.top - target.bottom))
-        if other.direction > 0:
-            if other.rect.left >= target.right:
-                return None
-            return max(0.0, float(target.left - other.rect.right))
-        if other.rect.right <= target.left:
-            return None
-        return max(0.0, float(other.rect.left - target.right))
-
-    def _turn_eta_to_conflict(self, conflict: Rect) -> float:
-        """Estimated seconds before this turner reaches the conflict corridor."""
-        if self._turn_phase in ("turning", "settling"):
-            return 0.0
-        fps = max(1.0, float(SIM_FPS))
-        approach_speed = max(0.35, self.current_speed, self.base_speed * TURN_PIVOT_SPEED_FRAC * 0.7)
-        approach_eta = 0.0
-        if self._turn_phase == "to_hub" and self._turn_hub is not None:
-            hx, hy = self._turn_hub
-            approach_eta = math.hypot(self.rect.centerx - hx, self.rect.centery - hy) / (approach_speed * fps)
-        arc_speed = max(0.35, self.base_speed * TURN_DRIFT_SPEED_FRAC)
-        pts = self._turn_path_points(1.0)
-        if not pts:
-            return approach_eta
-        cum = 0.0
-        prev = pts[0]
-        for i, pt in enumerate(pts):
-            if i > 0:
-                cum += math.hypot(pt[0] - prev[0], pt[1] - prev[1])
-                prev = pt
-            probe = self._turn_probe_shell(pt[0], pt[1])
-            if rects_overlap(probe.inflate(4, 4), conflict):
-                return approach_eta + (cum / (arc_speed * fps))
-        return approach_eta + (cum / (arc_speed * fps))
-
-    def _turn_conflict_window(self, conflict: Rect) -> tuple[float, float]:
-        entry_eta = self._turn_eta_to_conflict(conflict)
-        clearance = max(0.25, TURN_SETTLE_FRAMES / max(1.0, SIM_FPS))
-        drift_speed = max(0.35, self.base_speed * TURN_DRIFT_SPEED_FRAC)
-        window = max(clearance, conflict.width / max(1.0, drift_speed * 30.0))
-        return entry_eta, entry_eta + window
-
-    def _straight_priority_blocker(self, peers, intersection_zones) -> bool:
-        """Turning traffic yields to moving straight-through traffic."""
+    def _nudge_clear_intersection_tail(
+        self, intersection_zones, *, max_step_total: int | None = None
+    ) -> None:
+        """Creep forward until the collision shell leaves the intersection box."""
         if not intersection_zones:
-            return False
-        conflict = self._turn_path_conflict_rect(_tune.TURN_PRIORITY_CONFLICT_PAD)
-        if conflict is None:
-            return False
-        turn_entry_eta, turn_exit_eta = self._turn_conflict_window(conflict)
-        margin = _tune.TURN_PRIORITY_TIME_MARGIN_S
-        predict_s = _tune.TURN_PRIORITY_PREDICT_SECONDS
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if other._turn_phase != "none" or other.turn_signal != 0:
-                continue
-            if other.current_speed < _tune.TURN_PRIORITY_MIN_STRAIGHT_SPEED:
-                continue
-            dist = self._travel_distance_to_rect(other, conflict)
-            if dist is None:
-                continue
-            straight_eta = dist / (max(other.current_speed, _tune.TURN_PRIORITY_MIN_STRAIGHT_SPEED) * max(1.0, float(SIM_FPS)))
-            if straight_eta > predict_s:
-                continue
-            if straight_eta <= (turn_exit_eta + margin) and straight_eta >= (turn_entry_eta - margin):
-                return True
-        return False
-
-    def _turn_reserved_rect(self, intersection_zones) -> Rect | None:
-        if not self._turn_exit or self._turn_hub is None:
-            return None
-        if self._turn_phase not in ("turning", "settling"):
-            return None
-        pts = self._turn_path_points(1.0)
-        left, top, right, bottom = _turn_corridor_bounds(pts, TURN_RESERVE_PAD)
-        return Rect(
-            int(left),
-            int(top),
-            max(1, int(right - left)),
-            max(1, int(bottom - top)),
-        )
-
-    def _shell_blocks_turn_path(
-        self,
-        shell: Rect,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        intersection_zones=None,
-    ) -> bool:
-        for other in peers:
-            if other is self:
-                continue
-            other_shell = other._collision_shell
-            other_speed = getattr(other, "current_speed", 0.0)
-            other_phase = getattr(other, "_turn_phase", "none")
-            if other_speed < CAR_CREEP_SPEED * 1.25 and other_phase == "none":
-                if collide(shell.inflate(10, 10), other_shell):
-                    return True
-            elif collide(shell, other_shell):
-                return True
-        if not ENABLE_CAR_CAR_COLLISION:
-            if not ped_legal_crossing and collide(shell, player_body_rect):
-                return True
-        return False
-
-    def _exit_lane_travel(self) -> tuple[bool, int] | None:
-        if not self._turn_exit:
-            return None
-        _idx, d, exit_vertical = self._turn_exit
-        return exit_vertical, 1 if d >= 0 else -1
-
-    def _gap_along_exit_lane(self, other, exit_vertical: bool, exit_dir: int) -> tuple[float, float]:
-        if self._turn_phase in ("turning", "settling"):
-            ref_x, ref_y = self._turn_px, self._turn_py
-        else:
-            ref_x, ref_y = self.rect.centerx, self.rect.centery
-        if exit_vertical:
-            ahead = (other.rect.centery - ref_y) * exit_dir
-            lane_gap = abs(other.rect.centerx - ref_x)
-        else:
-            ahead = (other.rect.centerx - ref_x) * exit_dir
-            lane_gap = abs(other.rect.centery - ref_y)
-        return ahead, lane_gap
-
-    def _stopped_car_blocks_turn_exit(self, peers) -> bool:
-        """Hold turn when a stopped vehicle occupies the exit lane ahead."""
-        if self._turn_phase not in ("to_hub", "turning", "settling"):
-            return False
-        travel = self._exit_lane_travel()
-        if travel is None:
-            return False
-        exit_vertical, exit_dir = travel
-        block_dist = _tune.TURN_EXIT_STOPPED_BLOCK_DIST
-        for other in peers:
-            if other is self or not other.alive():
-                continue
-            if other._turn_phase in ("turning", "settling", "to_hub"):
-                continue
-            if other.vertical != exit_vertical:
-                continue
-            if other.direction != exit_dir:
-                # Opposing lane traffic should only block when it is already
-                # physically crowding the turner's shell near the exit.
-                if self._turn_phase in ("turning", "settling") and collide(
-                    self._collision_shell.inflate(6, 6),
-                    other._collision_shell.inflate(6, 6),
-                ):
-                    return True
-                continue
-            if other.current_speed > CAR_CREEP_SPEED * 1.5:
-                continue
-            ahead, lane_gap = self._gap_along_exit_lane(other, exit_vertical, exit_dir)
-            if ahead <= 0 or ahead > block_dist:
-                continue
-            if lane_gap < CAR_BLOCK_LANE_GAP + 8:
-                return True
-        return False
-
-    def _turn_path_clear(
-        self,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        t_max: float = 1.0,
-        intersection_zones=None,
-    ) -> bool:
-        for px, py in self._turn_path_points(t_max):
-            if self._shell_blocks_turn_path(
-                self._turn_probe_shell(px, py),
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones,
-            ):
-                return False
-        return True
-
-    def _turn_segment_clear(
-        self,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        t_from: float,
-        t_to: float,
-        intersection_zones=None,
-    ) -> bool:
-        t0 = max(0.0, min(1.0, t_from))
-        t1 = max(0.0, min(1.0, t_to))
-        if t1 < t0:
-            t0, t1 = t1, t0
-        samples = max(3, int((t1 - t0) * TURN_PATH_SAMPLES) + 1)
-        for i in range(samples):
-            t = t0 + (t1 - t0) * (i / max(1, samples - 1))
-            cx, cy = self._bezier_point(t)
-            if self._shell_blocks_turn_path(
-                self._turn_probe_shell(cx, cy),
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones,
-            ):
-                return False
-        return True
-
-    def _turn_segment_blocked_by_stopped_straight(
-        self, peers, t_from: float, t_to: float
-    ) -> bool:
-        """True when a stopped straight-through car occupies this arc segment."""
-        t0 = max(0.0, min(1.0, t_from))
-        t1 = max(0.0, min(1.0, t_to))
-        if t1 < t0:
-            t0, t1 = t1, t0
-        samples = max(3, int((t1 - t0) * TURN_PATH_SAMPLES) + 1)
-        for i in range(samples):
-            t = t0 + (t1 - t0) * (i / max(1, samples - 1))
-            cx, cy = self._bezier_point(t)
-            shell = self._turn_probe_shell(cx, cy)
-            for other in peers:
-                if other is self or not other.alive():
-                    continue
-                if other._turn_phase != "none" or other.turn_signal != 0:
-                    continue
-                if other.current_speed >= CAR_CREEP_SPEED * 1.25:
-                    continue
-                if collide(shell.inflate(10, 10), other._collision_shell):
-                    return True
-        return False
-
-    def _estimate_turn_arc_len(self) -> float:
-        pts = [self._bezier_point(i / 8.0) for i in range(9)]
-        total = 0.0
-        for i in range(1, len(pts)):
-            total += math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
-        return max(TURN_MIN_ARC_LEN, total)
-
-    def _cap_turn_motion_step(
-        self, prev_x: float, prev_y: float, cx: float, cy: float
-    ) -> tuple[float, float]:
-        max_step = max(2.5, self.base_speed * 1.02)
-        dx = cx - prev_x
-        dy = cy - prev_y
-        dist = math.hypot(dx, dy)
-        if dist > max_step:
-            scale = max_step / dist
-            return prev_x + dx * scale, prev_y + dy * scale
-        return cx, cy
-
-    def _set_turn_visual(self, angle_deg: float, px: float, py: float):
-        self._turn_px = float(round(px))
-        self._turn_py = float(round(py))
-        self._turn_display_angle = angle_deg
-        angle_q = int(round(angle_deg / 2.0) * 2) % 360
-        if angle_q != self._turn_angle_draw_q:
-            self._turn_angle_draw_q = angle_q
-            self.image = sprites.make_car_rotated_in_box(
-                self.archetype_index, angle_q, self._turn_side, self._turn_side
-            )
-        self.rect = Rect(0, 0, self._turn_side, self._turn_side)
-        self.rect.center = (round(px), round(py))
-        self._shell_sync_key = None
+            return
+        self._sync_collision_shell(force=True)
+        if not any(collide(z, self._collision_shell) for z in intersection_zones):
+            return
+        step = max(2, int(CAR_CREEP_SPEED * 2))
+        moved = 0
+        for _ in range(48):
+            if not any(collide(z, self._collision_shell) for z in intersection_zones):
+                break
+            if max_step_total is not None and moved >= max_step_total:
+                break
+            if self.vertical:
+                self.rect.y += self.direction * step
+            else:
+                self.rect.x += self.direction * step
+            moved += step
+            self._sync_collision_shell(force=True)
 
     def _intersection_zone_at(self, intersection_zones):
         for zone in intersection_zones:
@@ -2454,423 +1129,23 @@ class Car(Entity):
                 return zone
         return None
 
-    def _turn_side_candidates(self, preferred: int) -> list[int]:
-        if preferred == 0:
-            return [0, -1, 1]
-        return [preferred, -preferred, 0]
-
-    def _apply_turn_plan_for_side(
-        self,
-        roads,
-        zone,
-        key: tuple[int, int, int, int],
-        turn_side: int,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-    ) -> bool:
-        if self._turn_phase in ("turning", "settling"):
-            return False
-        if turn_side == 0:
-            self._turn_zone_key = key
-            self.turn_signal = 0
-            self._turn_exit = None
-            self._turn_hub = None
-            self._turn_hold_frames = 0
-            return True
-        entry_v = self.vertical
-        entry_d = self.direction
-        if self._turn_phase == "to_hub":
-            entry_v = self._turn_entry_vertical
-            entry_d = self._turn_entry_direction
-        exit_plan = choose_exit(
-            roads,
-            zone,
-            entry_v,
-            entry_d,
-            turn_side,
-            self.rect.center,
-            self.road_index,
-        )
-        if exit_plan is None:
-            return False
-        if not self._pivot_exit_clear(
-            roads, zone, exit_plan, peers, player_body_rect, ped_legal_crossing
-        ):
-            return False
-        self._turn_hub = (zone.centerx, zone.centery)
-        self._turn_exit = exit_plan
-        self._prime_turn_arc_geometry(roads, zone)
-        if not self._turn_path_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=[zone],
-        ):
-            self._turn_hub = None
-            self._turn_exit = None
-            return False
-        if self._straight_priority_blocker(peers, [zone]):
-            self._turn_hub = None
-            self._turn_exit = None
-            return False
-        self._turn_zone_key = key
-        self.turn_signal = turn_side
-        self._turn_hold_frames = 0
-        return True
-
-    def _plan_turn_at_intersection(
-        self,
-        roads,
-        intersection_zones,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-    ):
-        if not intersection_zones or self._turn_phase in ("to_hub", "turning", "settling"):
-            return
-        if self._turn_abort_cooldown > 0:
-            return
-        if self.turn_signal == 0 and not self._approaching_or_in_intersection(
-            intersection_zones
-        ):
-            return
-        zone = self._intersection_zone_for_turn_planning(intersection_zones, roads)
-        if zone is None:
-            if self._turn_phase == "none":
-                self.turn_signal = 0
-                self._turn_exit = None
-            self._turn_zone_key = None
-            return
-        key = (zone.x, zone.y, zone.w, zone.h)
-        if key == self._turn_zone_key and self.turn_signal != 0:
-            return
-        rng = random.Random((_traffic_map_seed + self.spawn_id * 31) & 0xFFFFFFFF)
-        preferred = pick_turn_side(rng, TURN_CHANCE)
-        for turn_side in self._turn_side_candidates(preferred):
-            if self._apply_turn_plan_for_side(
-                roads,
-                zone,
-                key,
-                turn_side,
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-            ):
-                return
-        self._hold_turn_and_replan(
-            intersection_zones,
-            roads,
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-        )
-
-    def _arm_turn_through_hub(
-        self,
-        roads,
-        intersection_zones,
-        peers=None,
-        player_body_rect=None,
-        ped_legal_crossing: bool = True,
-    ):
-        """Commit to hub turn once a planned turn is near or inside the box."""
-        if self.turn_signal == 0 or not self._turn_exit or not intersection_zones:
-            return
-        if self._turn_hold_frames > 0:
-            return
-        if not self._approaching_or_in_intersection(intersection_zones):
-            return
-        if peers is not None and player_body_rect is not None:
-            if not self._turn_path_clear(
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones=intersection_zones,
-            ):
-                return
-        zone = self._intersection_zone_for_turn_planning(intersection_zones, roads)
-        if zone is None:
-            zone = self._intersection_zone_at(intersection_zones)
-        if zone is None:
-            return
-        if self._turn_phase == "none":
-            in_ix = self._rect_in_intersection(self.rect, intersection_zones)
-            if not in_ix:
-                hx, hy = zone.centerx, zone.centery
-                dist = math.hypot(self.rect.centerx - hx, self.rect.centery - hy)
-                lead = TURN_HUB_DIST + TURN_SIGNAL_LEAD_DIST // 3
-                if dist > lead + 10:
-                    return
-            self._turn_phase = "to_hub"
-            self._turn_hub = (zone.centerx, zone.centery)
-
-    def _begin_turn_steer(
-        self,
-        roads,
-        zone,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-        intersection_zones=None,
-    ) -> bool:
-        self._prime_turn_arc_geometry(roads, zone)
-        ix = intersection_zones if intersection_zones is not None else [zone]
-        if not self._turn_path_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=ix,
-        ):
-            return False
-        if self._stopped_car_blocks_turn_exit(peers):
-            return False
-        if self._straight_priority_blocker(peers, ix):
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self.speed = 0.0
-            self.current_speed = 0.0
-            return False
-        self._snap_to_hub_approach(max_past=0.0)
-        self._turn_entry_vertical = self.vertical
-        self._turn_entry_direction = self.direction
-        self._turn_blend = 0.0
-        self._turn_arc_travel = 0.0
-        self._turn_arc_len = 0.0
-        self._turn_angle_draw_q = -999
-        self._turn_side = max(CAR_WIDTH, CAR_HEIGHT)
-        self._turn_px = float(self.rect.centerx)
-        self._turn_py = float(self.rect.centery)
-        idx, d, exit_vertical = self._turn_exit
-        exit_dir = 1 if d >= 0 else -1
-        self._turn_angle_start = sprites.car_travel_angle_deg(
-            self._turn_entry_vertical, self._turn_entry_direction
-        )
-        self._turn_angle_end = sprites.car_travel_angle_deg(exit_vertical, exit_dir)
-        self._turn_arc_side = self._turn_side_for_exit_plan()
-        ex, ey = lane_center_xy(roads[idx], d)
-        mx, my = self._turn_arc_midpoint(roads, zone, float(ex), float(ey))
-        self._turn_arc_start = (self._turn_px, self._turn_py)
-        self._turn_arc_mid = (mx, my)
-        self._turn_arc_end = (float(ex), float(ey))
-        self._turn_arc_len = self._estimate_turn_arc_len()
-        self._turn_phase = "turning"
-        self._turn_arc_age = 0
-        self._turn_reservation_frames = _tune.TURN_RESERVATION_HOLD_FRAMES
-        self._set_turn_visual(self._turn_angle_start, self._turn_px, self._turn_py)
-        self.current_speed = max(self.current_speed, self.base_speed * TURN_DRIFT_SPEED_FRAC * 0.5)
-        self._sync_collision_shell(force=True)
-        return True
-
-    def _steer_through_turn(
-        self,
-        roads,
-        intersection_zones,
-        peers,
-        player_body_rect,
-        ped_legal_crossing: bool,
-    ) -> bool:
-        """Bezier path + gradual sprite rotation; returns True when arc is done."""
-        if self._turn_phase != "turning" or not self._turn_exit:
-            return False
-
-        if self._stopped_car_blocks_turn_exit(peers):
-            self.speed = 0.0
-            self.current_speed = 0.0
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self._sync_collision_shell()
-            return False
-        if self._turn_arc_len < 1.0:
-            self._turn_arc_len = self._estimate_turn_arc_len()
-
-        drift_floor = self.base_speed * TURN_MIN_STEP_FRAC
-        step = max(drift_floor, self.current_speed) * TURN_DRIFT_SPEED_FRAC
-        step = min(step, self.base_speed * 1.05)
-        t_now = self._turn_arc_travel / max(1e-6, self._turn_arc_len)
-        next_travel = min(self._turn_arc_len, self._turn_arc_travel + step)
-        t_next = next_travel / max(1e-6, self._turn_arc_len)
-        eased_now = _smoothstep(t_now)
-        eased_next = _smoothstep(t_next)
-        segment_clear = self._turn_segment_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            eased_now,
-            eased_next,
-            intersection_zones=intersection_zones,
-        )
-        near_arc_end = t_now >= 0.9
-        if not segment_clear and not near_arc_end:
-            self.speed = 0.0
-            self.current_speed = max(
-                self.base_speed * TURN_DRIFT_SPEED_FRAC * 0.55,
-                self.current_speed * 0.92,
-            )
-            self._turn_overlap_frames += 1
-            self._turn_stall_frames += 1
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self._sync_collision_shell()
-            return False
-
-        prev_px, prev_py = self._turn_px, self._turn_py
-        ease = _smoothstep(t_next)
-        if near_arc_end and not segment_clear:
-            if not self._turn_segment_blocked_by_stopped_straight(
-                peers, eased_now, eased_next
-            ):
-                ease = 1.0
-                next_travel = self._turn_arc_len
-        angle = _lerp_turn_angle_deg(
-            self._turn_angle_start,
-            self._turn_angle_end,
-            ease,
-            self._turn_arc_side,
-        )
-        cx, cy = self._bezier_point(ease)
-        cx, cy = self._clamp_turn_point_keep_left(roads, cx, cy, ease)
-        cx, cy = self._cap_turn_motion_step(prev_px, prev_py, cx, cy)
-        overlap = self._probe_turn_shell_overlaps_peer(peers, cx, cy)
-        if overlap:
-            self.speed = 0.0
-            self.current_speed = max(
-                self.base_speed * TURN_DRIFT_SPEED_FRAC * 0.55,
-                self.current_speed * 0.92,
-            )
-            self._turn_overlap_frames += 1
-            self._turn_stall_frames += 1
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self._sync_collision_shell()
-            return False
-
-        self._turn_arc_travel = next_travel
-        self._set_turn_visual(angle, cx, cy)
-        self._sync_collision_shell()
-
-        self.current_speed = max(
-            self.current_speed, self.base_speed * TURN_DRIFT_SPEED_FRAC * 0.65
-        )
-        self.speed = self.current_speed * self._turn_entry_direction
-
-        if ease >= 1.0:
-            idx, d, exit_vertical = self._turn_exit
-            tcx, tcy = lane_center_xy(roads[idx], d)
-            self._turn_settle_target = (float(tcx), float(tcy))
-            self._turn_settle_blend = 0.0
-            self._turn_phase = "settling"
-            self.current_speed = self.base_speed
-            self.speed = self.base_speed * self._turn_entry_direction
-            self._sync_collision_shell(force=True)
-        else:
-            self._sync_collision_shell()
-        return False
-
-    def _settle_turn_exit(
-        self, roads, peers=None, intersection_zones=None
-    ) -> bool:
-        """Brief lane alignment while continuing forward on the exit road."""
-        if self._turn_phase != "settling" or not self._turn_exit:
-            return False
-        if peers and self._stopped_car_blocks_turn_exit(peers):
-            self._turn_stall_frames += 1
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self.speed = 0.0
-            self.current_speed = 0.0
-            self._sync_collision_shell()
-            return False
-        idx, d, exit_vertical = self._turn_exit
-        exit_dir = 1 if d >= 0 else -1
-        prev_x, prev_y = self._turn_px, self._turn_py
-        forward = self.base_speed * exit_dir * 0.72
-        if exit_vertical:
-            self._turn_py += forward
-        else:
-            self._turn_px += forward
-        self._turn_settle_blend += 1.0 / max(1, TURN_SETTLE_FRAMES)
-        t = _smoothstep(min(1.0, self._turn_settle_blend))
-        tx, ty = self._turn_settle_target
-        if exit_vertical:
-            self._turn_px += (tx - self._turn_px) * t
-        else:
-            self._turn_py += (ty - self._turn_py) * t
-        cx, cy = self._turn_px, self._turn_py
-        cx, cy = self._clamp_turn_point_keep_left(roads, cx, cy, t)
-        cx, cy = self._cap_turn_motion_step(prev_x, prev_y, cx, cy)
-        self._turn_px, self._turn_py = cx, cy
-        end_angle = sprites.car_travel_angle_deg(exit_vertical, exit_dir)
-        settle_side = self._turn_arc_side if self._turn_arc_side != 0 else self.turn_signal
-        angle = _lerp_turn_angle_deg(
-            self._turn_angle_end, end_angle, t, settle_side
-        )
-        self._set_turn_visual(angle, cx, cy)
-        self.current_speed = self.base_speed
-        self.speed = self.base_speed * exit_dir
-        if t < 1.0:
-            self._sync_collision_shell()
-            return False
-        self._complete_turn_on_exit_lane(roads)
-        return True
-
-    def _try_start_turn_at_hub(
-    self,
-    roads,
-    intersection_zones,
-    peers,
-    player_body_rect,
-    ped_legal_crossing: bool,
-    road_states=None,
-    ) -> bool:
-        if self._turn_phase != "to_hub" or not self._turn_exit or not self._turn_hub:
-            return False
-        zone = self._intersection_zone_for_turn_planning(intersection_zones, roads)
-        if zone is None:
-            zone = self._intersection_zone_at(intersection_zones)
-        if zone is None:
-            return False
-        hx, hy = self._turn_hub
-        dist = math.hypot(self.rect.centerx - hx, self.rect.centery - hy)
-        past = self._hub_travel_offset()
-        if past > TURN_OVERSHOOT_ABORT:
-            self._hold_turn_and_replan(
-                intersection_zones,
-                roads,
-                peers,
-                player_body_rect,
-                ped_legal_crossing,
-            )
-            return False
-        lead = TURN_HUB_DIST + TURN_SIGNAL_LEAD_DIST // 3
-        if dist > lead and past <= 0:
-            return False
-        # --- RED LIGHT GATE ---
-        if road_states:
-            approach = self._nearest_approach_state(road_states)
-            if approach is not None:
-                light = self._effective_approach_light(approach)
-                if light == "red":
-                    self.speed = 0.0
-                    self.current_speed = 0.0
-                    return False
-        # ----------------------
-        if not self._turn_path_clear(
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=intersection_zones,
-        ):
-            return False
-        if self._straight_priority_blocker(peers, intersection_zones):
-            self.speed = 0.0
-            self.current_speed = 0.0
-            self._turn_hold_frames = max(1, self._turn_hold_frames)
-            self._sync_collision_shell()
-            return False
-        return self._begin_turn_steer(
-            roads,
-            zone,
-            peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones=intersection_zones,
-        )
+    def _approach_intersection_zone(self, intersection_zones):
+        """Zone the car is in or approaching (for signal clearance at the crosswalk)."""
+        if not intersection_zones:
+            return None
+        in_zone = self._intersection_zone_at(intersection_zones)
+        if in_zone is not None:
+            return in_zone
+        best = None
+        best_d = 1e9
+        for zone in intersection_zones:
+            d = self._distance_to_intersection_entry(zone)
+            if d is None or d < 0 or d > RED_SIGNAL_BRAKE_DIST * 2:
+                continue
+            if d < best_d:
+                best_d = d
+                best = zone
+        return best
 
     def _spawn_ramp_cap(self) -> float:
         if self._spawn_age >= CAR_SPAWN_RAMP_FRAMES:
@@ -3008,8 +1283,36 @@ class Car(Entity):
             return float(stop_axis - self.rect.right)
         return float(self.rect.left - stop_axis)
 
+    def _would_block_at_signal_stop(self, stop_axis: int, signed_speed: float) -> bool:
+        """True when a forward move would cross the stop line from the approach side."""
+        if signed_speed == 0:
+            return False
+        if self._distance_to_signal_stop(stop_axis) < 0:
+            return False
+        if self.vertical:
+            if self.direction > 0:
+                return self.rect.bottom + signed_speed >= stop_axis - STOP_LINE_GAP
+            return self.rect.top + signed_speed <= stop_axis + STOP_LINE_GAP
+        if self.direction > 0:
+            return self.rect.right + signed_speed >= stop_axis - STOP_LINE_GAP
+        return self.rect.left + signed_speed <= stop_axis + STOP_LINE_GAP
+
+    def _clamp_at_signal_stop(self, stop_axis: int) -> None:
+        if self.vertical:
+            if self.direction > 0:
+                self.rect.bottom = stop_axis - STOP_LINE_GAP
+            else:
+                self.rect.top = stop_axis + STOP_LINE_GAP
+        elif self.direction > 0:
+            self.rect.right = stop_axis - STOP_LINE_GAP
+        else:
+            self.rect.left = stop_axis + STOP_LINE_GAP
+
     def _enforce_signal_stop_line(self, stop_axis: int) -> bool:
-        """Clamp at stop line even if already slowly overshot."""
+        """Clamp at stop line only for a minor overshoot past the line."""
+        stop_dist = self._distance_to_signal_stop(stop_axis)
+        if stop_dist < -STOP_LINE_GAP * 3 or stop_dist > STOP_LINE_GAP:
+            return False
         clamped = False
         if self.vertical:
             if self.direction > 0:
@@ -3050,8 +1353,13 @@ class Car(Entity):
         brake_dist: float,
         creep_dist: float,
     ) -> float:
-        if stop_distance <= -STOP_LINE_GAP or stop_distance >= brake_dist:
+        if stop_distance >= brake_dist:
             return desired_speed
+        light = self._effective_approach_light(state)
+        if stop_distance < STOP_LINE_GAP and light == "red":
+            if state not in blocking_controls:
+                blocking_controls.append(state)
+            return 0.0
         if stop_distance <= creep_dist:
             desired_speed = min(desired_speed, CAR_CREEP_SPEED)
             blocking_controls.append(state)
@@ -3067,52 +1375,85 @@ class Car(Entity):
         return desired_speed
 
     def _nearest_approach_state(self, road_states):
+        scoped = self._states_for_our_approach(road_states)
+        if not scoped:
+            scoped = road_states
         best = None
         best_d = 1e9
-        for state in road_states:
+        for state in scoped:
             if not rects_overlap(self.rect, state["approach_rect"]):
                 continue
             crosswalk = state["crosswalk"]
+            if not self._in_crossing_lane(crosswalk):
+                continue
             stop_axis = self._signal_stop_axis(crosswalk)
             stop_distance = self._distance_to_signal_stop(stop_axis)
-            if not self._in_crossing_lane(crosswalk) or stop_distance <= -STOP_LINE_GAP:
+            on_crosswalk = crosswalk.collidepoint(self.rect.centerx, self.rect.centery)
+            if stop_distance <= -STOP_LINE_GAP and not on_crosswalk:
+                continue
+            if not self._approach_crosswalk_relevant(crosswalk):
                 continue
             if stop_distance < best_d:
                 best_d = stop_distance
                 best = state
         return best
 
+    def _approach_state_for_signal(self, road_states):
+        """Approach signal for this travel direction, including inside the intersection."""
+        scoped = self._states_for_our_approach(road_states)
+        if not scoped:
+            scoped = list(road_states) if road_states else []
+        for state in scoped:
+            crosswalk = state["crosswalk"]
+            if crosswalk.collidepoint(self.rect.centerx, self.rect.centery):
+                return state
+        hit = self._nearest_approach_state(road_states)
+        if hit is not None:
+            return hit
+        if not scoped:
+            return None
+        best = None
+        best_key = 1e9
+        brake = RED_SIGNAL_BRAKE_DIST * 2
+        for state in scoped:
+            crosswalk = state["crosswalk"]
+            if not self._approach_crosswalk_relevant(crosswalk):
+                continue
+            stop_axis = self._signal_stop_axis(crosswalk)
+            stop_distance = self._distance_to_signal_stop(stop_axis)
+            if abs(stop_distance) > brake:
+                continue
+            key = abs(stop_distance)
+            if key < best_key:
+                best_key = key
+                best = state
+        return best
+
+    def _committed_past_signal_stop(self, state: dict) -> bool:
+        """Past the stop line on the approach crosswalk — must clear, not re-queue."""
+        crosswalk = state.get("crosswalk")
+        if crosswalk is None:
+            return False
+        if not self._in_crossing_lane(crosswalk):
+            return False
+        stop_axis = self._signal_stop_axis(crosswalk)
+        return self._distance_to_signal_stop(stop_axis) <= 0
+
     def _can_clear_signal_in_time(self, state, zone: Rect) -> bool:
+        light = self._effective_approach_light(state)
+        if self._committed_past_signal_stop(state) and light in ("green", "yellow"):
+            return True
         clear_dist = self._clear_distance_through_zone(zone)
         if clear_dist <= 0:
             return True
         speed_px_per_frame = max(self.current_speed, CAR_CREEP_SPEED * 0.45, 0.8)
         speed_px_per_s = speed_px_per_frame * SIM_FPS
         time_needed = clear_dist / speed_px_per_s
-        time_left = self._effective_seconds_to_change(state)
-        light = self._effective_approach_light(state)
+        time_left = max(0.0, self._effective_seconds_to_change(state))
         if light == "green":
             return time_needed <= time_left + INTERSECTION_CLEAR_BUFFER_S
         if light == "yellow":
             return time_needed <= time_left + INTERSECTION_CLEAR_BUFFER_S * 0.5
-        return False
-
-    def _exit_blocked_by_active_turn(
-        self, next_rect, peers, intersection_zones
-    ) -> bool:
-        my_n = sprites.car_collision_rect(next_rect, self.vertical)
-        for other in peers:
-            if other is self:
-                continue
-            if other._turn_phase in ("turning", "settling"):
-                if rects_overlap(my_n, other._collision_shell):
-                    return True
-                reserved = other._turn_reserved_rect(intersection_zones)
-                if reserved is not None and rects_overlap(my_n, reserved):
-                    return True
-            elif other._committed_intersection_turn(intersection_zones):
-                if rects_overlap(my_n.inflate(16, 16), other._collision_shell):
-                    return True
         return False
 
     def _intersection_entry_blocked(
@@ -3142,14 +1483,19 @@ class Car(Entity):
         if target_zone is None:
             return False
 
-        approach = self._nearest_approach_state(road_states)
+        approach = self._approach_state_for_signal(road_states)
+        committed = (
+            approach is not None and self._committed_past_signal_stop(approach)
+        )
         if approach is not None:
             light = self._effective_approach_light(approach)
+            cannot_clear = not self._can_clear_signal_in_time(approach, target_zone)
             if light == "red":
+                if entering:
+                    return True
+            elif light == "yellow" and cannot_clear and not committed:
                 return True
-            if light in ("green", "yellow") and not self._can_clear_signal_in_time(
-                approach, target_zone
-            ):
+            elif light == "green" and entering and cannot_clear and not committed:
                 return True
 
         if not entering:
@@ -3163,6 +1509,91 @@ class Car(Entity):
             next_rect, move_peers or peers, intersection_zones
         ):
             return True
+        return False
+
+    def _inside_intersection(self, intersection_zones) -> bool:
+        if not intersection_zones:
+            return False
+        return any(collide(z, self.rect) for z in intersection_zones)
+
+    def _crosswalk_advance_blocked(
+        self, next_rect, road_states, intersection_zones
+    ) -> bool:
+        """Do not step onto or creep across the crosswalk unless the signal allows clearing."""
+        if self._turn_phase in ("turning", "settling", "to_hub"):
+            return False
+        if not road_states:
+            return False
+        approach = self._approach_state_for_signal(road_states)
+        if approach is None:
+            return False
+        crosswalk = approach["crosswalk"]
+        if not self._approach_crosswalk_relevant(crosswalk):
+            return False
+        if not self._in_crossing_lane(crosswalk):
+            return False
+        if not collide(next_rect, crosswalk):
+            return False
+        if self._inside_intersection(intersection_zones):
+            return False
+        if collide(self.rect, crosswalk):
+            stop_axis = self._signal_stop_axis(crosswalk)
+            stop_dist = self._distance_to_signal_stop(stop_axis)
+            if stop_dist <= 0:
+                light = self._effective_approach_light(approach)
+                if light == "red":
+                    return False
+                if light == "yellow":
+                    zone = self._approach_intersection_zone(intersection_zones)
+                    if zone is None:
+                        return False
+                    return not self._can_clear_signal_in_time(approach, zone)
+        light = self._effective_approach_light(approach)
+        if light == "red":
+            return True
+        if light == "green":
+            return False
+        zone = self._approach_intersection_zone(intersection_zones)
+        if zone is None:
+            return False
+        return not self._can_clear_signal_in_time(approach, zone)
+
+    def _retreat_from_crosswalk_on_red(
+        self, state: dict, *, inside_intersection: bool, intersection_zones
+    ) -> bool:
+        """Clamp cars behind the stop line instead of idling on the crosswalk."""
+        if inside_intersection or self._inside_intersection(intersection_zones):
+            return False
+        if self._turn_phase in ("turning", "settling", "to_hub"):
+            return False
+        crosswalk = state["crosswalk"]
+        if not self._in_crossing_lane(crosswalk) or not collide(self.rect, crosswalk):
+            return False
+        light = self._effective_approach_light(state)
+        if light != "red":
+            return False
+        stop_axis = self._signal_stop_axis(crosswalk)
+        clamped = self._enforce_signal_stop_line(stop_axis)
+        self.current_speed = 0.0
+        self.speed = 0.0
+        return clamped
+
+    def _intersection_advance_blocked_on_red(
+        self, next_rect, road_states, intersection_zones
+    ) -> bool:
+        """Red gates approach entry; cars already inside the box may clear."""
+        if self._turn_reservation_frames > 0:
+            return False
+        if self._turn_phase == "turning" and self._turn_arc_travel > 0:
+            return False
+        if self._turn_phase in ("settling", "to_hub") and self._turn_exit:
+            return False
+        if not intersection_zones:
+            return False
+        if not self._in_or_entering_intersection(next_rect, intersection_zones):
+            return False
+        if self._inside_intersection(intersection_zones):
+            return False
         return False
 
     def _intersection_move_blocked(
@@ -3243,8 +1674,10 @@ class Car(Entity):
                 )
         # Snap back only a minor overshoot at a red light (e.g. spawned 1-2 frames past).
         if self._turn_phase == "none" and self.current_speed < 0.5:
-            for state in road_states:
+            for state in self._states_for_our_approach(road_states) or road_states:
                 cw = state["crosswalk"]
+                if not self._approach_crosswalk_relevant(cw):
+                    continue
                 if not self._in_crossing_lane(cw):
                     continue
                 sa = self._signal_stop_axis(cw)
@@ -3269,22 +1702,10 @@ class Car(Entity):
         blocked_by_line = False
         for state in blocking_controls:
             stop_axis = self._signal_stop_axis(state["crosswalk"])
-            if signed_speed != 0:
-                if self.vertical:
-                    if self.direction > 0 and self.rect.bottom + signed_speed >= stop_axis - STOP_LINE_GAP:
-                        self.rect.bottom = stop_axis - STOP_LINE_GAP
-                        blocked_by_line = True
-                    elif self.direction < 0 and self.rect.top + signed_speed <= stop_axis + STOP_LINE_GAP:
-                        self.rect.top = stop_axis + STOP_LINE_GAP
-                        blocked_by_line = True
-                else:
-                    if self.direction > 0 and self.rect.right + signed_speed >= stop_axis - STOP_LINE_GAP:
-                        self.rect.right = stop_axis - STOP_LINE_GAP
-                        blocked_by_line = True
-                    elif self.direction < 0 and self.rect.left + signed_speed <= stop_axis + STOP_LINE_GAP:
-                        self.rect.left = stop_axis + STOP_LINE_GAP
-                        blocked_by_line = True
-            if self._enforce_signal_stop_line(stop_axis):
+            if self._would_block_at_signal_stop(stop_axis, signed_speed):
+                self._clamp_at_signal_stop(stop_axis)
+                blocked_by_line = True
+            elif self._enforce_signal_stop_line(stop_axis):
                 blocked_by_line = True
             if blocked_by_line:
                 break
@@ -3351,6 +1772,33 @@ class Car(Entity):
         inside_intersection = bool(intersection_zones) and self._rect_in_intersection(
             self.rect, intersection_zones
         )
+        if self._spawn_clear_ix_frames > 0:
+            self._spawn_clear_ix_frames -= 1
+            desired_speed = max(desired_speed, CAR_CREEP_SPEED)
+        if (
+            inside_intersection
+            and self.turn_signal != 0
+            and self._turn_phase == "none"
+            and road_states
+            and self._straight_light_at_approach(road_states) == "green"
+            and self.current_speed < 0.5
+        ):
+            desired_speed = max(desired_speed, self.base_speed * 0.85)
+        if not inside_intersection:
+            self._use_entry_approach_signal = False
+        if (
+            inside_intersection
+            and self._turn_phase not in ("turning", "to_hub", "settling")
+            and (
+                not road_states
+                or self._intersection_advance_blocked_on_red(
+                    self.rect, road_states, intersection_zones
+                )
+            )
+        ):
+            desired_speed = 0.0
+            self.current_speed = 0.0
+            self.speed = 0.0
         if inside_intersection and self.current_speed < 0.35:
             self._intersection_stuck_frames += 1
         else:
@@ -3369,75 +1817,32 @@ class Car(Entity):
             and self._intersection_stuck_frames >= INTERSECTION_STUCK_CREEP_FRAMES
         )
         self._spawn_age += 1
+        if self._exit_lane_snap_steps > 0 and self._turn_phase == "none":
+            target = self._exit_lane_target
+            if target is not None:
+                tx, ty = target
+                cx, cy = self.rect.center
+                step = 10
+                nx = cx + max(-step, min(step, tx - cx))
+                ny = cy + max(-step, min(step, ty - cy))
+                self.rect.center = (nx, ny)
+                if abs(tx - nx) < 1.0 and abs(ty - ny) < 1.0:
+                    self._exit_lane_target = None
+            else:
+                self._snap_center_to_left_lane(roads, max_nudge=8)
+            self._exit_lane_snap_steps -= 1
+            self._nudge_clear_intersection_tail(intersection_zones, max_step_total=10)
+            self._sync_collision_shell()
         if self._turn_abort_cooldown > 0:
             self._turn_abort_cooldown -= 1
+        if self._turn_peer_retreat_cooldown > 0:
+            self._turn_peer_retreat_cooldown -= 1
         ramp_cap = self._spawn_ramp_cap()
-        plan_turn = self.turn_signal != 0 or self._approaching_or_in_intersection(
-            intersection_zones
-        )
-        plan_stride = 2 if plan_turn else 0
-        if plan_stride and (frame_index + self.spawn_id) % plan_stride == 0:
-            self._plan_turn_at_intersection(
-                roads,
-                intersection_zones,
-                move_peers,
-                player_body_rect,
-                ped_legal_crossing,
-            )
-        if plan_turn:
-            self._maintain_turn_plan(
-                roads,
-                intersection_zones,
-                move_peers,
-                player_body_rect,
-                ped_legal_crossing,
-                road_states,
-            )
-        self._arm_turn_through_hub(
-            roads,
-            intersection_zones,
-            move_peers,
-            player_body_rect,
-            ped_legal_crossing,
-        )
-        self._try_resume_turn_after_block(
-            move_peers,
-            player_body_rect,
-            ped_legal_crossing,
-            intersection_zones,
-        )
-        if self._turn_hold_frames > 0 and (self.turn_signal != 0 or self._turn_exit):
-            desired_speed = 0.0
-        if (
-            self._turn_hold_frames >= TURN_HOLD_RETRY_FRAMES * 4
-            and self._turn_phase == "none"
-            and self._turn_snap_travel > 0
-            and self._turn_exit
-        ):
-            self._try_resume_turn_after_block(
-                move_peers,
-                player_body_rect,
-                ped_legal_crossing,
-                intersection_zones,
-            )
-        if (
-            self._turn_phase == "none"
-            and self._turn_snap_travel > 0
-            and self._turn_hold_frames > 0
-        ):
-            self._turn_hold_frames -= 1
-        if self._turn_phase in ("to_hub", "turning", "settling"):
-            desired_speed = min(desired_speed, self.base_speed * TURN_PIVOT_SPEED_FRAC)
-            if self._turn_reservation_frames < _tune.TURN_RESERVATION_HOLD_FRAMES:
-                self._turn_reservation_frames += 1
-        elif self._turn_reservation_frames > 0:
-            self._turn_reservation_frames -= 1
-        if self._turn_phase == "to_hub" and self._turn_hub is not None:
-            hub_off = self._hub_travel_offset()
-            if hub_off >= -TURN_HUB_DIST:
-                desired_speed = min(desired_speed, self.base_speed * TURN_PIVOT_SPEED_FRAC * 0.65)
-            if -6 <= hub_off <= TURN_HUB_HOLD_DIST:
-                desired_speed = 0.0
+        self.turn_signal = 0
+        self._turn_phase = "none"
+        self._turn_exit = None
+        self._turn_hold_frames = 0
+        self._turn_reservation_frames = 0
 
         if ENABLE_CAR_CAR_SOFT_AVOIDANCE:
             if self._turn_phase not in ("turning", "settling") and len(lane_peers) > 1:
@@ -3454,6 +1859,9 @@ class Car(Entity):
             stop_distance = self._distance_to_signal_stop(stop_axis)
             in_crossing_lane = self._in_crossing_lane(crosswalk)
 
+            if in_crossing_lane and not self._approach_crosswalk_relevant(crosswalk):
+                continue
+
             if in_crossing_lane:
                 # Snap back over the stop line if the car is stopped at a red and
                 # slightly overshot (e.g. spawned 1–2 frames past the line).  Only
@@ -3468,49 +1876,59 @@ class Car(Entity):
                 ):
                     self._enforce_signal_stop_line(stop_axis)
 
-                # Do not hold at lights while already in the intersection box — clear it.
-                if (
-                    not inside_intersection
-                    and self._turn_phase not in ("turning", "settling")
-                ):
+                if self._turn_phase not in ("turning", "settling"):
                     approach_light = self._effective_approach_light(state)
-                    brake_dist = RED_SIGNAL_BRAKE_DIST
-                    if approach_light == "red" and collide(crosswalk, player_body_rect):
-                        brake_dist = RED_SIGNAL_BRAKE_DIST + 24
-                    if approach_light == "red":
-                        desired_speed = self._apply_approach_signal_braking(
-                            state,
-                            stop_distance,
-                            desired_speed,
-                            blocking_controls,
-                            brake_dist=brake_dist,
-                            creep_dist=RED_SIGNAL_CREEP_DIST,
-                        )
-                    elif approach_light == "yellow" and stop_distance < YELLOW_SIGNAL_BRAKE_DIST:
-                        zone = self._intersection_zone_at(intersection_zones)
-                        if zone is None and intersection_zones:
-                            best_d = 1e9
-                            for z in intersection_zones:
-                                d = self._distance_to_intersection_entry(z)
-                                if d is not None and 0 <= d < best_d:
-                                    best_d = d
-                                    zone = z
-                        if zone is None or not self._can_clear_signal_in_time(
-                            state, zone
+                    if not inside_intersection:
+                        brake_dist = RED_SIGNAL_BRAKE_DIST
+                        if approach_light == "red" and collide(
+                            crosswalk, player_body_rect
                         ):
+                            brake_dist = RED_SIGNAL_BRAKE_DIST + 24
+                        if approach_light == "red":
                             desired_speed = self._apply_approach_signal_braking(
                                 state,
                                 stop_distance,
                                 desired_speed,
                                 blocking_controls,
-                                brake_dist=YELLOW_SIGNAL_BRAKE_DIST,
+                                brake_dist=brake_dist,
                                 creep_dist=RED_SIGNAL_CREEP_DIST,
                             )
-                        elif stop_distance >= YELLOW_COMMIT_DISTANCE:
-                            desired_speed = min(desired_speed, self.base_speed * 0.45)
+                        elif (
+                            approach_light == "yellow"
+                            and stop_distance < YELLOW_SIGNAL_BRAKE_DIST
+                        ):
+                            zone = self._intersection_zone_at(intersection_zones)
+                            if zone is None and intersection_zones:
+                                best_d = 1e9
+                                for z in intersection_zones:
+                                    d = self._distance_to_intersection_entry(z)
+                                    if d is not None and 0 <= d < best_d:
+                                        best_d = d
+                                        zone = z
+                            if zone is None or not self._can_clear_signal_in_time(
+                                state, zone
+                            ):
+                                desired_speed = self._apply_approach_signal_braking(
+                                    state,
+                                    stop_distance,
+                                    desired_speed,
+                                    blocking_controls,
+                                    brake_dist=YELLOW_SIGNAL_BRAKE_DIST,
+                                    creep_dist=RED_SIGNAL_CREEP_DIST,
+                                )
+                            elif stop_distance >= YELLOW_COMMIT_DISTANCE:
+                                desired_speed = min(
+                                    desired_speed, self.base_speed * 0.45
+                                )
 
-                    if state["stop_active"] and 0 < stop_distance < RED_SIGNAL_CREEP_DIST:
-                        desired_speed = min(desired_speed, CAR_CREEP_SPEED)
+                        if state["stop_active"] and 0 < stop_distance < RED_SIGNAL_CREEP_DIST:
+                            desired_speed = min(desired_speed, CAR_CREEP_SPEED)
+
+                    self._retreat_from_crosswalk_on_red(
+                        state,
+                        inside_intersection=inside_intersection,
+                        intersection_zones=intersection_zones,
+                    )
 
         # Strong player-avoidance behavior: brake early when player is in/near lane ahead.
         if self.vertical:
@@ -3552,7 +1970,9 @@ class Car(Entity):
             for other in move_peers:
                 if other is self:
                     continue
-                if self._conflicts_with_committed_turner(other, intersection_zones):
+                if self._conflicts_with_committed_turner(
+                    other, intersection_zones, road_states=road_states
+                ):
                     desired_speed = 0.0
                     break
                 if other._turn_phase in ("turning", "settling") and rects_overlap(
@@ -3571,6 +1991,15 @@ class Car(Entity):
                     break
 
         desired_speed = min(desired_speed, ramp_cap)
+        if (
+            inside_intersection
+            and self._turn_phase not in ("turning", "settling", "to_hub")
+            and road_states
+            and self._intersection_advance_blocked_on_red(
+                self.rect, road_states, intersection_zones
+            )
+        ):
+            desired_speed = 0.0
         if self._spawn_age < CAR_SPAWN_RAMP_FRAMES:
             accel = self.base_speed / CAR_SPAWN_RAMP_FRAMES
         else:
@@ -3582,39 +2011,30 @@ class Car(Entity):
             self.current_speed = max(desired_speed, self.current_speed - self.brake_strength)
 
         signed_speed = self.current_speed * self.direction
+        if (
+            signed_speed != 0
+            and inside_intersection
+            and self._turn_phase not in ("turning", "settling", "to_hub")
+            and road_states
+            and self._intersection_advance_blocked_on_red(
+                self.rect, road_states, intersection_zones
+            )
+        ):
+            self.current_speed = 0.0
+            self.speed = 0.0
+            signed_speed = 0.0
 
         blocked_by_line = False
         if signed_speed != 0:
             for state in blocking_controls:
                 stop_axis = self._signal_stop_axis(state["crosswalk"])
-                if self.vertical:
-                    if self.direction > 0 and self.rect.bottom + signed_speed >= stop_axis - STOP_LINE_GAP:
-                        self.rect.bottom = stop_axis - STOP_LINE_GAP
-                        blocked_by_line = True
-                    elif self.direction < 0 and self.rect.top + signed_speed <= stop_axis + STOP_LINE_GAP:
-                        self.rect.top = stop_axis + STOP_LINE_GAP
-                        blocked_by_line = True
-                else:
-                    if self.direction > 0 and self.rect.right + signed_speed >= stop_axis - STOP_LINE_GAP:
-                        self.rect.right = stop_axis - STOP_LINE_GAP
-                        blocked_by_line = True
-                    elif self.direction < 0 and self.rect.left + signed_speed <= stop_axis + STOP_LINE_GAP:
-                        self.rect.left = stop_axis + STOP_LINE_GAP
-                        blocked_by_line = True
+                if self._would_block_at_signal_stop(stop_axis, signed_speed):
+                    self._clamp_at_signal_stop(stop_axis)
+                    blocked_by_line = True
                 if blocked_by_line:
                     break
 
-        if self._turn_phase == "turning":
-            self._steer_through_turn(
-                roads,
-                intersection_zones,
-                move_peers,
-                player_body_rect,
-                ped_legal_crossing,
-            )
-        elif self._turn_phase == "settling":
-            self._settle_turn_exit(roads, move_peers, intersection_zones)
-        elif blocked_by_line:
+        if blocked_by_line:
             self.current_speed = 0
             self.speed = 0
         else:
@@ -3624,18 +2044,10 @@ class Car(Entity):
             else:
                 next_rect.x += signed_speed
 
-            if self._turn_phase == "to_hub":
-                next_rect = self._cap_next_rect_to_hub(next_rect)
-
             if ENABLE_CAR_CAR_SOFT_AVOIDANCE:
                 next_rect = self._cap_next_rect_same_lane(next_rect, lane_peers)
                 if self._peers_may_block_move(next_rect, move_peers):
                     next_rect = self._cap_next_rect_all_cars(next_rect, move_peers)
-                if self._planned_move_conflicts_active_turn(
-                    next_rect, move_peers, intersection_zones
-                ):
-                    if not intersection_creep:
-                        next_rect = self.rect.copy()
 
             entry_blocked = (
                 signed_speed != 0
@@ -3649,6 +2061,25 @@ class Car(Entity):
                 )
             )
             if entry_blocked:
+                next_rect = self.rect.copy()
+
+            advance_blocked = (
+                signed_speed != 0
+                and self._turn_phase not in ("turning", "settling")
+                and self._intersection_advance_blocked_on_red(
+                    next_rect, road_states, intersection_zones
+                )
+            )
+            if advance_blocked:
+                next_rect = self.rect.copy()
+
+            crosswalk_blocked = (
+                signed_speed != 0
+                and self._crosswalk_advance_blocked(
+                    next_rect, road_states, intersection_zones
+                )
+            )
+            if crosswalk_blocked:
                 next_rect = self.rect.copy()
 
             blocked = False
@@ -3725,7 +2156,7 @@ class Car(Entity):
                 ):
                     blocked = True
 
-            if blocked or entry_blocked:
+            if blocked or entry_blocked or advance_blocked:
                 self.current_speed = 0
                 self.speed = 0
             elif creep_cap is not None and signed_speed != 0:
@@ -3740,122 +2171,25 @@ class Car(Entity):
                 self.speed = signed_speed
                 self.rect = next_rect
 
-        self.rect.clamp_ip(world_rect.inflate(300, 300))
-        if self._turn_phase == "to_hub":
-            self._snap_to_hub_approach(max_past=TURN_HUB_HOLD_DIST)
-            self._try_start_turn_at_hub(
-                roads,
-                intersection_zones,
-                move_peers,
-                player_body_rect,
-                ped_legal_crossing,
+        if (
+            intersection_zones
+            and self._inside_intersection(intersection_zones)
+            and self._turn_phase != "turning"
+            and (
+                not road_states
+                or self._intersection_advance_blocked_on_red(
+                    self.rect, road_states, intersection_zones
+                )
+            )
+        ):
+            self.current_speed = 0.0
+            self.speed = 0.0
 
-            )
-        if self._turn_phase == "turning":
-            self._turn_arc_age += 1
-        elif self._turn_phase == "settling":
-            self._turn_arc_age += 1
-        else:
-            self._turn_arc_age = 0
-        turn_stall_zone = (
-            self._turn_phase == "to_hub"
-            or inside_intersection
-            or (
-                self._turn_phase in ("turning", "settling")
-                and intersection_zones
-                and self._approaching_or_in_intersection(intersection_zones)
-            )
-        )
-        if self._turn_phase in ("to_hub", "turning", "settling") and turn_stall_zone:
-            if self.current_speed < 0.35:
-                self._turn_blocked_frames += 1
-            elif self._turn_blocked_frames > 0:
-                self._turn_blocked_frames = max(0, self._turn_blocked_frames - 2)
-        else:
-            self._turn_blocked_frames = 0
-        if self._turn_phase == "turning":
-            stall_center = (round(self._turn_px), round(self._turn_py))
-            if stall_center == self._turn_stall_center:
-                self._turn_stall_frames += 1
-            else:
-                self._turn_stall_frames = 0
-                self._turn_stall_center = stall_center
-            if (
-                self._turn_stall_frames >= TURN_STALL_ABORT_FRAMES
-                and intersection_zones
-                and self._rect_in_intersection(self.rect, intersection_zones)
-            ):
-                zone = self._intersection_zone_for_turn_planning(
-                    intersection_zones, roads
-                )
-                if zone is None:
-                    zone = self._intersection_zone_at(intersection_zones)
-                if zone is not None:
-                    self._freeze_blocked_turn_in_intersection(
-                        intersection_zones,
-                        roads,
-                        move_peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                        zone,
-                    )
-            elif self._turn_stall_frames >= TURN_STALL_ABORT_FRAMES:
-                zone = self._intersection_zone_for_turn_planning(
-                    intersection_zones, roads
-                )
-                if zone is None:
-                    zone = self._intersection_zone_at(intersection_zones)
-                if self._turn_phase in ("turning", "settling") and zone is not None:
-                    self._freeze_blocked_turn_in_intersection(
-                        intersection_zones,
-                        roads,
-                        move_peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                        zone,
-                    )
-                else:
-                    self._hold_turn_and_replan(
-                        intersection_zones,
-                        roads,
-                        move_peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                    )
-        if self._turn_phase in ("to_hub", "turning", "settling"):
-            self._mitigate_turn_peer_deadlock(
-                move_peers, intersection_zones, roads
-            )
-        if self._turn_phase == "turning":
-            turn_abort_limit = TURN_PATH_BLOCKED_ABORT_FRAMES
-        elif self._turn_phase == "to_hub":
-            turn_abort_limit = TURN_TO_HUB_ABORT_FRAMES
-        else:
-            turn_abort_limit = TURN_ABORT_FRAMES
-        if self._turn_blocked_frames >= turn_abort_limit:
-            if self._turn_phase in ("turning", "settling"):
-                zone = self._intersection_zone_for_turn_planning(
-                    intersection_zones, roads
-                )
-                if zone is None:
-                    zone = self._intersection_zone_at(intersection_zones)
-                if zone is not None:
-                    self._freeze_blocked_turn_in_intersection(
-                        intersection_zones,
-                        roads,
-                        move_peers,
-                        player_body_rect,
-                        ped_legal_crossing,
-                        zone,
-                    )
-            else:
-                self._hold_turn_and_replan(
-                    intersection_zones,
-                    roads,
-                    move_peers,
-                    player_body_rect,
-                    ped_legal_crossing,
-                )
+        self.rect.clamp_ip(world_rect.inflate(300, 300))
+        self._turn_arc_age = 0
+        self._turn_blocked_frames = 0
+        self._turn_stall_frames = 0
+        self._turn_stall_center = None
 
         if (frame_index + self.spawn_id) % SURFACE_CHECK_INTERVAL == 0:
             self._anchor_network_position(roads, intersection_zones, world_rect)
@@ -3873,6 +2207,7 @@ class Car(Entity):
             self.road_index is not None
             and self._turn_phase not in ("to_hub", "turning", "settling")
             and not in_ix_rect
+            and self._exit_lane_snap_steps <= 0
         ):
             if self.current_speed < 0.25 and self._stopped_frames > 8:
                 snap_nudge = 0

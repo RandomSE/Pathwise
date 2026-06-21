@@ -995,20 +995,6 @@ def build_dashboard_html(
           const [tx, ty] = signalTurnBulb(housing, cw.direction, approach);
           svg += `<circle cx="${{tx}}" cy="${{ty}}" r="7" fill="#2de685"/>`;
         }}
-        let timerX, timerY, timerAnchor;
-        if (cw.direction === "vertical") {{
-          timerX = approach === "east" ? housing[0] - 8 : housing[0] + housing[2] + 8;
-          timerY = housing[1] + housing[3] / 2;
-          timerAnchor = approach === "east" ? "end" : "start";
-        }} else {{
-          timerX = housing[0] + housing[2] / 2;
-          timerY = approach === "south" ? housing[1] - 6 : housing[1] + housing[3] + 14;
-          timerAnchor = "middle";
-        }}
-        const timerLabel = phase.turnState === "green" && phase.state === "red"
-          ? `turn ${{phase.turnIn.toFixed(1)}}s → ${{phase.turnNext}}`
-          : `${{phase.in.toFixed(1)}}s → ${{phase.next}}`;
-        svg += `<text class="light-timer" x="${{timerX}}" y="${{timerY}}" text-anchor="${{timerAnchor}}">${{timerLabel}}</text>`;
       }});
       const goal = L.goal;
       svg += `<rect x="${{goal.x - 8}}" y="${{goal.y - 8}}" width="${{goal.w + 16}}" height="${{goal.h + 16}}" fill="#ffdc50" opacity="0.5" rx="10"/>`;

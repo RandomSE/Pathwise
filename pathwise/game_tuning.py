@@ -16,7 +16,7 @@ _CAR_W, _CAR_H = _utils.CAR_WIDTH, _utils.CAR_HEIGHT
 
 @dataclass(frozen=True)
 class GameTuning:
-    """All gameplay tuning constants (lights, cars, spawn, turns, perf)."""
+    """All gameplay tuning constants (lights, cars, spawn, perf)."""
 
     WIDTH: int = _utils.WIDTH
     HEIGHT: int = _utils.HEIGHT
@@ -41,7 +41,7 @@ class GameTuning:
     YELLOW_SIGNAL_BRAKE_DIST: int = 72
 
     CAR_SPAWN_CLEARANCE: int = 20
-    CROSSWALK_THICKNESS: int = 14
+    CROSSWALK_THICKNESS: int = 22
     INTERSECTION_GAP_MIN: int = 6
     NEAR_MISS_DISTANCE: int = 56
     TOO_CLOSE_DISTANCE: int = 82
@@ -74,39 +74,6 @@ class GameTuning:
     RESPAWN_RETRY_FRAMES: int = 20
     RESPAWN_POSE_TRIES: int = 2
 
-    TURN_CHANCE: float = 0.22
-    TURN_HUB_DIST: int = 28
-    TURN_HUB_HOLD_DIST: int = 8
-    TURN_OVERSHOOT_ABORT: int = 22
-    TURN_PIVOT_SPEED_FRAC: float = 0.42
-    TURN_DRIFT_SPEED_FRAC: float = 0.86
-    TURN_SETTLE_FRAMES: int = 3
-    TURN_MIN_STEP_FRAC: float = 0.46
-    TURN_ARC_CORNER_BIAS: float = 0.92
-    TURN_MIN_ARC_LEN: float = 48.0
-    TURN_SIGNAL_LEAD_DIST: int = max(_CAR_W, _CAR_H) * 2 + 24
-    TURN_ABORT_FRAMES: int = 150
-    TURN_SIGNAL_STUCK_FRAMES: int = 54
-    TURN_PATH_BLOCKED_ABORT_FRAMES: int = 45
-    TURN_PATH_SAMPLES: int = 9
-    TURN_CORRIDOR_PAD: int = 44
-    TURN_RESERVE_PAD: int = 36
-    TURN_OVERLAP_ABORT_FRAMES: int = 12
-    TURN_STALL_ABORT_FRAMES: int = 18
-    TURN_HOLD_ZONE_RESET_FRAMES: int = 2
-    TURN_HOLD_RETRY_FRAMES: int = 18
-    TURN_TO_HUB_WAIT_ABORT_FRAMES: int = 15
-    TURN_TO_HUB_ABORT_FRAMES: int = 30
-    TURN_PEER_YIELD_FRAMES: int = 20
-    TURN_ABORT_COOLDOWN_FRAMES: int = 90
-    TURN_PEER_QUERY_PAD: int = 48
-    TURN_EXIT_STOPPED_BLOCK_DIST: int = 120
-    TURN_PRIORITY_PREDICT_SECONDS: float = 2.2
-    TURN_PRIORITY_TIME_MARGIN_S: float = 0.35
-    TURN_PRIORITY_CONFLICT_PAD: int = 20
-    TURN_PRIORITY_MIN_STRAIGHT_SPEED: float = 0.6
-    TURN_RESERVATION_HOLD_FRAMES: int = 24
-
     SHELL_PENETRATION_MAX_NUDGE: int = 10
     SHELL_PENETRATION_PASSES: int = 4
     INTERSECTION_SHELL_PAD: int = 32
@@ -116,6 +83,7 @@ class GameTuning:
     CAR_SOFT_STOP_GAP: int = 14
     CAP_ALL_CARS_ITERATIONS: int = 4
     SHELL_SEP_EVERY_N_FRAMES: int = 1
+    SHELL_SEP_PEER_PAD: int = 72
     SHELL_SEP_FLEET_THRESHOLD: int = 70
 
     OFF_ROAD_REMOVE_FRAMES: int = 72

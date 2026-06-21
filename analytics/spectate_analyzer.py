@@ -1,24 +1,18 @@
-"""Detect car–car and intersection anomalies while spectating a synthetic round."""
+"""Detect car-shell and intersection anomalies in straight-only traffic."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from pathwise.geom import Rect, rects_overlap
+from pathwise.geom import Rect, collide, rects_overlap
 from pathwise.sim_constants import INTERSECTION_STUCK_CREEP_FRAMES
 
-
-NEAR_TURNER_DIST = 72
-FROZEN_SPEED_THRESH = 0.15
-TURN_STUCK_SPEED_THRESH = 0.1
 OVERLAP_REPORT_MIN_PAIRS = 1
-FROZEN_NEAR_TURNER_FRAMES = 120
-TURN_STUCK_FRAMES = 120
-TURN_ARC_OVERLAP_FRAMES = 4
-TURN_ARC_OVERLAP_COOLDOWN = 24
 GRIDLOCK_MIN_CARS = 3
 GRIDLOCK_SPEED_THRESH = 0.3
+PARTIAL_IX_STOP_FRAMES = 45
+SPAWN_LANE_GAP_AHEAD_PX = 150
 
 
 @dataclass
@@ -40,27 +34,19 @@ class CarAnomaly:
 
 
 class SpectateTracker:
-    """Stateful observer: emits anomalies when issues persist across frames."""
-
     def __init__(self) -> None:
         self.anomalies: list[CarAnomaly] = []
         self._overlap_cooldown = 0
-        self._frozen_near_turner: dict[int, int] = {}
-        self._turn_stuck: dict[int, int] = {}
         self._gridlock_streak = 0
-        self._emitted_frozen: set[int] = set()
-        self._emitted_turn_stuck: set[int] = set()
         self._emitted_gridlock = False
+        self._known_spawn_ids: set[int] = set()
+        self._partial_ix_streak: dict[int, int] = {}
+        self._emitted_partial_ix: set[int] = set()
         self.max_overlap_pairs = 0
         self.overlap_frames = 0
         self.pre_separation_overlap_frames = 0
-        self.turn_arc_overlap_frames = 0
-        self.turn_arc_pre_separation_frames = 0
-        self.max_turn_arc_overlap_pairs = 0
-        self._turn_arc_pair_streak: dict[tuple[int, int], int] = {}
-        self._turn_arc_post_pair_streak: dict[tuple[int, int], int] = {}
-        self._turn_arc_overlap_cooldown = 0
-        self._turn_arc_post_overlap_cooldown = 0
+        self.spawn_in_lane_ahead_count = 0
+        self.partial_ix_stop_count = 0
 
     def observe_pre_separation(
         self,
@@ -70,57 +56,11 @@ class SpectateTracker:
         cars: list,
         intersection_zones: list[Rect],
     ) -> list[CarAnomaly]:
-        """Sample overlaps after car moves, before global shell separation."""
-        emitted: list[CarAnomaly] = []
+        del frame, sim_t, intersection_zones
         alive = [c for c in cars if c.alive()]
-
-        all_pairs = _overlap_pairs(alive)
-        if all_pairs:
+        if _overlap_pairs(alive):
             self.pre_separation_overlap_frames += 1
-
-        arc_pairs = _turn_arc_overlap_pairs(alive)
-        if arc_pairs:
-            self.turn_arc_pre_separation_frames += 1
-            self.max_turn_arc_overlap_pairs = max(
-                self.max_turn_arc_overlap_pairs, len(arc_pairs)
-            )
-            active_pairs = set(arc_pairs)
-            for pair in list(self._turn_arc_pair_streak):
-                if pair not in active_pairs:
-                    del self._turn_arc_pair_streak[pair]
-            for pair in arc_pairs:
-                self._turn_arc_pair_streak[pair] = (
-                    self._turn_arc_pair_streak.get(pair, 0) + 1
-                )
-            if self._turn_arc_overlap_cooldown <= 0:
-                for pair, streak in sorted(self._turn_arc_pair_streak.items()):
-                    if streak >= TURN_ARC_OVERLAP_FRAMES:
-                        anomaly = CarAnomaly(
-                            kind="turn_arc_overlap",
-                            sim_t=sim_t,
-                            frame=frame,
-                            summary=(
-                                f"Arc turners {pair[0]}/{pair[1]} overlapped "
-                                f"{streak} pre-separation frames"
-                            ),
-                            details={
-                                "pairs": arc_pairs,
-                                "pair_count": len(arc_pairs),
-                                "streak_frames": streak,
-                                "phase": "pre_separation",
-                            },
-                        )
-                        self.anomalies.append(anomaly)
-                        emitted.append(anomaly)
-                        self._turn_arc_overlap_cooldown = TURN_ARC_OVERLAP_COOLDOWN
-                        break
-        else:
-            self._turn_arc_pair_streak.clear()
-
-        if self._turn_arc_overlap_cooldown > 0:
-            self._turn_arc_overlap_cooldown -= 1
-
-        return emitted
+        return []
 
     def observe(
         self,
@@ -129,50 +69,11 @@ class SpectateTracker:
         sim_t: float,
         cars: list,
         intersection_zones: list[Rect],
+        road_states_for_car=None,
     ) -> list[CarAnomaly]:
+        del road_states_for_car
         emitted: list[CarAnomaly] = []
         alive = [c for c in cars if c.alive()]
-
-        arc_pairs = _turn_arc_overlap_pairs(alive)
-        if arc_pairs:
-            self.turn_arc_overlap_frames += 1
-            self.max_turn_arc_overlap_pairs = max(
-                self.max_turn_arc_overlap_pairs, len(arc_pairs)
-            )
-            active_pairs = set(arc_pairs)
-            for pair in list(self._turn_arc_post_pair_streak):
-                if pair not in active_pairs:
-                    del self._turn_arc_post_pair_streak[pair]
-            for pair in arc_pairs:
-                self._turn_arc_post_pair_streak[pair] = (
-                    self._turn_arc_post_pair_streak.get(pair, 0) + 1
-                )
-            if self._turn_arc_post_overlap_cooldown <= 0:
-                for pair, streak in sorted(self._turn_arc_post_pair_streak.items()):
-                    if streak >= TURN_ARC_OVERLAP_FRAMES:
-                        anomaly = CarAnomaly(
-                            kind="turn_arc_overlap",
-                            sim_t=sim_t,
-                            frame=frame,
-                            summary=(
-                                f"Arc turners {pair[0]}/{pair[1]} overlapped "
-                                f"{streak} post-separation frames"
-                            ),
-                            details={
-                                "pairs": arc_pairs,
-                                "pair_count": len(arc_pairs),
-                                "streak_frames": streak,
-                                "phase": "post_separation",
-                            },
-                        )
-                        self.anomalies.append(anomaly)
-                        emitted.append(anomaly)
-                        self._turn_arc_post_overlap_cooldown = TURN_ARC_OVERLAP_COOLDOWN
-                        break
-        else:
-            self._turn_arc_post_pair_streak.clear()
-        if self._turn_arc_post_overlap_cooldown > 0:
-            self._turn_arc_post_overlap_cooldown -= 1
 
         pairs = _overlap_pairs(alive)
         if pairs:
@@ -193,95 +94,6 @@ class SpectateTracker:
         if self._overlap_cooldown > 0:
             self._overlap_cooldown -= 1
 
-        turners = [
-            c
-            for c in alive
-            if c.turn_signal != 0
-            or c._turn_phase in ("to_hub", "turning", "settling")
-        ]
-        seen_frozen: set[int] = set()
-        for car in alive:
-            if car in turners:
-                continue
-            if car.current_speed >= FROZEN_SPEED_THRESH:
-                self._frozen_near_turner[car.spawn_id] = 0
-                continue
-            if car._turn_phase != "none" or car.turn_signal != 0:
-                continue
-            near = _near_any_turner(car, turners)
-            if not near:
-                self._frozen_near_turner[car.spawn_id] = 0
-                continue
-            if _lawful_wait_near_turner(car, turners):
-                self._frozen_near_turner[car.spawn_id] = 0
-                continue
-            sid = car.spawn_id
-            seen_frozen.add(sid)
-            streak = self._frozen_near_turner.get(sid, 0) + 1
-            self._frozen_near_turner[sid] = streak
-            if (
-                streak >= FROZEN_NEAR_TURNER_FRAMES
-                and sid not in self._emitted_frozen
-            ):
-                self._emitted_frozen.add(sid)
-                anomaly = CarAnomaly(
-                    kind="frozen_near_turner",
-                    sim_t=sim_t,
-                    frame=frame,
-                    summary=(
-                        f"Car {sid} frozen {streak} frames near turner "
-                        f"at ({car.rect.centerx},{car.rect.centery})"
-                    ),
-                    details={
-                        "car_id": sid,
-                        "streak_frames": streak,
-                        "pos": [car.rect.centerx, car.rect.centery],
-                    },
-                )
-                self.anomalies.append(anomaly)
-                emitted.append(anomaly)
-
-        for sid in list(self._frozen_near_turner):
-            if sid not in seen_frozen:
-                self._frozen_near_turner[sid] = 0
-
-        seen_turn_stuck: set[int] = set()
-        for car in turners:
-            if car._turn_phase == "to_hub" or car._turn_hold_frames > 0:
-                self._turn_stuck[car.spawn_id] = 0
-                continue
-            if car.current_speed >= TURN_STUCK_SPEED_THRESH:
-                self._turn_stuck[car.spawn_id] = 0
-                continue
-            sid = car.spawn_id
-            seen_turn_stuck.add(sid)
-            streak = self._turn_stuck.get(sid, 0) + 1
-            self._turn_stuck[sid] = streak
-            if streak >= TURN_STUCK_FRAMES and sid not in self._emitted_turn_stuck:
-                self._emitted_turn_stuck.add(sid)
-                anomaly = CarAnomaly(
-                    kind="turn_stuck",
-                    sim_t=sim_t,
-                    frame=frame,
-                    summary=(
-                        f"Turner {sid} stuck {streak} frames "
-                        f"phase={car._turn_phase} ts={car.turn_signal}"
-                    ),
-                    details={
-                        "car_id": sid,
-                        "streak_frames": streak,
-                        "turn_phase": car._turn_phase,
-                        "turn_signal": car.turn_signal,
-                        "pos": [car.rect.centerx, car.rect.centery],
-                    },
-                )
-                self.anomalies.append(anomaly)
-                emitted.append(anomaly)
-
-        for sid in list(self._turn_stuck):
-            if sid not in seen_turn_stuck:
-                self._turn_stuck[sid] = 0
-
         if intersection_zones:
             slow_in_ix = 0
             for car in alive:
@@ -289,12 +101,9 @@ class SpectateTracker:
                     continue
                 if not _car_in_any_zone(car, intersection_zones):
                     continue
-                # Cars already in the gridlock-despawn pipeline are self-healing.
-                if (
-                    car._turn_phase == "none"
-                    and car.turn_signal == 0
-                    and getattr(car, "_gridlock_frames", 0) >= INTERSECTION_STUCK_CREEP_FRAMES
-                ):
+                if getattr(car, "_gridlock_frames", 0) >= INTERSECTION_STUCK_CREEP_FRAMES:
+                    continue
+                if getattr(car, "_stopped_frames", 0) >= 24:
                     continue
                 slow_in_ix += 1
             if slow_in_ix >= GRIDLOCK_MIN_CARS:
@@ -313,6 +122,78 @@ class SpectateTracker:
                 self.anomalies.append(anomaly)
                 emitted.append(anomaly)
 
+        current_ids = {c.spawn_id for c in alive}
+        new_ids = current_ids - self._known_spawn_ids
+        self._known_spawn_ids = current_ids
+        seen_partial: set[int] = set()
+
+        for car in alive:
+            sid = car.spawn_id
+            if sid in new_ids and car._spawn_age <= 3:
+                for other in alive:
+                    if other is car:
+                        continue
+                    if other.vertical != car.vertical or other.direction != car.direction:
+                        continue
+                    if car.vertical:
+                        lane_gap = abs(other.rect.centerx - car.rect.centerx)
+                        gap = (car.rect.centery - other.rect.centery) * car.direction
+                    else:
+                        lane_gap = abs(other.rect.centery - car.rect.centery)
+                        gap = (car.rect.centerx - other.rect.centerx) * car.direction
+                    if lane_gap > 45:
+                        continue
+                    if 0 < gap < SPAWN_LANE_GAP_AHEAD_PX and other.current_speed > 1.5:
+                        self.spawn_in_lane_ahead_count += 1
+                        anomaly = CarAnomaly(
+                            kind="spawn_in_lane_ahead",
+                            sim_t=sim_t,
+                            frame=frame,
+                            summary=(
+                                f"Spawn {sid} placed {gap:.0f}px ahead of mover {other.spawn_id}"
+                            ),
+                            details={
+                                "spawn_id": sid,
+                                "mover_id": other.spawn_id,
+                                "gap_px": round(gap, 1),
+                                "mover_speed": round(other.current_speed, 2),
+                            },
+                        )
+                        self.anomalies.append(anomaly)
+                        emitted.append(anomaly)
+                        break
+
+            if (
+                intersection_zones
+                and car.current_speed < 0.15
+                and _partial_intersection_overlap(car, intersection_zones)
+            ):
+                seen_partial.add(sid)
+                streak = self._partial_ix_streak.get(sid, 0) + 1
+                self._partial_ix_streak[sid] = streak
+                if streak >= PARTIAL_IX_STOP_FRAMES and sid not in self._emitted_partial_ix:
+                    self._emitted_partial_ix.add(sid)
+                    self.partial_ix_stop_count += 1
+                    anomaly = CarAnomaly(
+                        kind="partial_ix_stop",
+                        sim_t=sim_t,
+                        frame=frame,
+                        summary=f"Car {sid} stopped {streak} frames at intersection edge",
+                        details={
+                            "car_id": sid,
+                            "streak_frames": streak,
+                            "pos": [car.rect.centerx, car.rect.centery],
+                        },
+                    )
+                    self.anomalies.append(anomaly)
+                    emitted.append(anomaly)
+            else:
+                self._partial_ix_streak[sid] = 0
+
+        for sid in list(self._partial_ix_streak):
+            if sid not in seen_partial:
+                self._partial_ix_streak[sid] = 0
+
         return emitted
 
     def summary_dict(self) -> dict[str, Any]:
@@ -325,22 +206,9 @@ class SpectateTracker:
             "overlap_frames": self.overlap_frames,
             "max_overlap_pairs": self.max_overlap_pairs,
             "pre_separation_overlap_frames": self.pre_separation_overlap_frames,
-            "turn_arc_overlap_frames": self.turn_arc_overlap_frames,
-            "turn_arc_pre_separation_frames": self.turn_arc_pre_separation_frames,
-            "max_turn_arc_overlap_pairs": self.max_turn_arc_overlap_pairs,
+            "spawn_in_lane_ahead_count": self.spawn_in_lane_ahead_count,
+            "partial_ix_stop_count": self.partial_ix_stop_count,
         }
-
-
-def _turn_arc_overlap_pairs(alive: list) -> list[tuple[int, int]]:
-    pairs: list[tuple[int, int]] = []
-    arc = [c for c in alive if c._turn_phase in ("turning", "settling")]
-    for i in range(len(arc)):
-        for j in range(i + 1, len(arc)):
-            if rects_overlap(arc[i]._collision_shell, arc[j]._collision_shell):
-                a = arc[i].spawn_id
-                b = arc[j].spawn_id
-                pairs.append((min(a, b), max(a, b)))
-    return pairs
 
 
 def _overlap_pairs(alive: list) -> list[tuple[int, int]]:
@@ -354,34 +222,23 @@ def _overlap_pairs(alive: list) -> list[tuple[int, int]]:
     return pairs
 
 
-def _near_any_turner(car, turners: list) -> bool:
-    cx, cy = car.rect.centerx, car.rect.centery
-    for other in turners:
-        if (
-            abs(cx - other.rect.centerx) < NEAR_TURNER_DIST
-            and abs(cy - other.rect.centery) < NEAR_TURNER_DIST
-        ):
+def _car_in_any_zone(car, zones: list[Rect]) -> bool:
+    for zone in zones:
+        if rects_overlap(zone, car.rect):
             return True
     return False
 
 
-def _lawful_wait_near_turner(car, turners: list) -> bool:
-    """Straight traffic stopped while a turner holds is expected, not gridlock."""
-    if car.current_speed > FROZEN_SPEED_THRESH:
-        return False
-    if car._turn_phase != "none" or car.turn_signal != 0:
-        return False
-    if not _near_any_turner(car, turners):
-        return False
-    for turner in turners:
-        if turner._turn_phase in ("turning", "settling", "to_hub"):
-            if turner.current_speed < 0.4 or getattr(turner, "_turn_hold_frames", 0) > 0:
-                return True
-    return False
-
-
-def _car_in_any_zone(car, zones: list[Rect]) -> bool:
+def _partial_intersection_overlap(car, zones: list[Rect]) -> bool:
     for zone in zones:
-        if rects_overlap(zone, car.rect):
+        if not collide(zone, car.rect):
+            continue
+        fully = (
+            car.rect.left >= zone.left
+            and car.rect.right <= zone.right
+            and car.rect.top >= zone.top
+            and car.rect.bottom <= zone.bottom
+        )
+        if not fully:
             return True
     return False

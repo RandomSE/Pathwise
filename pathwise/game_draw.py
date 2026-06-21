@@ -7,7 +7,6 @@ import arcade
 from . import map_visuals
 from . import sprites
 from .traffic_signal_layout import bulb_positions as _signal_bulb_positions
-from .traffic_signal_layout import turn_bulb_position as _signal_turn_bulb_position
 from .entity_draw_batch import EntityDrawBatch
 from .geom import Rect, collide, rects_overlap
 from .pathwise_render import (
@@ -57,12 +56,6 @@ def _bulb_positions_world(
     housing: Rect, direction: str, approach: str
 ) -> list[tuple[int, int]]:
     return _signal_bulb_positions(housing, direction, approach)
-
-
-def _turn_bulb_position_world(
-    housing: Rect, direction: str, approach: str
-) -> tuple[int, int]:
-    return _signal_turn_bulb_position(housing, direction, approach)
 
 
 def _crosswalk_key(crosswalk: Rect) -> tuple[int, int, int, int]:
@@ -137,16 +130,6 @@ def draw_traffic_light_overlays(
                 pos[0], pos[1], camera_offset, window_height, 6, color
             )
 
-        turn_protected = (
-            state.get("turn_light_state") == "green"
-            and state["light_state"] == "red"
-        )
-        if turn_protected:
-            tx, ty = _turn_bulb_position_world(housing, state["direction"], approach)
-            draw_sim_circle_filled_world(
-                tx, ty, camera_offset, window_height, 7, (45, 230, 85)
-            )
-
         if not draw_timer_bar:
             continue
 
@@ -183,13 +166,7 @@ def draw_traffic_light_overlays(
             fill.width = max(1, int(bar_rect.width * fill_frac))
         else:
             fill.height = max(1, int(bar_rect.height * fill_frac))
-        fill_color = (
-            (80, 200, 90)
-            if next_name == "green"
-            else (230, 190, 60)
-            if next_name == "yellow"
-            else (220, 70, 70)
-        )
+        fill_color = (70, 110, 155)
         draw_sim_rect_filled(fill, camera_offset, window_height, fill_color)
         timer_text = _pooled_text(
             _traffic_timer_texts,
@@ -254,24 +231,6 @@ def draw_round_scene(
     _entity_batch.draw_entities(draw_sprites, camera_offset, window_height)
 
     for car in record_cars:
-        if car.turn_signal:
-            blink = int(elapsed * 10) % 2 == 0
-            sig_v, sig_d = car._effective_travel()
-            sig_angle = (
-                car._turn_display_angle
-                if car._turn_phase in ("turning", "settling")
-                else None
-            )
-            sprites.draw_turn_signal(
-                window_height,
-                car.rect,
-                sig_v,
-                sig_d,
-                car.turn_signal,
-                blink,
-                (cam_x, cam_y),
-                sig_angle,
-            )
         if car.is_honking(elapsed):
             sprites.draw_honk_bubble(window_height, car.rect, (cam_x, cam_y))
 

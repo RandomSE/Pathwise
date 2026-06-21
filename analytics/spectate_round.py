@@ -170,6 +170,9 @@ def run_spectate_round(
                     sim_t=elapsed,
                     cars=game.cars.sprites(),
                     intersection_zones=game.intersection_zones,
+                    road_states_for_car=lambda car: game._road_states_for_car(
+                        car, game._oriented_road_states_for_car(car)
+                    ),
                 )
 
         if game.round_active:

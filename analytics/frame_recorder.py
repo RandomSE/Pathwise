@@ -7,7 +7,7 @@ Capture policy:
 - Each frame and decision has a stable unique id.
 """
 
-from pathwise import commonUtils
+from analytics.map_snapshot import serialize_lights_for_replay
 
 FIXED_SAMPLE_INTERVAL_S = 1.0 / 12.0
 MIN_FRAME_GAP_S = 0.02
@@ -162,17 +162,7 @@ class FrameRecorder:
                 "s": self.pedestrian_size,
             },
             "cars": [_serialize_car(car, game_t) for car in car_sprites],
-            "lights": [
-                {
-                    "s": state["light_state"],
-                    "ts": state.get("turn_light_state", "red"),
-                    "in": round(state.get("seconds_to_change", 0), 1),
-                    "tin": round(state.get("turn_seconds_to_change", 0), 1),
-                    "next": state.get("next_light", "green"),
-                    "tnext": state.get("next_turn_light", "green"),
-                }
-                for state in road_states
-            ],
+            "lights": serialize_lights_for_replay(road_states),
         }
         if is_decision:
             frame["decision"] = dict(decision)
@@ -386,38 +376,17 @@ class FrameRecorder:
 def _serialize_car(car, game_time):
     rect = car.rect
     vertical = bool(car.vertical)
-    draw_w, draw_h = rect.w, rect.h
-    turn_phase = getattr(car, "_turn_phase", "none")
     payload = {
         "id": int(getattr(car, "spawn_id", 0)),
         "x": rect.x,
         "y": rect.y,
-        "w": draw_w,
-        "h": draw_h,
+        "w": rect.w,
+        "h": rect.h,
         "v": 1 if vertical else 0,
         "a": getattr(car, "archetype_index", 0),
         "sp": round(float(getattr(car, "current_speed", 0)), 2),
         "dir": int(getattr(car, "direction", 1)),
-        "ts": int(getattr(car, "turn_signal", 0)),
     }
-    if turn_phase in ("turning", "settling"):
-        # Replay draws the same east-facing base sprite as make_car_rotated_in_box.
-        draw_w, draw_h = commonUtils.CAR_WIDTH, commonUtils.CAR_HEIGHT
-        entry_vertical = bool(getattr(car, "_turn_entry_vertical", vertical))
-        payload["w"] = draw_w
-        payload["h"] = draw_h
-        payload["v"] = 0
-        payload["tv"] = 1 if entry_vertical else 0
-        entry_direction = int(
-            getattr(car, "_turn_entry_direction", getattr(car, "direction", 1))
-        )
-        payload["ed"] = entry_direction
-        payload["tp"] = turn_phase
-        payload["ang"] = round(float(getattr(car, "_turn_display_angle", 0.0)), 1)
-        payload["cx"] = round(float(getattr(car, "_turn_px", rect.centerx)))
-        payload["cy"] = round(float(getattr(car, "_turn_py", rect.centery)))
-        payload["x"] = payload["cx"] - draw_w // 2
-        payload["y"] = payload["cy"] - draw_h // 2
     if getattr(car, "is_honking", None) and car.is_honking(game_time):
         payload["honk"] = 1
     return payload
