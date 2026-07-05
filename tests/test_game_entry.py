@@ -36,9 +36,11 @@ class TestGameEntry(unittest.TestCase):
         self.game.start_round(1, profile, "normal")
         draw_state = self.game.update_round_frame(KeyState())
         self.assertIsNotNone(draw_state)
-        self.game.draw_round_frame(600, draw_state)
+        self.game.draw_round_frame(800, 600, draw_state)
         draw_scene.assert_called_once()
 
+    @patch("pathwise.game_draw.gameplay_draw_surface")
+    @patch("pathwise.game_draw.arcade.draw_lbwh_rectangle_filled")
     @patch("pathwise.game_draw.draw_sim_rect_outline")
     @patch("pathwise.game_draw._entity_batch.draw_entities")
     @patch("pathwise.game_draw.arcade.Text")
@@ -55,8 +57,13 @@ class TestGameEntry(unittest.TestCase):
         _text_cls,
         _entity_batch,
         _outline,
+        _bg_fill,
+        _surface,
     ):
+        from contextlib import nullcontext
         from pathwise.game_draw import draw_round_scene
+
+        _surface.side_effect = lambda _layout: nullcontext()
 
         profile = DifficultyProfile.for_menu_preset("normal")
         self.game.start_round(1, profile, "normal")
@@ -64,6 +71,7 @@ class TestGameEntry(unittest.TestCase):
         self.assertIsNotNone(draw_state)
 
         draw_round_scene(
+            800,
             600,
             current_map=self.game.current_map,
             player=self.game.player,
@@ -96,6 +104,7 @@ class TestGameEntry(unittest.TestCase):
             self.assertIsNotNone(draw_state)
 
             draw_round_scene(
+                window.width,
                 window.height,
                 current_map=self.game.current_map,
                 player=self.game.player,

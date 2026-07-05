@@ -151,7 +151,7 @@ class TestPathwiseWindowGameplay(unittest.TestCase):
 
         with patch("arcade.get_window", return_value=fake_arcade_window()):
             view = GamePlayView()
-            view.window = MagicMock(height=600)
+            view.window = MagicMock(width=800, height=600)
             view.clear = MagicMock()
             view._draw_state = None
             view.on_draw()

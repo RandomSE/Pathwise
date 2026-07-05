@@ -70,11 +70,13 @@ class DecisionLogger:
         if self._frame_recorder:
             self._frame_recorder.queue_decision(action, decision_id=decision_id, **context)
 
-    def note_risk(self, reason, **context):
+    def note_risk(self, reason, tier="risky", **context):
         from analytics.frame_recorder import RISK_LABELS
 
         risk_label = RISK_LABELS.get(reason, reason.replace("_", " "))
-        self._record("risk_event", risk=reason, risk_label=risk_label, **context)
+        self._record(
+            "risk_event", risk=reason, risk_label=risk_label, risk_tier=tier, **context
+        )
 
     def _grid_cell(self, pos, cell_size=40):
         return [int(pos[0] // cell_size), int(pos[1] // cell_size)]
@@ -209,7 +211,18 @@ class DecisionLogger:
             else:
                 self._record("commit", road_index=road_index, commit_time_s=commit_s)
 
-    def finalize(self, outcome, duration, crossings, collisions, risk_events, failure_reason):
+    def finalize(
+        self,
+        outcome,
+        duration,
+        crossings,
+        collisions,
+        risk_events,
+        failure_reason,
+        *,
+        reasonable_risk_events=0,
+        risky_risk_events=0,
+    ):
         if self._active_hesitation:
             now = time.time()
             duration_h = now - self._active_hesitation["start"]
@@ -231,6 +244,8 @@ class DecisionLogger:
             "crossings": crossings,
             "collisions": collisions,
             "risk_events": risk_events,
+            "reasonable_risk_events": reasonable_risk_events,
+            "risky_risk_events": risky_risk_events,
             "failure_reason": failure_reason,
             "map_id": self.map_id,
             "decision_sequence": self.decisions,

@@ -8,6 +8,7 @@ import arcade
 from map_generation.difficulty import DifficultyProfile
 from pathwise.input_keys import KEY_LEFT, KEY_UP
 from pathwise.pathwise_window import GamePlayView, PathwiseWindow, run
+from pathwise import pre_game
 from pathwise.pre_game import SessionConfig
 from tests.arcade_harness import fake_arcade_window
 
@@ -22,8 +23,9 @@ class TestGamePlayView(unittest.TestCase):
 
     def _view(self) -> GamePlayView:
         view = GamePlayView()
-        view.window = MagicMock(height=600)
+        view.window = MagicMock(width=800, height=600)
         view.clear = MagicMock()
+        view._sync_display_layout()
         return view
 
     def test_key_mapping(self):
@@ -42,9 +44,12 @@ class TestGamePlayView(unittest.TestCase):
     def test_update_and_draw_active_round(self, _draw, update):
         view = self._view()
         view.on_update(1 / 60)
-        update.assert_called_once()
+        update.assert_called_once_with(view.keys)
         view._draw_state = {"hud_lines": []}
         view.on_draw()
+        _draw.assert_called_once_with(
+            800, 600, view._draw_state, display_layout=view._display_layout
+        )
 
     @patch("main.round_active", False)
     @patch("main.app_running", False)
@@ -86,6 +91,7 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         window._base_profile = None
         window._round_index = 1
         window._outcomes = []
+        window._seed_text = ""
         window.show_view = MagicMock()
         window.closed = False
         return window
@@ -153,10 +159,12 @@ class TestPathwiseWindowFlow(unittest.TestCase):
     @patch("main.session_seed_source", "menu")
     @patch("main.session_use_adaptive_map", False)
     @patch("main.round_results", [])
-    def test_on_pre_game_done_starts_session(self, start_round, profiler, diag):
+    @patch("pathwise.pathwise_window.resolve_candidate_play_seed", return_value=(5, "menu", False))
+    def test_on_pre_game_done_starts_session(self, resolve_seed, start_round, profiler, diag):
         window = self._window()
         config = SessionConfig(preset="normal", num_rounds=1, seed=5)
         window._on_pre_game_done(config)
+        resolve_seed.assert_called_once_with(5)
         diag.begin_session.assert_called_once()
         profiler.begin_session.assert_called_once()
         start_round.assert_called_once()
@@ -188,6 +196,40 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         with patch("arcade.Window.run") as super_run:
             PathwiseWindow.run(w)
             super_run.assert_called_once()
+
+    def test_candidate_to_recruiter_and_back(self):
+        window = self._window()
+        window._show_candidate_home()
+        candidate = window.show_view.call_args.args[0]
+        self.assertIsInstance(candidate, pre_game.CandidateHomeView)
+        candidate._on_configure("seed-from-candidate")
+        recruiter = window.show_view.call_args.args[0]
+        self.assertIsInstance(recruiter, pre_game.RecruiterConfigView)
+        self.assertEqual(recruiter.generated_seed_text, "seed-from-candidate")
+        recruiter._on_back("generated-99")
+        self.assertEqual(window._seed_text, "generated-99")
+        window.show_view.assert_called()
+        returned = window.show_view.call_args.args[0]
+        self.assertIsInstance(returned, pre_game.CandidateHomeView)
+        self.assertEqual(returned.seed_text, "generated-99")
+
+    @patch("main.car_diagnostics")
+    @patch("main.perf_profiler")
+    @patch("main.ENABLE_PERF_PROFILE", False)
+    @patch("main.start_round")
+    @patch("main.session_num_rounds", 1)
+    @patch("main.session_base_seed", 1)
+    @patch("main.session_seed_source", "menu")
+    @patch("main.session_use_adaptive_map", False)
+    @patch("main.round_results", [])
+    @patch("pathwise.pathwise_window.resolve_candidate_play_seed", return_value=(50, "menu", False))
+    def test_recruiter_start_starts_session(self, _resolve, start_round, _profiler, _diag):
+        window = self._window()
+        config = SessionConfig(preset="hard", num_rounds=3, seed=50)
+        window._on_recruiter_start(config)
+        start_round.assert_called_once()
+        self.assertEqual(window._config.preset, "hard")
+        self.assertEqual(window._config.num_rounds, 3)
 
 
 if __name__ == "__main__":

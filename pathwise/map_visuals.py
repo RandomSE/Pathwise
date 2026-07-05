@@ -448,8 +448,10 @@ def _tile_baked_image(img: Image.Image, world_bounds: Rect, map_id: str) -> tupl
 def draw_baked_map(
     baked: BakedMapLayer,
     camera_offset: tuple[int, int],
-    window_height: int,
+    sim_height: int,
     view_rect: Rect | None = None,
+    *,
+    layout=None,
 ) -> None:
     from .pathwise_render import draw_sim_texture_rect
 
@@ -457,8 +459,10 @@ def draw_baked_map(
         for tile in baked.tiles:
             if collide(view_rect, tile.world_rect):
                 draw_sim_texture_rect(
-                    tile.world_rect, tile.texture, camera_offset, window_height
+                    tile.world_rect, tile.texture, camera_offset, sim_height, layout
                 )
         return
 
-    draw_sim_texture_rect(baked.world_bounds, baked.texture, camera_offset, window_height)
+    draw_sim_texture_rect(
+        baked.world_bounds, baked.texture, camera_offset, sim_height, layout
+    )
