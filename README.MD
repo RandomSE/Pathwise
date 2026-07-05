@@ -21,10 +21,14 @@ Use Python 3.9+ (3.12 is the primary tested target).
 
 4. Run Pathwise
 In the same OS-specific terminal opened in step 2, run `python main.py` (or `python pathwise_window.py`).
-A **pre-game menu** lets you pick difficulty (Easy / Normal / Hard), the number of rounds (default **1**, up to 5), and an optional map seed. Cross roads without hitting cars; reach the goal before time runs out. With **more than one round**, each round uses a derived map from the same session seed and gets harder (faster traffic, denser spawns, tighter lights).
 
-**Recruiter fairness:** run the same map for every candidate with a fixed seed:
-`set PATHWISE_SEED=12345` (Windows) then `python main.py` — the seed is prefilled on the menu and recorded in `logs.json` (`session_seed`, `seed_source`, `pathwise_seed_env`). You can still override it in the menu. **Adaptive maps:** when neither the menu nor `PATHWISE_SEED` fixes a seed, map layout tunes from the prior session in `logs.json` (traffic/light difficulty still follows your menu preset).
+**Candidate (default):** the app opens on the play screen. Paste or type an optional recruiter seed, then **Play set seed** or **Play random seed** (empty field). **Ctrl+V** pastes into the seed field. **Configure seed** opens recruiter options.
+
+**Recruiter:** set rounds (1–5) and difficulty, then **Generate seed** to create a 10-digit code that encodes the map seed, rounds, and preset. **Start session** runs the full configuration locally; **Back to play area** copies the generated seed to the candidate screen for candidates to use.
+
+Cross roads without hitting cars; reach the goal before time runs out. With **more than one round**, each round uses a derived map from the same session seed and gets harder (faster traffic, denser spawns, tighter lights).
+
+**Recruiter fairness (env pin):** `set PATHWISE_SEED=12345` (Windows) still pins map generation for scripted runs and is recorded in `logs.json` (`session_seed`, `seed_source`, `pathwise_seed_env`). Candidate quick play with an empty seed does **not** use `PATHWISE_SEED` — it rolls random instead. **Adaptive maps:** when neither a typed/generated seed nor `PATHWISE_SEED` fixes a seed, map layout tunes from the prior session in `logs.json`.
 
 5. View Recruiter Analytics
 After each run, Pathwise writes `logs.json` (decision sequence, hesitation events, heatmap samples) and auto-generates `logs_dashboard.html`.

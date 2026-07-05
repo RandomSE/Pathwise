@@ -6,8 +6,12 @@ from pathwise.session_seed import (
     SEED_SOURCE_ENV,
     SEED_SOURCE_MENU,
     SEED_SOURCE_RANDOM,
+    classify_seed_input,
+    decode_recruiter_seed,
+    encode_recruiter_seed,
     parse_seed_value,
     pathwise_seed_from_env,
+    resolve_candidate_play_seed,
     resolve_session_seed,
 )
 
@@ -60,3 +64,64 @@ class TestResolveSessionSeed(unittest.TestCase):
     def test_pathwise_seed_from_env(self):
         os.environ["PATHWISE_SEED"] = "555"
         self.assertEqual(pathwise_seed_from_env(), 555)
+
+
+class TestClassifySeedInput(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(classify_seed_input(""), "empty")
+        self.assertEqual(classify_seed_input("  \t "), "empty")
+
+    def test_valid(self):
+        self.assertEqual(classify_seed_input("0"), "valid")
+        self.assertEqual(classify_seed_input("1234567890"), "valid")
+
+    def test_invalid(self):
+        self.assertEqual(classify_seed_input("x"), "invalid")
+        self.assertEqual(classify_seed_input("12a"), "invalid")
+
+
+class TestResolveCandidatePlaySeed(unittest.TestCase):
+    def setUp(self):
+        self._env = os.environ.pop("PATHWISE_SEED", None)
+
+    def tearDown(self):
+        if self._env is None:
+            os.environ.pop("PATHWISE_SEED", None)
+        else:
+            os.environ["PATHWISE_SEED"] = self._env
+
+    def test_uses_menu_when_valid(self):
+        seed, source, adaptive = resolve_candidate_play_seed(42)
+        self.assertEqual((seed, source, adaptive), (42, SEED_SOURCE_MENU, False))
+
+    def test_random_when_menu_empty_ignores_env(self):
+        os.environ["PATHWISE_SEED"] = "777"
+        rng = random.Random(0)
+        expected = rng.randint(0, 2**31 - 1)
+        seed, source, adaptive = resolve_candidate_play_seed(None, rng=random.Random(0))
+        self.assertEqual(source, SEED_SOURCE_RANDOM)
+        self.assertTrue(adaptive)
+        self.assertEqual(seed, expected)
+        self.assertNotEqual(seed, 777)
+
+
+class TestRecruiterSeedEncoding(unittest.TestCase):
+    def test_round_trip(self):
+        encoded = encode_recruiter_seed(123456, "normal", 3)
+        self.assertEqual(len(encoded), 10)
+        payload = decode_recruiter_seed(encoded)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.map_seed, 123456)
+        self.assertEqual(payload.preset, "normal")
+        self.assertEqual(payload.num_rounds, 3)
+
+    def test_decode_rejects_plain_short_seed(self):
+        self.assertIsNone(decode_recruiter_seed("42"))
+        self.assertIsNone(decode_recruiter_seed("1234567890"))
+
+    def test_encode_wraps_large_map_seed(self):
+        encoded = encode_recruiter_seed(99_999_999, "hard", 5)
+        payload = decode_recruiter_seed(encoded)
+        self.assertEqual(payload.map_seed, 9_999_999)
+        self.assertEqual(payload.preset, "hard")
+        self.assertEqual(payload.num_rounds, 5)

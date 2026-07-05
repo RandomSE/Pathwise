@@ -193,7 +193,7 @@ class TestApproachCrosswalkRelevance(unittest.TestCase):
         }
         self.assertFalse(car._approach_crosswalk_relevant(crosswalk))
 
-    def test_committed_on_crosswalk_may_advance(self):
+    def test_committed_on_crosswalk_blocked_on_red(self):
         import main as game
 
         zone = Rect(200, 300, 100, 100)
@@ -215,7 +215,7 @@ class TestApproachCrosswalkRelevance(unittest.TestCase):
         }
         next_rect = car.rect.copy()
         next_rect.y -= 3
-        self.assertFalse(
+        self.assertTrue(
             car._crosswalk_advance_blocked(next_rect, [state], [zone])
         )
 

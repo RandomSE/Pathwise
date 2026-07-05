@@ -113,6 +113,27 @@ class TestCrosswalkBlocking(unittest.TestCase):
             car._crosswalk_advance_blocked(next_rect, [state], [zone])
         )
 
+    def test_red_blocks_further_crosswalk_travel_when_already_on_strip(self):
+        import main as game
+
+        zone = Rect(100, 100, 80, 80)
+        crosswalk = Rect(90, 123, 14, 14)
+        car = game.Car(35, 115, 3.0, vertical=False, spawn_id=10)
+        car.direction = 1
+        car.rect.right = crosswalk.left + 4
+        car._sync_collision_shell(force=True)
+        state = {
+            "crosswalk": crosswalk,
+            "light_state": "red",
+            "seconds_to_change": 4.0,
+            "approach_rect": zone.inflate(200, 200),
+        }
+        next_rect = car.rect.copy()
+        next_rect.x += 3
+        self.assertTrue(
+            car._crosswalk_advance_blocked(next_rect, [state], [zone])
+        )
+
     def test_yellow_allows_crosswalk_when_committed_past_stop(self):
         import main as game
 

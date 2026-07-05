@@ -35,7 +35,11 @@ def _ratio(numerator, denominator, default=0.0):
 def score_session(session):
     summary = session.get("summary", {})
     decisions = session.get("decision_sequence", [])
-    risks = session.get("risk_events", 0)
+    risky_risks = session.get(
+        "risky_risk_events", session.get("risk_events", 0)
+    )
+    reasonable_risks = session.get("reasonable_risk_events", 0)
+    risks = risky_risks
     duration = max(session.get("duration_s", 1), 0.1)
     red_crosses = sum(1 for d in decisions if d.get("action") == "cross_on_red")
     green_crosses = sum(1 for d in decisions if d.get("action") == "cross_on_green")
@@ -46,13 +50,15 @@ def score_session(session):
     slow_commits = summary.get("slow_commits", 0)
     outcome = session.get("outcome", "unknown")
 
-    risk_rate = risks / duration
+    risk_rate = risky_risks / duration
+    reasonable_rate = reasonable_risks / duration
     hesitation_per_road = hesitation_s / max(session.get("crossings", 1), 1)
 
     scores = {
         "risk_taker": _clamp(
             35
             + risk_rate * 120
+            + reasonable_rate * 35
             + red_crosses * 14
             + quick_commits * 10
             - green_crosses * 4
@@ -72,7 +78,8 @@ def score_session(session):
             + green_crosses * 12
             - red_crosses * 18
             - risk_rate * 90
-            + (15 if risks == 0 else 0)
+            - reasonable_rate * 25
+            + (15 if risky_risks == 0 else 0)
         ),
         "cautious_deliberator": _clamp(
             20
@@ -99,7 +106,8 @@ def score_session(session):
     insights = _build_insights(
         session,
         primary_key,
-        risks,
+        risky_risks,
+        reasonable_risks,
         hesitation_s,
         backtracks,
         quick_commits,
@@ -121,7 +129,9 @@ def score_session(session):
     }
 
 
-def _build_insights(session, primary, risks, hesitation_s, backtracks, quick_commits, red_crosses, green_crosses):
+def _build_insights(
+    session, primary, risky_risks, reasonable_risks, hesitation_s, backtracks, quick_commits, red_crosses, green_crosses
+):
     insights = []
     if hesitation_s > 2:
         insights.append(f"Paused for {hesitation_s:.1f}s total—shows deliberate evaluation before acting.")
@@ -141,10 +151,16 @@ def _build_insights(session, primary, risks, hesitation_s, backtracks, quick_com
     if quick_commits >= 2:
         insights.append("Multiple fast commits at roads—acts decisively once opportunity appears.")
 
-    if risks >= 3:
-        insights.append(f"Logged {risks} risky moves—comfort operating in tight traffic windows.")
-    elif risks == 0 and session.get("outcome") == "success":
+    if risky_risks >= 3:
+        insights.append(
+            f"Logged {risky_risks} risky moves—comfort operating in tight traffic windows."
+        )
+    elif risky_risks == 0 and session.get("outcome") == "success":
         insights.append("Completed run with zero flagged risky moves.")
+    if reasonable_risks >= 2 and risky_risks == 0:
+        insights.append(
+            f"Took {reasonable_risks} calculated risks without crossing into reckless territory."
+        )
 
     if not insights:
         insights.append(f"Primary fit: {ARCHETYPES[primary]['label']}. Review timeline for nuance.")

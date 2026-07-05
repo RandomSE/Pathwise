@@ -60,25 +60,27 @@ class MapBase:
 
     def draw(
         self,
-        window_height: int,
+        sim_height: int,
         camera_offset,
         player,
         city_blocks=None,
         world_bounds=None,
         decorations=None,
         view_rect=None,
+        layout=None,
     ):
         from . import map_visuals
 
         if self.baked_layer is not None:
             map_visuals.draw_baked_map(
-                self.baked_layer, camera_offset, window_height, view_rect
+                self.baked_layer, camera_offset, sim_height, view_rect, layout=layout
             )
-        draw_arrow(window_height, player, self.goal_rect, camera_offset)
+        draw_arrow(sim_height, player, self.goal_rect, camera_offset, layout=layout)
 
 
-def draw_arrow(window_height: int, player, goal_rect: Rect, camera_offset):
+def draw_arrow(sim_height: int, player, goal_rect: Rect, camera_offset, layout=None):
     from .pathwise_render import sim_point_to_arcade
+    from .viewport import DisplayLayout
 
     base_x = player.rect.centerx - camera_offset[0]
     base_y = player.rect.top - 50 - camera_offset[1]
@@ -96,16 +98,17 @@ def draw_arrow(window_height: int, player, goal_rect: Rect, camera_offset):
     tip_x = base_x + dx * BASE_SIZE
     tip_y = base_y + dy * BASE_SIZE
 
-    bx, by = sim_point_to_arcade(base_x, base_y, window_height)
-    tx, ty = sim_point_to_arcade(tip_x, tip_y, window_height)
-    arcade.draw_line(bx, by, tx, ty, (0, 0, 0), 3)
+    bx, by = sim_point_to_arcade(base_x, base_y, sim_height, layout)
+    tx, ty = sim_point_to_arcade(tip_x, tip_y, sim_height, layout)
+    line_w = layout.map_line_width(3) if isinstance(layout, DisplayLayout) else 3
+    arcade.draw_line(bx, by, tx, ty, (0, 0, 0), line_w)
 
     left_dx = dx * math.cos(math.pi / 6) - dy * math.sin(math.pi / 6)
     left_dy = dx * math.sin(math.pi / 6) + dy * math.cos(math.pi / 6)
     right_dx = dx * math.cos(-math.pi / 6) - dy * math.sin(-math.pi / 6)
     right_dy = dx * math.sin(-math.pi / 6) + dy * math.cos(-math.pi / 6)
 
-    lx, ly = sim_point_to_arcade(tip_x - left_dx * 15, tip_y - left_dy * 15, window_height)
-    rx, ry = sim_point_to_arcade(tip_x - right_dx * 15, tip_y - right_dy * 15, window_height)
-    arcade.draw_line(tx, ty, lx, ly, (0, 0, 0), 3)
-    arcade.draw_line(tx, ty, rx, ry, (0, 0, 0), 3)
+    lx, ly = sim_point_to_arcade(tip_x - left_dx * 15, tip_y - left_dy * 15, sim_height, layout)
+    rx, ry = sim_point_to_arcade(tip_x - right_dx * 15, tip_y - right_dy * 15, sim_height, layout)
+    arcade.draw_line(tx, ty, lx, ly, (0, 0, 0), line_w)
+    arcade.draw_line(tx, ty, rx, ry, (0, 0, 0), line_w)

@@ -18,6 +18,20 @@ class _CarStub:
 
 
 class TestFrameRecorderCap(unittest.TestCase):
+    def test_wants_capture_skips_between_samples(self):
+        from analytics.frame_recorder import FIXED_SAMPLE_INTERVAL_FAST_S
+
+        recorder = FrameRecorder(16)
+        player = Rect(90, 90, 20, 20)
+        recorder.capture_start(0.0, player, [], [])
+        self.assertFalse(recorder.wants_capture(0.05))
+        self.assertTrue(recorder.wants_capture(FIXED_SAMPLE_INTERVAL_FAST_S + 0.05))
+
+    def test_wants_capture_true_when_decision_queued(self):
+        recorder = FrameRecorder(16)
+        recorder.queue_decision("commit")
+        self.assertTrue(recorder.wants_capture(0.01))
+
     def test_replay_frames_bounded(self):
         recorder = FrameRecorder(16)
         car = _CarStub(100, 100)

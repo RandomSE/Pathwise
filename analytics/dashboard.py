@@ -1443,7 +1443,8 @@ def build_dashboard_html(
         ["Outcome", s.outcome, outcomeColor(s.outcome)],
         ["Duration", s.duration_s + "s", "var(--text)"],
         ["Crossings", s.crossings, "var(--text)"],
-        ["Risk events", s.risk_events, s.risk_events > 2 ? "var(--warn)" : "var(--text)"],
+        ["Risky events", s.risky_risk_events ?? s.risk_events, (s.risky_risk_events ?? s.risk_events) > 2 ? "var(--warn)" : "var(--text)"],
+        ["Reasonable risks", s.reasonable_risk_events ?? 0, "var(--text)"],
         ["Hesitation", sum.total_hesitation_s + "s (" + sum.hesitation_count + " pauses)", "var(--text)"],
         ["Backtracks", sum.total_backtracks, "var(--text)"],
       );

@@ -108,7 +108,7 @@ class TestMainCarUnit(unittest.TestCase):
     def test_draw_round_frame_path(self, _draw):
         self._started()
         state = self.game.update_round_frame(KeyState())
-        self.game.draw_round_frame(600, state)
+        self.game.draw_round_frame(800, 600, state)
 
 
 class TestSpritesHonk(unittest.TestCase):

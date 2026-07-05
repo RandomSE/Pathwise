@@ -11,7 +11,7 @@ from . import commonUtils
 from . import pre_game
 from .input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KeyState
 from map_generation.difficulty import DifficultyProfile
-from .session_seed import resolve_session_seed
+from .session_seed import resolve_candidate_play_seed
 
 WIDTH = commonUtils.WIDTH
 HEIGHT = commonUtils.HEIGHT
@@ -37,12 +37,44 @@ class GamePlayView(arcade.View):
         self._draw_state = None
         self._on_round_complete = on_round_complete
         self._round_complete_fired = False
+        self._display_layout = None
+        self._layout_size = (0, 0)
+        self._game = None
+
+    def _game_module(self):
+        if self._game is None:
+            import main as game
+
+            self._game = game
+        return self._game
+
+    def _sync_display_layout(self) -> None:
+        from pathwise.viewport import DisplayLayout
+
+        w = int(self.window.width)
+        h = int(self.window.height)
+        size = (w, h)
+        if size != self._layout_size or self._display_layout is None:
+            self._layout_size = size
+            self._display_layout = DisplayLayout.fit_window(w, h)
+
+    def on_resize(self, width: int, height: int) -> None:
+        from pathwise.viewport import DisplayLayout
+
+        self._layout_size = (width, height)
+        self._display_layout = DisplayLayout.fit_window(width, height)
 
     def on_show_view(self) -> None:
         arcade.set_background_color((236, 244, 252))
         self.keys.clear()
-        self._draw_state = None
         self._round_complete_fired = False
+        self._game = None
+        self._sync_display_layout()
+        game = self._game_module()
+        if game.round_active:
+            self._draw_state = game.update_round_frame(self.keys)
+        else:
+            self._draw_state = None
 
     def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
         logical = _ARCADE_KEY_MAP.get(symbol)
@@ -57,7 +89,7 @@ class GamePlayView(arcade.View):
         return True
 
     def on_update(self, delta_time: float) -> None:
-        import main as game
+        game = self._game_module()
 
         if not game.round_active or not game.app_running:
             if self._on_round_complete and not self._round_complete_fired:
@@ -69,27 +101,45 @@ class GamePlayView(arcade.View):
     def on_draw(self) -> None:
         import time
 
-        import main as game
+        game = self._game_module()
 
         t0 = time.perf_counter()
         self.clear()
+        self._sync_display_layout()
         if self._draw_state is None:
             return
 
-        game.draw_round_frame(self.window.height, self._draw_state)
+        game.draw_round_frame(
+            self.window.width,
+            self.window.height,
+            self._draw_state,
+            display_layout=self._display_layout,
+        )
         if game.ENABLE_PERF_PROFILE:
             game.perf_profiler.finish_draw(time.perf_counter() - t0)
 
 
 class PathwiseWindow(arcade.Window):
-    def __init__(self, *, auto_close_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        auto_close_seconds: float | None = None,
+        fullscreen: bool = True,
+    ) -> None:
+        use_fullscreen = fullscreen and auto_close_seconds is None
+        vsync = os.environ.get("PATHWISE_VSYNC", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         super().__init__(
             WIDTH,
             HEIGHT,
             "Pathwise MVP",
             update_rate=1 / 60,
             draw_rate=1 / 60,
-            vsync=False,
+            vsync=vsync,
+            fullscreen=use_fullscreen,
         )
         self._auto_close_seconds = auto_close_seconds
         self._elapsed = 0.0
@@ -98,13 +148,40 @@ class PathwiseWindow(arcade.Window):
         self._base_profile: DifficultyProfile | None = None
         self._round_index = 1
         self._outcomes: list[str] = []
+        self._seed_text = ""
 
     def run(self) -> None:
         if self._smoke_mode:
             super().run()
             return
-        self.show_view(pre_game.PreGameMenuView(on_complete=self._on_pre_game_done))
+        self._show_candidate_home()
         super().run()
+
+    def _show_candidate_home(self) -> None:
+        self.show_view(
+            pre_game.CandidateHomeView(
+                seed_text=self._seed_text,
+                on_complete=self._on_pre_game_done,
+                on_configure=self._on_open_recruiter,
+            )
+        )
+
+    def _on_open_recruiter(self, seed_text: str) -> None:
+        self._seed_text = seed_text
+        self.show_view(
+            pre_game.RecruiterConfigView(
+                generated_seed_text=self._seed_text,
+                on_back=self._on_recruiter_back,
+                on_start=self._on_recruiter_start,
+            )
+        )
+
+    def _on_recruiter_back(self, seed_text: str) -> None:
+        self._seed_text = seed_text
+        self._show_candidate_home()
+
+    def _on_recruiter_start(self, config: pre_game.SessionConfig) -> None:
+        self._on_pre_game_done(config)
 
     def on_draw(self) -> None:
         # Do not clear when a View is active — its on_draw already clears and paints.
@@ -132,7 +209,7 @@ class PathwiseWindow(arcade.Window):
             game.session_base_seed,
             game.session_seed_source,
             game.session_use_adaptive_map,
-        ) = resolve_session_seed(config.seed)
+        ) = resolve_candidate_play_seed(config.seed)
         game.base_preset_id = config.preset
         self._base_profile = DifficultyProfile.for_menu_preset(config.preset)
         game.round_results = []

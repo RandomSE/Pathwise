@@ -9,7 +9,11 @@ Capture policy:
 
 from analytics.map_snapshot import serialize_lights_for_replay
 
-FIXED_SAMPLE_INTERVAL_S = 1.0 / 12.0
+FIXED_SAMPLE_INTERVAL_FAST_S = 1.0 / 8.0
+FIXED_SAMPLE_INTERVAL_SLOW_S = 1.0 / 6.0
+FIXED_SAMPLE_INTERVAL_S = FIXED_SAMPLE_INTERVAL_FAST_S
+SLOW_FRAME_THRESHOLD_S = 1.0 / 55.0
+SLOW_FRAME_STREAK_FOR_REPLAY = 3
 MIN_FRAME_GAP_S = 0.02
 MAX_REPLAY_GAP_S = 1.0 / 24.0
 # Bound replay payload growth (~30s at 12 Hz + decision headroom).
@@ -58,6 +62,9 @@ RISK_LABELS = {
     "car_honk_close": "Honk — too close",
     "car_honk_blocked": "Honk — blocked lane",
     "car_honk_jaywalk": "Honk — jaywalking",
+    "legal_crosswalk_clear": "Legal crossing — no traffic conflict",
+    "crosswalk_with_traffic": "Crossing with moving traffic",
+    "crosswalk_against_light": "Crossing against pedestrian signal",
 }
 
 
@@ -70,6 +77,42 @@ class FrameRecorder:
         self._queued_decision = None
         self._frame_seq = 0
         self._last_decision_capture_t = -999.0
+        self._sample_interval_s = FIXED_SAMPLE_INTERVAL_FAST_S
+        self._slow_frame_streak = 0
+
+    def note_sim_frame_seconds(self, seconds: float) -> None:
+        """Adapt periodic replay sampling when update frames exceed budget."""
+        if seconds > SLOW_FRAME_THRESHOLD_S:
+            self._slow_frame_streak = min(12, self._slow_frame_streak + 1)
+        elif self._slow_frame_streak > 0:
+            self._slow_frame_streak -= 1
+        if self._slow_frame_streak >= SLOW_FRAME_STREAK_FOR_REPLAY:
+            self._sample_interval_s = FIXED_SAMPLE_INTERVAL_SLOW_S
+        else:
+            self._sample_interval_s = FIXED_SAMPLE_INTERVAL_FAST_S
+
+    @property
+    def sample_interval_s(self) -> float:
+        return self._sample_interval_s
+
+    def wants_capture(self, elapsed, force=False) -> bool:
+        """Cheap pre-check before building replay car payloads (no queue side effects)."""
+        has_decision = self._queued_decision is not None
+        periodic_due = elapsed >= self._next_periodic_t and not force
+        if not (force or has_decision or periodic_due):
+            return False
+        if has_decision and not force:
+            if elapsed - self._last_decision_capture_t < MIN_DECISION_CAPTURE_GAP_S:
+                if not periodic_due:
+                    return False
+        if (
+            not force
+            and not has_decision
+            and self.frames
+            and (elapsed - self._last_capture_t) < MIN_FRAME_GAP_S
+        ):
+            return False
+        return True
 
     def queue_decision(self, action, decision_id=None, **context):
         if action not in DECISION_ACTIONS:
@@ -129,7 +172,7 @@ class FrameRecorder:
         periodic_due = elapsed >= self._next_periodic_t and not force
         if periodic_due:
             while self._next_periodic_t <= elapsed:
-                self._next_periodic_t += FIXED_SAMPLE_INTERVAL_S
+                self._next_periodic_t += self._sample_interval_s
 
         should_capture = force or is_decision or periodic_due
         if not should_capture:
@@ -302,7 +345,7 @@ class FrameRecorder:
         return out
 
     def capture_start(self, elapsed, player_rect, car_sprites, road_states, game_time=None):
-        self._next_periodic_t = FIXED_SAMPLE_INTERVAL_S
+        self._next_periodic_t = self._sample_interval_s
         self.capture(
             elapsed,
             player_rect,

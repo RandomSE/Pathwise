@@ -51,6 +51,7 @@ from analytics.traffic_lights import (
 from analytics.car_diagnostics import car_diagnostics
 from analytics.perf_profiler import PerfProfiler, perf_profile_enabled
 from pathwise.geom import Rect, collide, clip_rect, contains_rect, rect_overlap_area, rects_overlap
+from pathwise import viewport as game_viewport
 
 from pathwise.sim_constants import *  # noqa: F403
 from pathwise.game_tuning import install_for_round
@@ -118,6 +119,45 @@ def _lerp_angle_deg(a: float, b: float, t: float) -> float:
 # --- Init (display/fonts owned by PathwiseWindow) ---
 
 
+def player_dominant_crosswalk_state(player_body_rect, road_states):
+    best_area = 0
+    best_state = None
+    for state in road_states:
+        inter = clip_rect(player_body_rect, state["crosswalk"])
+        area = inter.width * inter.height
+        if area > best_area:
+            best_area = area
+            best_state = state
+    return best_state
+
+
+def player_crossing_cars_have_red(player_body_rect, road_states) -> bool:
+    """True when the crosswalk the player is mainly on shows red for car traffic."""
+    state = player_dominant_crosswalk_state(player_body_rect, road_states)
+    if state is not None:
+        return state["light_state"] == "red"
+    return player_on_car_red_crosswalk_body(player_body_rect, road_states)
+
+
+def update_legal_crossing_commit(
+    was_active: bool, on_crosswalk: bool, cars_have_red: bool
+) -> bool:
+    """Latch legal crossing once started on car-red; hold until the player leaves the crosswalk."""
+    if on_crosswalk and cars_have_red:
+        return True
+    if not on_crosswalk:
+        return False
+    return was_active
+
+
+def crosswalk_crossing_is_legal(on_car_red: bool, legal_commit_active: bool) -> bool:
+    return on_car_red or legal_commit_active
+
+
+def car_is_traffic_threat(car, *, min_speed_frac: float = 0.25) -> bool:
+    return car.current_speed > car.base_speed * min_speed_frac
+
+
 def player_on_car_red_crosswalk_body(player_body_rect, road_states):
     for state in road_states:
         if collide(state["crosswalk"], player_body_rect) and state["light_state"] == "red":
@@ -129,6 +169,41 @@ def player_on_car_red_crosswalk(player_rect, road_states):
     return player_on_car_red_crosswalk_body(
         sprites.player_body_hitbox(player_rect), road_states
     )
+
+
+def player_conflicting_car_vertical(player_body_rect, road_states, roads) -> bool | None:
+    """Which car.vertical value can conflict with the player (None if unknown).
+
+    Horizontal roads carry vertically-moving cars (vertical=True).
+    Vertical roads carry horizontally-moving cars (vertical=False).
+    """
+    best_area = 0
+    dominant_direction = None
+    for state in road_states:
+        inter = clip_rect(player_body_rect, state["crosswalk"])
+        area = inter.width * inter.height
+        if area > best_area:
+            best_area = area
+            dominant_direction = state["direction"]
+    if dominant_direction is not None:
+        return dominant_direction == "horizontal"
+
+    for road in roads:
+        if collide(road.rect, player_body_rect):
+            return road.direction == "horizontal"
+    return None
+
+
+def car_shares_crossing_plane(car, conflict_car_vertical: bool | None) -> bool:
+    if conflict_car_vertical is None:
+        return True
+    return car.vertical == conflict_car_vertical
+
+
+def cars_on_crossing_plane(cars, conflict_car_vertical: bool | None) -> list:
+    if conflict_car_vertical is None:
+        return list(cars)
+    return [car for car in cars if car.vertical == conflict_car_vertical]
 
 
 def player_mostly_on_legal_crosswalk(body_rect, road_states, min_frac=0.45):
@@ -163,18 +238,22 @@ def _cars_near_player(player_body: Rect, spatial, scratch: list) -> list:
     return spatial.nearby(player_body, PLAYER_CAR_QUERY_PAD, scratch)
 
 
-def _view_rect_for_camera(camera_offset: tuple[int, int]) -> Rect:
-    return Rect(
-        camera_offset[0] - FRAME_RECORD_VIEW_PAD,
-        camera_offset[1] - FRAME_RECORD_VIEW_PAD,
-        WIDTH + FRAME_RECORD_VIEW_PAD * 2,
-        HEIGHT + FRAME_RECORD_VIEW_PAD * 2,
-    )
+def _view_rect_for_camera(
+    camera_offset: tuple[int, int],
+    viewport_w: int | None = None,
+    viewport_h: int | None = None,
+) -> Rect:
+    w, h = game_viewport.normalize_viewport_size(viewport_w, viewport_h)
+    return game_viewport.view_rect_for_camera(camera_offset, w, h)
 
 
-def _replay_view_rect_for_camera(camera_offset: tuple[int, int]) -> Rect:
+def _replay_view_rect_for_camera(
+    camera_offset: tuple[int, int],
+    viewport_w: int | None = None,
+    viewport_h: int | None = None,
+) -> Rect:
     """Wider than draw view so replay shows cars before they enter the screen."""
-    return _view_rect_for_camera(camera_offset).inflate(
+    return _view_rect_for_camera(camera_offset, viewport_w, viewport_h).inflate(
         REPLAY_RECORD_EXTRA_PAD, REPLAY_RECORD_EXTRA_PAD
     )
 
@@ -318,7 +397,10 @@ start_time = 0.0
 crossings = 0
 collisions = 0
 risk_events = 0
+reasonable_risk_events = 0
+risky_risk_events = 0
 last_risk_time = 0
+legal_crossing_commit_active = False
 failure_reason = "none"
 round_active = False
 app_running = True
@@ -363,7 +445,8 @@ def _apply_difficulty_globals(profile: DifficultyProfile):
 
 def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_id: str):
     global current_map, ROUND_TIME_LIMIT, cars, player, all_sprites
-    global start_time, crossings, collisions, risk_events, last_risk_time, failure_reason
+    global start_time, crossings, collisions, risk_events, reasonable_risk_events, risky_risk_events
+    global last_risk_time, failure_reason, legal_crossing_commit_active
     global round_active, current_round_index, current_difficulty_profile, base_preset_id
     global world_bounds, road_states, road_states_h, road_states_v, road_states_by_index
     global _round_city_block_rects
@@ -400,7 +483,10 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
     crossings = 0
     collisions = 0
     risk_events = 0
+    reasonable_risk_events = 0
+    risky_risk_events = 0
     last_risk_time = 0
+    legal_crossing_commit_active = False
     failure_reason = "none"
 
     frame_recorder = FrameRecorder(PEDESTRIAN_SIZE)
@@ -764,7 +850,8 @@ def _perf_counter_snapshot(
 
 
 def end_round(collided, timed_out=False) -> str:
-    global crossings, collisions, round_active, risk_events, failure_reason, round_results
+    global crossings, collisions, round_active, risk_events, reasonable_risk_events
+    global risky_risk_events, failure_reason, round_results
     if not round_active:
         return failure_reason if failure_reason != "none" else "collision"
     car_diagnostics.end_round()
@@ -781,10 +868,6 @@ def end_round(collided, timed_out=False) -> str:
         failure_reason = "goal_reached"
         outcome = "success"
 
-    camera_offset = (
-        player.rect.centerx - WIDTH // 2,
-        player.rect.centery - HEIGHT // 2,
-    )
     end_cars = _cars_for_replay(
         [c for c in cars.sprites() if c.alive()],
         player.rect.center,
@@ -799,6 +882,8 @@ def end_round(collided, timed_out=False) -> str:
         crossings=crossings,
         collisions=collisions,
         risk_events=risk_events,
+        reasonable_risk_events=reasonable_risk_events,
+        risky_risk_events=risky_risk_events,
         failure_reason=failure_reason,
     )
     session["map_layout"] = serialize_map_layout(current_map, road_states, world_bounds)
@@ -823,6 +908,8 @@ def end_round(collided, timed_out=False) -> str:
             "crossings": crossings,
             "collisions": collisions,
             "risk_events": risk_events,
+            "reasonable_risk_events": reasonable_risk_events,
+            "risky_risk_events": risky_risk_events,
             "session": session,
             "archetypes": archetypes,
         }
@@ -866,13 +953,17 @@ def save_session_log():
     return build_dashboard_html("logs.json")
 
 
-def record_risk(reason, cooldown=None, **context):
-    global risk_events, last_risk_time
+def record_risk(reason, tier="risky", cooldown=None, **context):
+    global risk_events, reasonable_risk_events, risky_risk_events, last_risk_time
     local_cooldown = RISK_COOLDOWN_SECONDS if cooldown is None else cooldown
     if (time.time() - last_risk_time) > local_cooldown:
-        risk_events += 1
+        if tier == "reasonable":
+            reasonable_risk_events += 1
+        else:
+            risky_risk_events += 1
+            risk_events += 1
         last_risk_time = time.time()
-        decision_logger.note_risk(reason, **context)
+        decision_logger.note_risk(reason, tier=tier, **context)
 
 
 def is_car_approaching_player(car, player_rect):
@@ -891,9 +982,12 @@ def is_car_approaching_player(car, player_rect):
 
 def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     """Advance simulation one frame; returns draw kwargs when the round is still active."""
-    global round_frame, crossings, risk_events, last_risk_time
+    global round_frame, crossings, risk_events, reasonable_risk_events, risky_risk_events
+    global last_risk_time, legal_crossing_commit_active
+    frame_t0 = time.perf_counter()
     if not round_active:
         return None
+    vp_w, vp_h = game_viewport.sim_viewport_size()
     elapsed = time.time() - start_time
     time_left = max(0, ROUND_TIME_LIMIT - elapsed)
 
@@ -960,7 +1054,18 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         )
         player_feet_road = player_feet_on_road(player.rect, current_map.roads)
         player_mostly_legal = player_mostly_on_legal_crosswalk(player_body, road_states)
-        player_on_car_red = player_on_car_red_crosswalk_body(player_body, road_states)
+        player_on_car_red = player_crossing_cars_have_red(player_body, road_states)
+        legal_crossing_commit_active = update_legal_crossing_commit(
+            legal_crossing_commit_active,
+            player_on_crosswalk,
+            player_on_car_red,
+        )
+        legal_crosswalk_crossing = crosswalk_crossing_is_legal(
+            player_on_car_red, legal_crossing_commit_active
+        )
+        conflict_car_vertical = player_conflicting_car_vertical(
+            player_body, road_states, current_map.roads
+        )
         ped_legal_crossing = player_on_crosswalk and player_on_car_red
         respect_player = cars_should_respect_player(
             player_on_road, player_on_crosswalk, player_on_car_red
@@ -973,12 +1078,11 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         )
         player_body_block = player_body.inflate(4, 4)
 
-    camera_offset = (
-        player.rect.centerx - WIDTH // 2,
-        player.rect.centery - HEIGHT // 2,
+    camera_offset = game_viewport.camera_offset_for(
+        player.rect.centerx, player.rect.centery, vp_w, vp_h
     )
-    view_rect = _view_rect_for_camera(camera_offset)
-    replay_view = _replay_view_rect_for_camera(camera_offset)
+    view_rect = _view_rect_for_camera(camera_offset, vp_w, vp_h)
+    replay_view = _replay_view_rect_for_camera(camera_offset, vp_w, vp_h)
     sim_view = view_rect.inflate(SIM_UPDATE_VIEW_PAD, SIM_UPDATE_VIEW_PAD)
 
     car_list = cars.sprites_into(_frame_car_list_scratch)
@@ -1086,7 +1190,8 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                 player_feet_road,
                 ped_legal_crossing,
                 respect_player,
-                honk_allowed,
+                honk_allowed
+                and car_shares_crossing_plane(car, conflict_car_vertical),
                 player_body_block,
                 elapsed,
             )
@@ -1129,78 +1234,115 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         near_player_cars = _cars_near_player(
             player_body, _frame_car_spatial, _frame_player_car_scratch
         )
-        replay_cars = _cars_for_replay(car_list, player_body.center)
-        draw_cars = replay_cars
-        if len(draw_cars) > MAX_DRAW_RECORD_CARS:
-            draw_cars = _cap_cars_near_player(
-                car_list,
-                view_rect,
-                player_body.center,
-                MAX_DRAW_RECORD_CARS,
-            )
+        draw_cars = _cap_cars_near_player(
+            car_list,
+            view_rect,
+            player_body.center,
+            MAX_DRAW_RECORD_CARS,
+        )
         draw_sprites = _frame_draw_sprites_scratch
         draw_sprites.clear()
-        draw_sprites.append(player)
         draw_sprites.extend(draw_cars)
+        draw_sprites.append(player)
 
-        for car in cars:
-            if car.honk_risk_pending:
-                honk_reason = car.honk_reason or "honk"
-                local_cooldown = 0.85
-                if (time.time() - last_risk_time) > local_cooldown:
-                    risk_events += 1
-                    last_risk_time = time.time()
-                decision_logger._record(
-                    "car_honk",
-                    reason=honk_reason,
-                    risk=f"car_honk_{honk_reason}",
-                )
+        for car in car_list:
+            if not car.honk_risk_pending:
+                continue
+            if not car_shares_crossing_plane(car, conflict_car_vertical):
                 car.honk_risk_pending = False
+                continue
+            honk_reason = car.honk_reason or "honk"
+            honk_tier = "risky"
+            if (time.time() - last_risk_time) > 0.85:
+                risky_risk_events += 1
+                risk_events += 1
+                last_risk_time = time.time()
+            decision_logger._record(
+                "car_honk",
+                reason=honk_reason,
+                risk=f"car_honk_{honk_reason}",
+                risk_tier=honk_tier,
+            )
+            car.honk_risk_pending = False
+        same_plane_near = cars_on_crossing_plane(near_player_cars, conflict_car_vertical)
         nearby_fast_cars = [
             car
-            for car in near_player_cars
+            for car in same_plane_near
             if collide(car._collision_shell.inflate(170, 170), player_body)
             and car.current_speed > car.base_speed * 0.65
         ]
         approaching_cars = [
             car
-            for car in near_player_cars
+            for car in same_plane_near
             if is_car_approaching_player(car, player.rect)
         ]
 
         if player_on_road and not player_on_crosswalk and nearby_fast_cars:
-            record_risk("fast_traffic_on_road")
-        if player_on_crosswalk and approaching_cars:
-            crosswalk_red = player_on_car_red
-            dangerous_cars = [
+            record_risk("fast_traffic_on_road", tier="risky")
+        if player_on_crosswalk:
+            threatening_cars = [
                 car
                 for car in approaching_cars
-                if car.current_speed > car.base_speed * 0.25
+                if car_is_traffic_threat(car)
             ]
 
-            if not crosswalk_red or dangerous_cars:
+            if legal_crosswalk_crossing:
+                if threatening_cars:
+                    record_risk(
+                        "crosswalk_with_traffic",
+                        tier="risky",
+                        on_crosswalk=True,
+                        light=get_player_light_state(player.rect, road_states),
+                    )
+                    if any(
+                        collide(
+                            car._collision_shell.inflate(
+                                TOO_CLOSE_DISTANCE, TOO_CLOSE_DISTANCE
+                            ),
+                            player_body,
+                        )
+                        for car in threatening_cars
+                    ):
+                        record_risk("vehicle_too_close", tier="risky", cooldown=0.7)
+                    if any(
+                        collide(
+                            car._collision_shell.inflate(
+                                NEAR_MISS_DISTANCE, NEAR_MISS_DISTANCE
+                            ),
+                            player_body,
+                        )
+                        and car_is_traffic_threat(car, min_speed_frac=0.75)
+                        for car in threatening_cars
+                    ):
+                        record_risk("near_miss", tier="risky")
+            elif threatening_cars or same_plane_near:
                 record_risk(
-                    "crosswalk_vehicle_conflict",
+                    "crosswalk_against_light",
+                    tier="risky",
                     on_crosswalk=True,
                     light=get_player_light_state(player.rect, road_states),
                 )
-            if any(
-                collide(
-                    car._collision_shell.inflate(TOO_CLOSE_DISTANCE, TOO_CLOSE_DISTANCE),
-                    player_body,
-                )
-                for car in near_player_cars
-            ):
-                record_risk("vehicle_too_close", cooldown=0.7)
-            if any(
-                collide(
-                    car._collision_shell.inflate(NEAR_MISS_DISTANCE, NEAR_MISS_DISTANCE),
-                    player_body,
-                )
-                and car.current_speed > car.base_speed * 0.75
-                for car in near_player_cars
-            ):
-                record_risk("near_miss")
+                if any(
+                    collide(
+                        car._collision_shell.inflate(
+                            TOO_CLOSE_DISTANCE, TOO_CLOSE_DISTANCE
+                        ),
+                        player_body,
+                    )
+                    for car in same_plane_near
+                ):
+                    record_risk("vehicle_too_close", tier="risky", cooldown=0.7)
+                if any(
+                    collide(
+                        car._collision_shell.inflate(
+                            NEAR_MISS_DISTANCE, NEAR_MISS_DISTANCE
+                        ),
+                        player_body,
+                    )
+                    and car_is_traffic_threat(car, min_speed_frac=0.75)
+                    for car in same_plane_near
+                ):
+                    record_risk("near_miss", tier="risky")
 
     with perf_profiler.section("decision_logger"):
         decision_logger.update(
@@ -1213,11 +1355,18 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         )
 
     with perf_profiler.section("frame_recorder"):
+        frame_recorder.note_sim_frame_seconds(time.perf_counter() - frame_t0)
+        needs_replay_cars = (
+            not frame_recorder.frames or frame_recorder.wants_capture(elapsed)
+        )
+        replay_cars = (
+            _cars_for_replay(car_list, player_body.center) if needs_replay_cars else ()
+        )
         if not frame_recorder.frames:
             frame_recorder.capture_start(
                 elapsed, player.rect, replay_cars, road_states, game_time=elapsed
             )
-        else:
+        elif needs_replay_cars:
             frame_recorder.capture(
                 elapsed, player.rect, replay_cars, road_states, game_time=elapsed
             )
@@ -1246,9 +1395,17 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         f"Time left: {time_left:05.1f}s",
         f"Crossings: {crossings}/{len(current_map.roads)} · "
         f"traffic {sum(1 for c in car_list if c.alive())} "
-        f"({max(0, len(draw_sprites) - 1)} on screen)",
-        f"Risky moves: {risk_events}",
+        f"({len(draw_cars)} on screen)",
     ]
+    if player_on_crosswalk:
+        car_light = "red" if player_on_car_red else "green"
+        if legal_crossing_commit_active and not player_on_car_red:
+            car_light = "green (legal commit)"
+        hud_lines.append(f"Crosswalk · cars: {car_light}")
+    if reasonable_risk_events + risky_risk_events > 0:
+        hud_lines.append(
+            f"Risks: {reasonable_risk_events} reasonable · {risky_risk_events} risky"
+        )
     if ENABLE_PERF_PROFILE:
         hud_lines.append(f"Perf log: {perf_profiler.jsonl_path}")
     perf_profiler.finish_update(
@@ -1256,7 +1413,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         elapsed_s=elapsed,
         counters=_perf_counter_snapshot(
             car_list=car_list,
-            replay_cars=replay_cars,
+            replay_cars=draw_cars,
             draw_sprites=draw_sprites,
         ),
     )
@@ -1270,10 +1427,17 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     }
 
 
-def draw_round_frame(window_height: int, draw_state: dict) -> None:
+def draw_round_frame(
+    window_width: int,
+    window_height: int,
+    draw_state: dict,
+    *,
+    display_layout=None,
+) -> None:
     from pathwise.game_draw import draw_round_scene
 
     draw_round_scene(
+        window_width,
         window_height,
         current_map=current_map,
         player=player,
@@ -1288,6 +1452,7 @@ def draw_round_frame(window_height: int, draw_state: dict) -> None:
         hud_lines=draw_state["hud_lines"],
         light_green_duration=_LIGHT_GREEN,
         draw_traffic_timer_bar=TRAFFIC_DRAW_TIMER_BAR,
+        display_layout=display_layout,
     )
 
 

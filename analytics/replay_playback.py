@@ -1,6 +1,6 @@
 """Replay playback timing helpers shared by dashboard JS and tests."""
 
-REPLAY_STEP_S = 1.0 / 12.0
+REPLAY_STEP_S = 1.0 / 8.0
 MIN_PLAYBACK_GAP_S = REPLAY_STEP_S / 4
 MAX_PLAYBACK_GAP_S = 1.5
 

@@ -549,12 +549,17 @@ def make_pedestrian_surface(size=PEDESTRIAN_SIZE) -> SpriteAsset:
 _honk_label: arcade.Text | None = None
 
 
-def draw_honk_bubble(window_height: int, car_rect, camera_offset):
+def draw_honk_bubble(sim_height: int, car_rect, camera_offset, layout=None):
     global _honk_label
     shifted = car_rect.move(-camera_offset[0], -camera_offset[1])
     cx = shifted.centerx
     cy = shifted.top - 8
     from .pathwise_render import sim_point_to_arcade, sim_rect_to_arcade_lbwh
+    from .viewport import DisplayLayout
+
+    font_size = 20
+    if isinstance(layout, DisplayLayout):
+        font_size = layout.map_font_size(20)
 
     if _honk_label is None:
         _honk_label = arcade.Text(
@@ -562,11 +567,12 @@ def draw_honk_bubble(window_height: int, car_rect, camera_offset):
             0,
             0,
             (122, 74, 0),
-            font_size=20,
+            font_size=font_size,
             anchor_x="center",
             anchor_y="center",
         )
     label = _honk_label
+    label.font_size = font_size
     pad_x, pad_y = 8, 4
     bubble_w = label.content_width + pad_x * 2
     bubble_h = label.content_height + pad_y * 2
@@ -574,22 +580,27 @@ def draw_honk_bubble(window_height: int, car_rect, camera_offset):
     bubble_cy = cy - 12
     left = bubble_cx - bubble_w // 2
     top = bubble_cy - bubble_h // 2
-    lbwh = sim_rect_to_arcade_lbwh(left, top, bubble_w, bubble_h, window_height)
-    arcade.draw_lbwh_rectangle_filled(lbwh[0], lbwh[1], bubble_w, bubble_h, (255, 243, 205))
-    arcade.draw_lbwh_rectangle_outline(lbwh[0], lbwh[1], bubble_w, bubble_h, (245, 165, 36), 2)
-    tx, ty = sim_point_to_arcade(bubble_cx, bubble_cy, window_height)
+    lbwh = sim_rect_to_arcade_lbwh(left, top, bubble_w, bubble_h, sim_height, layout)
+    outline_w = layout.map_line_width(2) if isinstance(layout, DisplayLayout) else 2
+    arcade.draw_lbwh_rectangle_filled(lbwh[0], lbwh[1], lbwh[2], lbwh[3], (255, 243, 205))
+    arcade.draw_lbwh_rectangle_outline(
+        lbwh[0], lbwh[1], lbwh[2], lbwh[3], (245, 165, 36), outline_w
+    )
+    tx, ty = sim_point_to_arcade(bubble_cx, bubble_cy, sim_height, layout)
     label.x = tx
     label.y = ty
     label.draw()
+    arc_w = layout.map_radius(20) if isinstance(layout, DisplayLayout) else 20
+    arc_h = layout.map_radius(16) if isinstance(layout, DisplayLayout) else 16
     for offset in (-18, 18):
-        arc_cx, arc_cy = sim_point_to_arcade(cx + offset, cy - 20, window_height)
+        arc_cx, arc_cy = sim_point_to_arcade(cx + offset, cy - 20, sim_height, layout)
         arcade.draw_arc_outline(
             arc_cx,
             arc_cy,
-            20,
-            16,
+            arc_w,
+            arc_h,
             (245, 165, 36),
             11,
             160,
-            2,
+            outline_w,
         )

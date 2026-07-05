@@ -375,10 +375,21 @@ class Car(Entity):
         return lane_gap < 50 and 0 <= ahead < 130
 
     def evaluate_honk(
-        self, player_body_rect, player_on_crosswalk: bool, honk_allowed: bool, game_time
+        self,
+        player_body_rect,
+        player_on_crosswalk: bool,
+        honk_allowed: bool,
+        game_time,
+        *,
+        conflict_car_vertical: bool | None = None,
     ):
         self.honk_risk_pending = False
         if not honk_allowed:
+            return
+        if (
+            conflict_car_vertical is not None
+            and self.vertical != conflict_car_vertical
+        ):
             return
 
         too_close = collide(
@@ -1542,7 +1553,7 @@ class Car(Entity):
             if stop_dist <= 0:
                 light = self._effective_approach_light(approach)
                 if light == "red":
-                    return False
+                    return True
                 if light == "yellow":
                     zone = self._approach_intersection_zone(intersection_zones)
                     if zone is None:
@@ -1573,10 +1584,10 @@ class Car(Entity):
         if light != "red":
             return False
         stop_axis = self._signal_stop_axis(crosswalk)
-        clamped = self._enforce_signal_stop_line(stop_axis)
+        self._clamp_at_signal_stop(stop_axis)
         self.current_speed = 0.0
         self.speed = 0.0
-        return clamped
+        return True
 
     def _intersection_advance_blocked_on_red(
         self, next_rect, road_states, intersection_zones
