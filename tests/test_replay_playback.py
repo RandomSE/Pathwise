@@ -43,6 +43,14 @@ class TestReplayPlaybackTiming(unittest.TestCase):
             MIN_PLAYBACK_GAP_S,
         )
 
+    def test_replay_step_for_session_uses_median_gap(self):
+        from analytics.replay_playback import replay_step_for_session
+
+        step = replay_step_for_session(
+            {"replay_capture": {"median_frame_gap_s": 0.1667}}
+        )
+        self.assertAlmostEqual(step, 0.1667, places=4)
+
     def test_delay_fallback_without_times(self):
         self.assertEqual(
             replay_frame_delay_seconds({}, {}),

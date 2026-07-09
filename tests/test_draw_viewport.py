@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from pathwise.gameplay_framebuffer import GameplaySurface, reset_shared_gameplay_surface
 from pathwise.viewport import DisplayLayout, gameplay_draw_surface
 
 
@@ -22,24 +23,27 @@ class TestGameplayDrawSurface(unittest.TestCase):
                         window.projection,
                         Mat4.orthogonal_projection(0, 800, 0, 600, -8192, 8192),
                     )
-            self.assertEqual(fill.call_count, 1)
+            self.assertEqual(fill.call_count, 0)
             self.assertEqual(window.viewport, saved_viewport)
             self.assertEqual(window.projection, saved_projection)
         finally:
             window.close()
 
-    def test_scaled_layout_uses_supersampled_fbo(self):
+    def test_scaled_layout_uses_fixed_fbo(self):
         import arcade
 
         window = arcade.Window(1920, 1080, visible=False)
         try:
+            reset_shared_gameplay_surface()
             saved_viewport = window.viewport
             saved_projection = window.projection
             layout = DisplayLayout.fit_window(1920, 1080)
+            fbo_w, fbo_h = GameplaySurface().fbo_pixel_size(layout)
+            self.assertEqual((fbo_w, fbo_h), (1600, 900))
             with patch("arcade.draw_lbwh_rectangle_filled"):
                 with gameplay_draw_surface(layout):
-                    self.assertEqual(window.viewport[2], 1600)
-                    self.assertEqual(window.viewport[3], 1200)
+                    self.assertEqual(window.viewport[2], fbo_w)
+                    self.assertEqual(window.viewport[3], fbo_h)
                 from pathwise.gameplay_framebuffer import shared_gameplay_surface
 
                 self.assertIsNotNone(shared_gameplay_surface()._blit_geo)

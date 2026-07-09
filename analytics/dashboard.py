@@ -9,6 +9,7 @@ from analytics.replay_playback import (
     MAX_PLAYBACK_GAP_S,
     MIN_PLAYBACK_GAP_S,
     REPLAY_STEP_S,
+    replay_step_for_session,
 )
 
 
@@ -115,7 +116,7 @@ def build_dashboard_html(
         else 0.5
     )
     playback_selected[rate_key] = " selected"
-    replay_step_s = REPLAY_STEP_S
+    replay_step_s = replay_step_for_session(session)
     replay_min_gap_s = MIN_PLAYBACK_GAP_S
     replay_max_gap_s = MAX_PLAYBACK_GAP_S
 
@@ -997,6 +998,22 @@ def build_dashboard_html(
         }}
       }});
       const goal = L.goal;
+      const start = L.start;
+      const gen = L.generation || {{}};
+      if (start && start.length >= 2) {{
+        svg += `<circle cx="${{start[0]}}" cy="${{start[1]}}" r="9" fill="#4a90d9" stroke="#fff" stroke-width="2"/>`;
+        if (gen.spawn_edge) {{
+          svg += `<text x="${{start[0] + 12}}" y="${{start[1] + 4}}" font-size="11" fill="#2f5f9c">spawn ${{gen.spawn_edge}}</text>`;
+        }}
+      }}
+      if (start && start.length >= 2 && gen.spawn_edge && gen.goal_edge) {{
+        const gx = goal.x + goal.w / 2;
+        const gy = goal.y + goal.h / 2;
+        svg += `<line x1="${{start[0]}}" y1="${{start[1]}}" x2="${{gx}}" y2="${{gy}}" stroke="rgba(47,95,156,0.35)" stroke-width="2" stroke-dasharray="7 5"/>`;
+        const mx = (start[0] + gx) / 2;
+        const my = (start[1] + gy) / 2;
+        svg += `<text x="${{mx}}" y="${{my - 6}}" font-size="10" fill="#5a6a7a" text-anchor="middle">${{gen.spawn_edge}} → ${{gen.goal_edge}}</text>`;
+      }}
       svg += `<rect x="${{goal.x - 8}}" y="${{goal.y - 8}}" width="${{goal.w + 16}}" height="${{goal.h + 16}}" fill="#ffdc50" opacity="0.5" rx="10"/>`;
       svg += `<rect x="${{goal.x}}" y="${{goal.y}}" width="${{goal.w}}" height="${{goal.h}}" fill="#2258d8" stroke="#fff" stroke-width="2" rx="6"/>`;
       for (const car of frame.cars || []) {{

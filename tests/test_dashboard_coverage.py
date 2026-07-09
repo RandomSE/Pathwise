@@ -30,6 +30,31 @@ class TestBuildDashboardHtml(unittest.TestCase):
     def _write(self, payload):
         self.session_path.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_replay_includes_spawn_route_hint_when_generation_present(self):
+        self._write(
+            {
+                "session": {
+                    **_minimal_session(),
+                    "map_layout": {
+                        "roads": [],
+                        "start": [120, 340],
+                        "goal": {"x": 500, "y": 80, "w": 40, "h": 40},
+                        "generation": {
+                            "spawn_edge": "left",
+                            "goal_edge": "right",
+                        },
+                    },
+                },
+                "outcome": "success",
+            }
+        )
+        out = build_dashboard_html(self.session_path, output_path=Path(self.tmpdir) / "route.html")
+        html = Path(out).read_text(encoding="utf-8")
+        self.assertIn("gen.spawn_edge", html)
+        self.assertIn("gen.goal_edge", html)
+        self.assertIn("stroke-dasharray", html)
+        self.assertIn("${start[0]}", html)
+
     def test_single_session_payload(self):
         self._write({"session": _minimal_session(), "outcome": "success"})
         out = build_dashboard_html(self.session_path, output_path=Path(self.tmpdir) / "out.html")

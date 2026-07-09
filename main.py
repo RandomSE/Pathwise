@@ -16,6 +16,7 @@ from pathwise.traffic_signal_layout import (
     approach_sign_rect,
 )
 from pathwise import sprites
+from pathwise.sprint import sprint_risk_reason, should_cancel_sprint_on_surface_entry
 from pathwise.entity_group import Entity, EntityGroup
 from pathwise.input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KeyState, key_labels_from_state
 from pathwise.session_seed import resolve_session_seed
@@ -432,6 +433,22 @@ _ix_rects_cache = None
 _ix_rects_cache_frame = -1
 traffic_map_seed = 0
 round_frame = 0
+player_prev_center = (0, 0)
+
+
+def road_midline_crossed(
+    prev_center: tuple[int, int],
+    curr_center: tuple[int, int],
+    road,
+) -> bool:
+    """True when the player centroid crosses the road midline between frames."""
+    prev_cx, prev_cy = prev_center
+    curr_cx, curr_cy = curr_center
+    if road.direction == "vertical":
+        mid = road.rect.centery
+        return (prev_cy - mid) * (curr_cy - mid) < 0
+    mid = road.rect.centerx
+    return (prev_cx - mid) * (curr_cx - mid) < 0
 
 
 def _apply_difficulty_globals(profile: DifficultyProfile):
@@ -455,7 +472,7 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
     global traffic_schedule, traffic_spawn_cursor, traffic_spawn_retry
     global traffic_respawn_pending, traffic_respawn_event_id
     global _ix_rects_cache, _ix_rects_cache_frame, traffic_map_seed, round_frame
-    global session_base_seed, session_use_adaptive_map
+    global session_base_seed, session_use_adaptive_map, player_prev_center
 
     current_round_index = round_index
     current_difficulty_profile = difficulty_profile
@@ -478,6 +495,7 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
 
     cars = EntityGroup()
     player = Pedestrian(current_map.start_pos)
+    player_prev_center = (player.rect.centerx, player.rect.centery)
     all_sprites = EntityGroup(player)
     start_time = time.time()
     crossings = 0
@@ -886,6 +904,7 @@ def end_round(collided, timed_out=False) -> str:
         risky_risk_events=risky_risk_events,
         failure_reason=failure_reason,
     )
+    session["replay_capture"] = frame_recorder.capture_metadata()
     session["map_layout"] = serialize_map_layout(current_map, road_states, world_bounds)
     session["map_seed"] = getattr(current_map, "seed", None)
     session["session_seed"] = session_base_seed
@@ -983,7 +1002,7 @@ def is_car_approaching_player(car, player_rect):
 def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     """Advance simulation one frame; returns draw kwargs when the round is still active."""
     global round_frame, crossings, risk_events, reasonable_risk_events, risky_risk_events
-    global last_risk_time, legal_crossing_commit_active
+    global last_risk_time, legal_crossing_commit_active, player_prev_center
     frame_t0 = time.perf_counter()
     if not round_active:
         return None
@@ -1008,22 +1027,6 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
             if not road.crossed and collide(approach_zone, player.rect):
                 decision_logger.note_road_approach(road_index)
 
-            if collide(road.rect, player.rect) and not road.crossed:
-                if road.direction == "vertical":
-                    if player.rect.top < road.rect.top:
-                        crossings += 1
-                        road.crossed = True
-                        decision_logger.note_road_crossed(
-                            road_index, get_player_light_state(player.rect, road_states)
-                        )
-                elif road.direction == "horizontal":
-                    if player.rect.left > road.rect.left:
-                        crossings += 1
-                        road.crossed = True
-                        decision_logger.note_road_crossed(
-                            road_index, get_player_light_state(player.rect, road_states)
-                        )
-
     with perf_profiler.section("traffic_spawns"):
         _process_traffic_spawns_through_frame(
             round_frame,
@@ -1040,9 +1043,26 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     traffic_spawn.set_round_frame_getter(lambda: round_frame)
 
     with perf_profiler.section("player_update"):
+        move_prev_center = player_prev_center
         player.update(keys)
         if not contains_rect(world_bounds, player.rect):
             player.rect.topleft = previous_pos
+
+        curr_center = (player.rect.centerx, player.rect.centery)
+        for road_index, road in enumerate(current_map.roads):
+            if road.crossed:
+                continue
+            if not road_midline_crossed(move_prev_center, curr_center, road):
+                continue
+            if not collide(road.rect, player.rect):
+                continue
+            crossings += 1
+            road.crossed = True
+            decision_logger.note_road_crossed(
+                road_index, get_player_light_state(player.rect, road_states)
+            )
+        player_prev_center = curr_center
+        player_moved_this_frame = move_prev_center != curr_center
 
     with perf_profiler.section("player_context"):
         player_body = sprites.player_body_hitbox(player.rect)
@@ -1077,6 +1097,29 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
             player_on_car_red,
         )
         player_body_block = player_body.inflate(4, 4)
+
+        if player.sprint_enabled and player_moved_this_frame:
+            sprint_reason = sprint_risk_reason(
+                sprinting=True,
+                moved=True,
+                feet_on_road=player_feet_road,
+                on_crosswalk=player_on_crosswalk,
+            )
+            if sprint_reason:
+                record_risk(sprint_reason, tier="risky", cooldown=0.75)
+
+        on_surface = player_on_road or player_on_crosswalk
+        if should_cancel_sprint_on_surface_entry(
+            sprinting=player.sprint_enabled,
+            on_surface=on_surface,
+            was_on_surface=player.was_on_road_or_crosswalk,
+            suppressed_this_visit=player.sprint_suppressed_on_surface,
+        ):
+            player.sprint_enabled = False
+            player.sprint_suppressed_on_surface = True
+        if not on_surface:
+            player.sprint_suppressed_on_surface = False
+        player.was_on_road_or_crosswalk = on_surface
 
     camera_offset = game_viewport.camera_offset_for(
         player.rect.centerx, player.rect.centery, vp_w, vp_h
@@ -1397,6 +1440,17 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         f"traffic {sum(1 for c in car_list if c.alive())} "
         f"({len(draw_cars)} on screen)",
     ]
+    gen_meta = getattr(current_map, "generation_meta", None) or {}
+    spawn_edge = gen_meta.get("spawn_edge")
+    goal_edge = gen_meta.get("goal_edge")
+    if spawn_edge and goal_edge:
+        hud_lines.insert(
+            1,
+            f"Route: spawn {spawn_edge} → goal {goal_edge}",
+        )
+    hud_lines.append(
+        f"Sprint: {'ON' if player.sprint_enabled else 'OFF'} (Shift)"
+    )
     if player_on_crosswalk:
         car_light = "red" if player_on_car_red else "green"
         if legal_crossing_commit_active and not player_on_car_red:

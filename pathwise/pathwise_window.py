@@ -29,6 +29,8 @@ _ARCADE_KEY_MAP = {
     arcade.key.S: KEY_DOWN,
 }
 
+_ARCADE_SPRINT_KEYS = frozenset({arcade.key.LSHIFT, arcade.key.RSHIFT})
+
 
 class GamePlayView(arcade.View):
     def __init__(self, *, on_round_complete: Callable[[], None] | None = None) -> None:
@@ -40,6 +42,15 @@ class GamePlayView(arcade.View):
         self._display_layout = None
         self._layout_size = (0, 0)
         self._game = None
+        self._fps_tracker = None
+        self._shift_held = False
+
+    def _fps_tracker_instance(self):
+        from pathwise.fps_tracker import FpsTracker
+
+        if self._fps_tracker is None:
+            self._fps_tracker = FpsTracker()
+        return self._fps_tracker
 
     def _game_module(self):
         if self._game is None:
@@ -58,18 +69,23 @@ class GamePlayView(arcade.View):
             self._layout_size = size
             self._display_layout = DisplayLayout.fit_window(w, h)
 
-    def on_resize(self, width: int, height: int) -> None:
-        from pathwise.viewport import DisplayLayout
-
-        self._layout_size = (width, height)
-        self._display_layout = DisplayLayout.fit_window(width, height)
-
     def on_show_view(self) -> None:
+        from pathwise import sprites
+        from pathwise.gameplay_framebuffer import (
+            fixed_sprite_bake_multiplier,
+            prewarm_draw_gpu_assets,
+        )
+
         arcade.set_background_color((236, 244, 252))
+        self._sync_display_layout()
+        sprites.set_render_bake_multiplier(
+            fixed_sprite_bake_multiplier(self._display_layout)
+        )
+        prewarm_draw_gpu_assets(self._display_layout)
         self.keys.clear()
+        self._shift_held = False
         self._round_complete_fired = False
         self._game = None
-        self._sync_display_layout()
         game = self._game_module()
         if game.round_active:
             self._draw_state = game.update_round_frame(self.keys)
@@ -77,12 +93,23 @@ class GamePlayView(arcade.View):
             self._draw_state = None
 
     def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
+        if symbol in _ARCADE_SPRINT_KEYS:
+            if not self._shift_held:
+                self._shift_held = True
+                game = self._game_module()
+                player = getattr(game, "player", None)
+                if getattr(game, "round_active", False) and player is not None:
+                    player.toggle_sprint()
+            return True
         logical = _ARCADE_KEY_MAP.get(symbol)
         if logical:
             self.keys.press(logical)
         return True
 
     def on_key_release(self, symbol: int, modifiers: int) -> bool | None:
+        if symbol in _ARCADE_SPRINT_KEYS:
+            self._shift_held = False
+            return True
         logical = _ARCADE_KEY_MAP.get(symbol)
         if logical:
             self.keys.release(logical)
@@ -98,21 +125,48 @@ class GamePlayView(arcade.View):
             return
         self._draw_state = game.update_round_frame(self.keys)
 
+    def on_resize(self, width: int, height: int) -> None:
+        from pathwise import sprites
+        from pathwise.gameplay_framebuffer import (
+            fixed_sprite_bake_multiplier,
+            prewarm_draw_gpu_assets,
+        )
+        from pathwise.viewport import DisplayLayout
+
+        self._layout_size = (width, height)
+        self._display_layout = DisplayLayout.fit_window(width, height)
+        sprites.set_render_bake_multiplier(
+            fixed_sprite_bake_multiplier(self._display_layout)
+        )
+        prewarm_draw_gpu_assets(self._display_layout)
+
     def on_draw(self) -> None:
         import time
 
         game = self._game_module()
+        present_t = time.perf_counter()
+        self._fps_tracker_instance().note_present(present_t)
 
         t0 = time.perf_counter()
-        self.clear()
+        if not (
+            self._display_layout is not None
+            and self._display_layout.uses_gpu_viewport
+        ):
+            self.clear()
         self._sync_display_layout()
         if self._draw_state is None:
             return
 
+        hud_lines = [
+            self._fps_tracker_instance().hud_line(),
+            *self._draw_state["hud_lines"],
+        ]
+        draw_state = {**self._draw_state, "hud_lines": hud_lines}
+
         game.draw_round_frame(
             self.window.width,
             self.window.height,
-            self._draw_state,
+            draw_state,
             display_layout=self._display_layout,
         )
         if game.ENABLE_PERF_PROFILE:
@@ -253,8 +307,8 @@ class PathwiseWindow(arcade.Window):
             pre_game.MessageView(
                 title=f"Round {self._round_index} of {game.session_num_rounds}",
                 subtitle=hint,
-                accent="Go!",
-                auto_advance_s=2.2,
+                accent=pre_game.ROUND_START_PROMPT,
+                details=pre_game.ROUND_CONTROLS_HINT,
                 on_complete=lambda _: self._start_round_play(),
             )
         )

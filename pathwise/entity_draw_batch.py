@@ -15,12 +15,14 @@ class EntityDrawBatch:
         self._sprites = arcade.SpriteList(use_spatial_hash=False)
         self._pool: list[arcade.Sprite] = []
 
-    def _sprite_at(self, index: int) -> arcade.Sprite:
-        while len(self._pool) <= index:
+    def _ensure_pool(self, count: int) -> None:
+        while len(self._pool) < count:
             placeholder = arcade.SpriteSolidColor(2, 2, (0, 0, 0, 0))
+            placeholder.center_x = 0
+            placeholder.center_y = 0
             placeholder.visible = False
             self._pool.append(placeholder)
-        return self._pool[index]
+            self._sprites.append(placeholder)
 
     def draw_entities(
         self,
@@ -34,10 +36,11 @@ class EntityDrawBatch:
         if not entities:
             return
         cam_x, cam_y = camera_offset
-        self._sprites.clear()
+        count = len(entities)
+        self._ensure_pool(count)
         for index, entity in enumerate(entities):
             asset = entity.image
-            sprite = self._sprite_at(index)
+            sprite = self._pool[index]
             if sprite.texture is not asset.texture:
                 sprite.texture = asset.texture
             shifted = entity.rect.move(-cam_x, -cam_y)
@@ -46,8 +49,7 @@ class EntityDrawBatch:
             sprite.center_x = shifted.centerx
             sprite.center_y = sim_y_to_arcade(shifted.centery, sim_height)
             sprite.visible = True
-            self._sprites.append(sprite)
-        for index in range(len(entities), len(self._pool)):
+        for index in range(count, len(self._pool)):
             self._pool[index].visible = False
         self._sprites.draw()
 

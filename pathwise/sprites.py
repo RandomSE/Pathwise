@@ -63,8 +63,16 @@ def _texture_from_image(img: Image.Image, name: str) -> arcade.Texture:
     return arcade.Texture(img, hash=name)
 
 
-def _asset_from_image(img: Image.Image, name: str) -> SpriteAsset:
-    return SpriteAsset(texture=_texture_from_image(img, name), width=img.width, height=img.height)
+def _asset_from_image(
+    img: Image.Image,
+    name: str,
+    *,
+    logic_width: int | None = None,
+    logic_height: int | None = None,
+) -> SpriteAsset:
+    lw = img.width if logic_width is None else logic_width
+    lh = img.height if logic_height is None else logic_height
+    return SpriteAsset(texture=_texture_from_image(img, name), width=lw, height=lh)
 
 
 def _paste_center(canvas: Image.Image, piece: Image.Image) -> None:
@@ -385,6 +393,32 @@ def _body_dimensions(vertical: bool) -> tuple[int, int]:
 
 _car_surface_cache: dict[tuple[int, int, int], SpriteAsset] = {}
 _car_box_surface_cache: dict[tuple[int, int, int, int], SpriteAsset] = {}
+_render_bake_multiplier = 1
+
+
+def set_render_bake_multiplier(multiplier: int) -> None:
+    global _render_bake_multiplier, _pedestrian_asset, _pedestrian_cache_key
+    mult = max(1, min(3, int(multiplier)))
+    if mult == _render_bake_multiplier:
+        return
+    _render_bake_multiplier = mult
+    clear_texture_caches()
+    _pedestrian_asset = None
+    _pedestrian_cache_key = None
+
+
+def render_bake_multiplier() -> int:
+    return _render_bake_multiplier
+
+
+def _upscale_asset_image(img: Image.Image, logic_w: int, logic_h: int) -> Image.Image:
+    mult = _render_bake_multiplier
+    if mult <= 1:
+        return img
+    return img.resize(
+        (logic_w * mult, logic_h * mult),
+        resample=Image.Resampling.LANCZOS,
+    )
 
 
 def car_surface_cache_key(vertical=False, direction=1, archetype_index=0) -> tuple[int, int, int]:
@@ -437,7 +471,10 @@ def make_car_rotated_in_box(
         rotated = base_img.rotate(angle_q, expand=True, resample=Image.Resampling.BICUBIC)
     canvas, _ = _new_canvas(box_w, box_h)
     _paste_center(canvas, rotated)
-    asset = _asset_from_image(canvas, f"car_box_{key}")
+    canvas = _upscale_asset_image(canvas, box_w, box_h)
+    asset = _asset_from_image(
+        canvas, f"car_box_{key}", logic_width=box_w, logic_height=box_h
+    )
     _car_box_surface_cache[key] = asset
     return asset
 
@@ -461,7 +498,8 @@ def make_car_surface(vertical=False, direction=1, archetype_index=0) -> SpriteAs
         img = img.transpose(Image.FLIP_LEFT_RIGHT)
     elif vertical and direction < 0:
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
-    asset = _asset_from_image(img, f"car_{key}")
+    img = _upscale_asset_image(img, width, height)
+    asset = _asset_from_image(img, f"car_{key}", logic_width=width, logic_height=height)
     _car_surface_cache[key] = asset
     return asset
 
@@ -516,11 +554,13 @@ def car_collision_rect_turn(rect: Rect) -> Rect:
 
 
 _pedestrian_asset: SpriteAsset | None = None
+_pedestrian_cache_key: tuple[int, int] | None = None
 
 
 def make_pedestrian_surface(size=PEDESTRIAN_SIZE) -> SpriteAsset:
-    global _pedestrian_asset
-    if _pedestrian_asset is not None and _pedestrian_asset.width == size:
+    global _pedestrian_asset, _pedestrian_cache_key
+    key = (size, _render_bake_multiplier)
+    if _pedestrian_asset is not None and _pedestrian_cache_key == key:
         return _pedestrian_asset
     img, draw = _new_canvas(size, size)
     cx = size // 2
@@ -542,7 +582,11 @@ def make_pedestrian_surface(size=PEDESTRIAN_SIZE) -> SpriteAsset:
         outline=_rgba(PLAYER_OUTLINE),
         width=1,
     )
-    _pedestrian_asset = _asset_from_image(img, "pedestrian")
+    img = _upscale_asset_image(img, size, size)
+    _pedestrian_asset = _asset_from_image(
+        img, "pedestrian", logic_width=size, logic_height=size
+    )
+    _pedestrian_cache_key = key
     return _pedestrian_asset
 
 

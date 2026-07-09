@@ -11,6 +11,8 @@ from pathwise.pre_game import (
     CandidateHomeView,
     MessageView,
     RecruiterConfigView,
+    ROUND_CONTROLS_HINT,
+    ROUND_START_PROMPT,
     SessionConfig,
     _parse_seed_text,
     build_candidate_session_config,
@@ -290,6 +292,26 @@ class TestMessageView(ArcadeMenuTestCase):
         view = MessageView(title="Only")
         view.on_draw()
 
+    def test_round_controls_details(self):
+        view = MessageView(
+            title="Round 1",
+            accent=ROUND_START_PROMPT,
+            details=ROUND_CONTROLS_HINT,
+        )
+        self.assertIn("WASD", view.details)
+        self.assertIn("Shift", view.details)
+
+    def test_round_intro_waits_for_input(self):
+        view = MessageView(
+            title="Round 1 of 1",
+            accent=ROUND_START_PROMPT,
+            details=ROUND_CONTROLS_HINT,
+        )
+        view.on_update(10.0)
+        self.assertFalse(view._done)
+        view.on_key_press(arcade.key.SPACE, 0)
+        self.assertTrue(view._done)
+
 
 class TestBlockingRunners(ArcadeMenuTestCase):
     @patch("pathwise.pre_game.pump_frame")
@@ -321,10 +343,14 @@ class TestBlockingRunners(ArcadeMenuTestCase):
         profile = DifficultyProfile.for_menu_preset("normal")
 
         def show_view(view):
+            captured["view"] = view
             view.finish(True)
 
         window.show_view = show_view
+        captured = {}
         self.assertTrue(run_round_intro(window, 2, 3, profile))
+        self.assertIn("Shift", captured["view"].details)
+        self.assertIsNone(captured["view"].auto_advance_s)
 
     @patch("pathwise.pre_game.pump_frame")
     def test_run_between_rounds(self, pump):

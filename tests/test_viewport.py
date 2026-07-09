@@ -8,18 +8,23 @@ from pathwise.viewport import (
     DisplayLayout,
     camera_offset_for,
     normalize_viewport_size,
+    sim_size_for_window,
     sim_viewport_size,
     view_rect_for_camera,
 )
 
 
 class TestViewport(unittest.TestCase):
-    def test_sim_viewport_is_design_resolution(self):
+    def test_sim_viewport_defaults_to_design_resolution(self):
         self.assertEqual(sim_viewport_size(), (800, 600))
 
-    def test_normalize_viewport_ignores_window_size(self):
+    def test_sim_size_matches_16_9_window(self):
+        self.assertEqual(sim_size_for_window(1920, 1080), (1067, 600))
+        self.assertEqual(sim_size_for_window(1280, 720), (1067, 600))
+
+    def test_normalize_viewport_uses_window_aspect(self):
         w, h = normalize_viewport_size(1920, 1080)
-        self.assertEqual((w, h), (commonUtils.WIDTH, commonUtils.HEIGHT))
+        self.assertEqual((w, h), (1067, 600))
 
     def test_camera_offset_centers_player_in_sim_space(self):
         self.assertEqual(camera_offset_for(500, 400, 800, 600), (100, 100))
@@ -34,17 +39,21 @@ class TestViewport(unittest.TestCase):
         self.assertEqual(rect.width, vw + pad * 2)
         self.assertEqual(rect.height, vh + pad * 2)
 
-    def test_display_layout_scales_uniformly_at_1080p(self):
+    def test_display_layout_fills_1080p_window(self):
         layout = DisplayLayout.fit_window(1920, 1080)
-        self.assertAlmostEqual(layout.scale, 1.8)
-        self.assertAlmostEqual(layout.dest_width, 800 * 1.8)
-        self.assertAlmostEqual(layout.dest_height, 600 * 1.8)
-        self.assertAlmostEqual(layout.dest_left, (1920 - layout.dest_width) / 2)
+        self.assertEqual(layout.sim_width, 1067)
+        self.assertEqual(layout.sim_height, 600)
+        self.assertAlmostEqual(layout.scale_x, 1920 / 1067, places=3)
+        self.assertAlmostEqual(layout.scale_y, 1.8)
+        self.assertAlmostEqual(layout.dest_left, 0.0)
         self.assertAlmostEqual(layout.dest_bottom, 0.0)
+        self.assertAlmostEqual(layout.dest_width, 1920.0)
+        self.assertAlmostEqual(layout.dest_height, 1080.0)
 
     def test_display_layout_identity_at_design_resolution(self):
         layout = DisplayLayout.fit_window(800, 600)
-        self.assertAlmostEqual(layout.scale, 1.0)
+        self.assertAlmostEqual(layout.scale_x, 1.0)
+        self.assertAlmostEqual(layout.scale_y, 1.0)
         self.assertAlmostEqual(layout.dest_left, 0.0)
         self.assertAlmostEqual(layout.dest_bottom, 0.0)
         self.assertAlmostEqual(layout.dest_width, 800.0)
@@ -52,10 +61,10 @@ class TestViewport(unittest.TestCase):
 
     def test_display_layout_maps_sim_origin_to_dest_corner(self):
         layout = DisplayLayout.fit_window(1920, 1080)
-        self.assertEqual(layout.map_arcade_point(0, 0), (layout.dest_left, layout.dest_bottom))
+        self.assertEqual(layout.map_arcade_point(0, 0), (0.0, 0.0))
         self.assertEqual(
-            layout.map_arcade_point(800, 600),
-            (layout.dest_left + layout.dest_width, layout.dest_bottom + layout.dest_height),
+            layout.map_arcade_point(layout.sim_width, layout.sim_height),
+            (layout.dest_width, layout.dest_height),
         )
 
     def test_update_round_frame_view_rect_fixed_regardless_of_window(self):
