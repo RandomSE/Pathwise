@@ -17,6 +17,44 @@ class Cell:
     row: int
 
 
+TOP_EDGE, RIGHT_EDGE, BOTTOM_EDGE, LEFT_EDGE = 0, 1, 2, 3
+
+
+def opposite_edge(edge: int) -> int:
+    return (edge + 2) % 4
+
+
+def perimeter_cells(cols: int, rows: int) -> list[Cell]:
+    seen: set[Cell] = set()
+    ordered: list[Cell] = []
+    for col in range(cols + 1):
+        for row in (0, rows):
+            cell = Cell(col, row)
+            if cell not in seen:
+                seen.add(cell)
+                ordered.append(cell)
+    for row in range(1, rows):
+        for col in (0, cols):
+            cell = Cell(col, row)
+            if cell not in seen:
+                seen.add(cell)
+                ordered.append(cell)
+    return ordered
+
+
+def is_perimeter_cell(cell: Cell, cols: int, rows: int) -> bool:
+    return (
+        cell.row == 0
+        or cell.row == rows
+        or cell.col == 0
+        or cell.col == cols
+    )
+
+
+def manhattan_cells(a: Cell, b: Cell) -> int:
+    return abs(a.col - b.col) + abs(a.row - b.row)
+
+
 def walk_cell_cost_s(stride_px: float) -> float:
     """Seconds to walk one block along a street segment."""
     return max(1.0, stride_px / PX_PER_SECOND * 0.92)

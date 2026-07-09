@@ -35,6 +35,12 @@ MAX_ROUNDS = 5
 DEFAULT_ROUNDS = 1
 MAX_SEED_DIGITS = 10
 
+ROUND_CONTROLS_HINT = (
+    "Move: Arrow keys or WASD\n"
+    "Sprint: Shift - toggle 2× speed (risky on roads & crosswalks; \n stops when you enter road)"
+)
+ROUND_START_PROMPT = "Click or press any key to go"
+
 DIFFICULTY_PRESETS = [
     ("easy", "Easy", "Relaxed traffic · forgiving timing"),
     ("normal", "Normal", "Balanced challenge"),
@@ -705,6 +711,7 @@ class MessageView(_MenuView):
         title: str,
         subtitle: str = "",
         accent: str = "",
+        details: str = "",
         auto_advance_s: float | None = None,
         on_complete: Callable | None = None,
     ) -> None:
@@ -712,6 +719,7 @@ class MessageView(_MenuView):
         self.title = title
         self.subtitle = subtitle
         self.accent = accent
+        self.details = details
         self.auto_advance_s = auto_advance_s
         self._elapsed = 0.0
 
@@ -766,6 +774,18 @@ class MessageView(_MenuView):
                 anchor_x="center",
                 anchor_y="center",
             ).draw()
+        if self.details:
+            arcade.Text(
+                self.details,
+                cx,
+                h * 0.28,
+                MENU_MUTED,
+                16,
+                anchor_x="center",
+                anchor_y="center",
+                multiline=True,
+                width=min(560, self.window.width - 80),
+            ).draw()
 
 
 def run_pre_game_menu(window: arcade.Window) -> SessionConfig | None:
@@ -791,8 +811,8 @@ def run_round_intro(
     view = MessageView(
         title=f"Round {round_index} of {total_rounds}",
         subtitle=hint,
-        accent="Go!",
-        auto_advance_s=2.2,
+        accent=ROUND_START_PROMPT,
+        details=ROUND_CONTROLS_HINT,
     )
     window.show_view(view)
     while not view._done and not window.closed:

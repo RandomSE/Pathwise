@@ -230,10 +230,33 @@ class FrameRecorder:
                 break
             del self.frames[drop_idx]
 
+    def capture_metadata(self) -> dict:
+        """Replay timing metadata for dashboard playback and legacy log compatibility."""
+        gaps = [
+            self.frames[i]["t"] - self.frames[i - 1]["t"]
+            for i in range(1, len(self.frames))
+            if not self.frames[i].get("synthetic")
+        ]
+        median_gap = 0.0
+        if gaps:
+            ordered = sorted(gaps)
+            median_gap = ordered[len(ordered) // 2]
+        return {
+            "sample_interval_fast_s": FIXED_SAMPLE_INTERVAL_FAST_S,
+            "sample_interval_slow_s": FIXED_SAMPLE_INTERVAL_SLOW_S,
+            "sample_interval_final_s": self._sample_interval_s,
+            "median_frame_gap_s": round(median_gap, 4),
+        }
+
     def _pick_trim_candidate(self) -> int | None:
         over_cap = len(self.frames) > MAX_REPLAY_FRAMES
+        interval_cap = max(
+            self._sample_interval_s,
+            FIXED_SAMPLE_INTERVAL_FAST_S,
+            FIXED_SAMPLE_INTERVAL_SLOW_S,
+        )
         max_drop_gap = (
-            FIXED_SAMPLE_INTERVAL_S * 4.0
+            interval_cap * 4.0
             if over_cap
             else MAX_REPLAY_GAP_S * 1.25
         )
@@ -250,7 +273,7 @@ class FrameRecorder:
             next_t = (
                 self.frames[index + 1]["t"]
                 if index + 1 < len(self.frames)
-                else prev_t + FIXED_SAMPLE_INTERVAL_S
+                else prev_t + interval_cap
             )
             gap_if_dropped = next_t - prev_t
             if gap_if_dropped > max_drop_gap:

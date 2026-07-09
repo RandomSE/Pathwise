@@ -1,4 +1,4 @@
-"""Simulation viewport (fixed design resolution) and display scaling."""
+"""Simulation viewport and display scaling for window aspect ratios."""
 
 from __future__ import annotations
 
@@ -11,18 +11,46 @@ from pathwise.game_tuning import DEFAULT_TUNING
 
 _FRAME_RECORD_VIEW_PAD = DEFAULT_TUNING.FRAME_RECORD_VIEW_PAD
 _LETTERBOX_COLOR = (236, 244, 252)
+SIM_BASE_WIDTH = commonUtils.WIDTH
+SIM_BASE_HEIGHT = commonUtils.HEIGHT
 
 
-def sim_viewport_size() -> tuple[int, int]:
-    return commonUtils.WIDTH, commonUtils.HEIGHT
+def sim_size_for_window(window_width: int, window_height: int) -> tuple[int, int]:
+    """Match sim aspect to the window; keep 600px vertical design resolution."""
+    win_w = max(1, window_width)
+    win_h = max(1, window_height)
+    sim_h = SIM_BASE_HEIGHT
+    sim_w = max(SIM_BASE_WIDTH, int(round(sim_h * win_w / win_h)))
+    return sim_w, sim_h
+
+
+def _resolve_window_size() -> tuple[int | None, int | None]:
+    try:
+        import arcade
+
+        window = arcade.get_window()
+        return int(window.width), int(window.height)
+    except RuntimeError:
+        return None, None
+
+
+def sim_viewport_size(
+    window_width: int | None = None,
+    window_height: int | None = None,
+) -> tuple[int, int]:
+    if window_width is None or window_height is None:
+        resolved_w, resolved_h = _resolve_window_size()
+        if resolved_w is not None and resolved_h is not None:
+            window_width, window_height = resolved_w, resolved_h
+        else:
+            return SIM_BASE_WIDTH, SIM_BASE_HEIGHT
+    return sim_size_for_window(window_width, window_height)
 
 
 def normalize_viewport_size(
     viewport_w: int | None = None, viewport_h: int | None = None
 ) -> tuple[int, int]:
-    """Simulation always uses the design resolution regardless of window size."""
-    _ = viewport_w, viewport_h
-    return sim_viewport_size()
+    return sim_viewport_size(viewport_w, viewport_h)
 
 
 def camera_offset_for(
@@ -54,13 +82,14 @@ def view_rect_for_camera(
 
 @dataclass(frozen=True)
 class DisplayLayout:
-    """Maps fixed sim surface (800x600) onto the physical window with uniform scale."""
+    """Maps aspect-matched sim surface onto the full physical window."""
 
     window_width: int
     window_height: int
     sim_width: int
     sim_height: int
-    scale: float
+    scale_x: float
+    scale_y: float
     dest_left: float
     dest_bottom: float
     dest_width: float
@@ -75,42 +104,53 @@ class DisplayLayout:
         sim_width: int | None = None,
         sim_height: int | None = None,
     ) -> DisplayLayout:
-        sw, sh = sim_viewport_size()
-        if sim_width is not None:
-            sw = sim_width
-        if sim_height is not None:
-            sh = sim_height
         win_w = max(1, window_width)
         win_h = max(1, window_height)
-        scale = min(win_w / sw, win_h / sh)
-        dest_width = sw * scale
-        dest_height = sh * scale
+        if sim_width is not None and sim_height is not None:
+            sw, sh = sim_width, sim_height
+        else:
+            sw, sh = sim_size_for_window(win_w, win_h)
         return cls(
             window_width=win_w,
             window_height=win_h,
             sim_width=sw,
             sim_height=sh,
-            scale=scale,
-            dest_left=(win_w - dest_width) / 2,
-            dest_bottom=(win_h - dest_height) / 2,
-            dest_width=dest_width,
-            dest_height=dest_height,
+            scale_x=win_w / sw,
+            scale_y=win_h / sh,
+            dest_left=0.0,
+            dest_bottom=0.0,
+            dest_width=float(win_w),
+            dest_height=float(win_h),
         )
+
+    @property
+    def scale(self) -> float:
+        return (self.scale_x + self.scale_y) / 2.0
+
+    @property
+    def display_match_scale(self) -> float:
+        """Sim-to-screen scale so one sim unit maps to one screen pixel."""
+        if (
+            abs(self.scale_x - 1.0) < 1e-3
+            and abs(self.scale_y - 1.0) < 1e-3
+        ):
+            return 1.0
+        return max(self.scale_x, self.scale_y)
 
     def map_arcade_point(self, x: float, y: float) -> tuple[float, float]:
         return (
-            self.dest_left + x * self.scale,
-            self.dest_bottom + y * self.scale,
+            self.dest_left + x * self.scale_x,
+            self.dest_bottom + y * self.scale_y,
         )
 
     def map_arcade_lbwh(
         self, left: float, bottom: float, width: float, height: float
     ) -> tuple[float, float, float, float]:
         return (
-            self.dest_left + left * self.scale,
-            self.dest_bottom + bottom * self.scale,
-            width * self.scale,
-            height * self.scale,
+            self.dest_left + left * self.scale_x,
+            self.dest_bottom + bottom * self.scale_y,
+            width * self.scale_x,
+            height * self.scale_y,
         )
 
     def map_line_width(self, width: float) -> float:
@@ -135,19 +175,35 @@ class DisplayLayout:
     @property
     def uses_gpu_viewport(self) -> bool:
         return (
-            abs(self.scale - 1.0) > 1e-6
-            or abs(self.dest_left) > 1e-6
-            or abs(self.dest_bottom) > 1e-6
+            abs(self.scale_x - 1.0) > 1e-6
+            or abs(self.scale_y - 1.0) > 1e-6
+            or self.dest_left > 1e-6
+            or self.dest_bottom > 1e-6
+        )
+
+    def dest_pixel_size(self) -> tuple[int, int]:
+        return (
+            max(1, int(round(self.dest_width))),
+            max(1, int(round(self.dest_height))),
+        )
+
+    def snapped_dest_rect(self) -> tuple[int, int, int, int]:
+        width, height = self.dest_pixel_size()
+        return (
+            int(round(self.dest_left)),
+            int(round(self.dest_bottom)),
+            width,
+            height,
         )
 
 
 @contextmanager
 def gameplay_draw_surface(layout: DisplayLayout):
-    """Letterbox + sim draw; supersampled FBO + linear upscale when scaled."""
+    """Full-window sim draw; supersampled FBO + GPU upscale when scaled."""
     import arcade
-    from pyglet.math import Mat4
 
     from pathwise.gameplay_framebuffer import shared_gameplay_surface
+    from pathwise.projection_cache import screen_projection, sim_projection
 
     try:
         window = arcade.get_window()
@@ -159,11 +215,18 @@ def gameplay_draw_surface(layout: DisplayLayout):
     saved_viewport = window.viewport
     saved_projection = window.projection
     ww, wh = layout.window_width, layout.window_height
+    dest_covers_window = (
+        layout.dest_left < 1
+        and layout.dest_bottom < 1
+        and abs(layout.dest_width - ww) < 2
+        and abs(layout.dest_height - wh) < 2
+    )
 
     if surface.needs_offscreen(layout):
         window.viewport = (0, 0, ww, wh)
-        window.projection = Mat4.orthogonal_projection(0, ww, 0, wh, -8192, 8192)
-        arcade.draw_lbwh_rectangle_filled(0, 0, ww, wh, layout.letterbox_color)
+        window.projection = screen_projection(ww, wh)
+        if not dest_covers_window:
+            arcade.draw_lbwh_rectangle_filled(0, 0, ww, wh, layout.letterbox_color)
         with surface.draw_target(window, layout):
             try:
                 yield
@@ -175,8 +238,9 @@ def gameplay_draw_surface(layout: DisplayLayout):
         return
 
     window.viewport = (0, 0, ww, wh)
-    window.projection = Mat4.orthogonal_projection(0, ww, 0, wh, -8192, 8192)
-    arcade.draw_lbwh_rectangle_filled(0, 0, ww, wh, layout.letterbox_color)
+    window.projection = screen_projection(ww, wh)
+    if not dest_covers_window:
+        arcade.draw_lbwh_rectangle_filled(0, 0, ww, wh, layout.letterbox_color)
     dest_w = max(1, int(round(layout.dest_width)))
     dest_h = max(1, int(round(layout.dest_height)))
     window.viewport = (
@@ -185,9 +249,7 @@ def gameplay_draw_surface(layout: DisplayLayout):
         dest_w,
         dest_h,
     )
-    window.projection = Mat4.orthogonal_projection(
-        0, layout.sim_width, 0, layout.sim_height, -8192, 8192
-    )
+    window.projection = sim_projection(layout.sim_width, layout.sim_height)
     try:
         yield
     finally:

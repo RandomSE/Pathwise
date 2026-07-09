@@ -26,6 +26,7 @@ class GameTuning:
     CAR_HEIGHT: int = _CAR_H
     PEDESTRIAN_SIZE: int = _utils.PEDESTRIAN_SIZE
     PEDESTRIAN_SPEED: float = _utils.PEDESTRIAN_SPEED
+    SPRINT_SPEED_MULT: float = 2.0
     CAR_SPEED: float = _utils.CAR_SPEED
     SIM_FPS: float = 60.0
     ROUND_TIME_LIMIT: int = 30

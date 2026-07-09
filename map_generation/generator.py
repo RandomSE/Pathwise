@@ -18,6 +18,11 @@ from map_generation.difficulty import DifficultyProfile, adaptive_difficulty
 from map_generation.noise import fbm, simplex2
 from map_generation.pathfinding import Cell, astar_travel_time, bfs_solvable
 from map_generation.safety import expected_wait_for_safe_crossing, min_time_limit_for_route
+from map_generation.spawn_placement import (
+    pick_spawn_and_goal,
+    placement_meets_distance,
+    spawn_rng_for_attempt,
+)
 from pathwise.map_visuals import generate_city_blocks, generate_map_decorations
 
 VERTICAL = commonUtils.VERTICAL
@@ -229,14 +234,20 @@ def generate_map_layout(
         for road, weight in zip(roads, traffic_weights):
             road.traffic_weight = weight
 
-        start_col, start_row = 0, n_h
-        goal_col, goal_row = n_v, 0
-        if rng.random() < 0.3 + difficulty.unpredictability * 0.25 and n_v >= 2 and n_h >= 2:
-            goal_col = rng.randint(max(1, n_v // 2), n_v)
-            goal_row = rng.randint(0, max(0, n_h // 2))
+        spawn_rng = spawn_rng_for_attempt(seed, attempt)
+        placement = pick_spawn_and_goal(
+            spawn_rng, n_v, n_h, difficulty.unpredictability
+        )
+        if not placement_meets_distance(placement, n_v, n_h):
+            continue
 
-        start_cell = Cell(start_col, start_row)
-        goal_cell = Cell(goal_col, goal_row)
+        start_col = placement.start_cell.col
+        start_row = placement.start_cell.row
+        goal_col = placement.goal_cell.col
+        goal_row = placement.goal_cell.row
+
+        start_cell = placement.start_cell
+        goal_cell = placement.goal_cell
         if not bfs_solvable(start_cell, goal_cell, n_v, n_h):
             continue
 
@@ -294,6 +305,7 @@ def generate_map_layout(
                 "stride_px": round(eff_stride, 1),
                 "solver": "astar+bfs",
                 "safe_crossing_model": "light_cycle",
+                **placement.metadata,
             },
         }
 

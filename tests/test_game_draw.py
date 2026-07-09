@@ -20,36 +20,22 @@ def _road_state(direction: str) -> dict:
 
 
 class TestTrafficLightOverlays(unittest.TestCase):
-    @patch("pathwise.game_draw.draw_sim_rect_outline")
-    @patch("pathwise.game_draw._entity_batch.draw_entities")
-    @patch("pathwise.game_draw.arcade.Text")
-    @patch("pathwise.game_draw.draw_sim_circle_filled_world")
-    @patch("pathwise.game_draw.draw_sim_rect_filled")
-    def test_vertical_and_horizontal_states_draw_without_error(
-        self,
-        _rect_fill,
-        _circle,
-        _text_cls,
-        _entity_batch,
-        _outline,
-    ):
+    @patch("pathwise.game_draw.shared_traffic_light_batch")
+    def test_batched_bulbs_skip_static_housing(self, batch_factory):
+        batch = batch_factory.return_value
+        batch.draw_bulbs.return_value = 6
         states = [_road_state("vertical"), _road_state("horizontal")]
         view_rect = Rect(0, 0, 800, 600)
         draw_traffic_light_overlays(
-            600, states, (0, 0), light_green_duration=20.0, view_rect=view_rect
+            600, states, (0, 0), light_green_duration=20.0, view_rect=view_rect,
+            draw_timer_bar=False,
         )
+        batch.draw_bulbs.assert_called_once()
 
-    @patch("pathwise.game_draw.draw_sim_rect_outline")
-    @patch("pathwise.game_draw.arcade.Text")
-    @patch("pathwise.game_draw.draw_sim_circle_filled_world")
-    @patch("pathwise.game_draw.draw_sim_rect_filled")
-    def test_lights_draw_with_camera_offset(
-        self,
-        _rect_fill,
-        circle_world,
-        _text_cls,
-        _outline,
-    ):
+    @patch("pathwise.game_draw.shared_traffic_light_batch")
+    def test_lights_draw_with_camera_offset(self, batch_factory):
+        batch = batch_factory.return_value
+        batch.draw_bulbs.return_value = 3
         crosswalk = Rect(500, 400, 14, 90)
         state = {
             "road_rect": crosswalk.inflate(40, 40),
@@ -63,11 +49,12 @@ class TestTrafficLightOverlays(unittest.TestCase):
         camera = (480, 360)
         view_rect = Rect(480, 360, 800, 600)
         draw_traffic_light_overlays(
-            600, [state], camera, light_green_duration=20.0, view_rect=view_rect
+            600, [state], camera, light_green_duration=20.0, view_rect=view_rect,
+            draw_timer_bar=False,
         )
-        self.assertGreater(circle_world.call_count, 0)
-        args = circle_world.call_args_list[0][0]
-        self.assertEqual(args[2], camera)
+        batch.draw_bulbs.assert_called_once()
+        self.assertEqual(batch.draw_bulbs.call_args[0][1], camera)
+
 
 if __name__ == "__main__":
     unittest.main()

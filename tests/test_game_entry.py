@@ -39,27 +39,26 @@ class TestGameEntry(unittest.TestCase):
         self.game.draw_round_frame(800, 600, draw_state)
         draw_scene.assert_called_once()
 
+    @patch("pathwise.game_draw.arcade.draw_text")
+    @patch("pathwise.game_draw.shared_traffic_light_batch")
     @patch("pathwise.game_draw.gameplay_draw_surface")
     @patch("pathwise.game_draw.arcade.draw_lbwh_rectangle_filled")
-    @patch("pathwise.game_draw.draw_sim_rect_outline")
     @patch("pathwise.game_draw._entity_batch.draw_entities")
     @patch("pathwise.game_draw.arcade.Text")
-    @patch("pathwise.game_draw.draw_sim_circle_filled_world")
-    @patch("pathwise.game_draw.draw_sim_rect_filled")
     @patch("pathwise.map.draw_arrow")
     @patch("pathwise.map_visuals.draw_baked_map")
     def test_draw_round_scene_after_start_round(
         self,
         _baked,
         _arrow,
-        _rect_fill,
-        _circle,
         _text_cls,
         _entity_batch,
-        _outline,
         _bg_fill,
         _surface,
+        _traffic_batch,
+        _draw_text,
     ):
+        _traffic_batch.return_value.draw_bulbs.return_value = 0
         from contextlib import nullcontext
         from pathwise.game_draw import draw_round_scene
 
@@ -91,10 +90,12 @@ class TestGameEntry(unittest.TestCase):
         """Integration: start round and draw one frame (catches missing imports at draw time)."""
         import arcade
         from pathwise.game_draw import draw_round_scene
+        from pathwise.gameplay_framebuffer import reset_shared_gameplay_surface
 
         profile = DifficultyProfile.for_menu_preset("normal")
         window = arcade.Window(800, 600, "launch test", visible=False)
         try:
+            reset_shared_gameplay_surface()
             self.game.start_round(1, profile, "normal")
             baked = self.game.current_map.baked_layer
             self.assertIsNotNone(baked)

@@ -1,31 +1,94 @@
-"""Supersampled offscreen gameplay surface and GPU compositing."""
+"""Fixed-resolution offscreen gameplay surface and GPU compositing."""
 
 from __future__ import annotations
 
 import array
+import math
 import os
 from contextlib import contextmanager
 
 from arcade.gl import BufferDescription
 
+from .projection_cache import sim_projection
 from .viewport import DisplayLayout
 
 _BLIT_UVS = array.array("f", [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1])
 
+# Fixed internal resolution: sharper than 720p, ~31% fewer pixels than native 1080p.
+FIXED_FBO_WIDTH = 1600
+FIXED_FBO_HEIGHT = 900
+_MAX_ENV_RENDER_SCALE = 3.0
+
+
+def _env_render_scale_override() -> float | None:
+    raw = os.environ.get("PATHWISE_RENDER_SCALE", "").strip()
+    if not raw:
+        return None
+    try:
+        return max(1.0, min(_MAX_ENV_RENDER_SCALE, float(raw)))
+    except ValueError:
+        return None
+
+
+def upscale_filter_mode() -> str:
+    return os.environ.get("PATHWISE_UPSCALE_FILTER", "smooth").strip().lower()
+
+
+def fixed_fbo_pixel_size(layout: DisplayLayout) -> tuple[int, int]:
+    """Fixed high-res FBO for GPU viewport; native 1:1 only on small windows."""
+    if not layout.uses_gpu_viewport:
+        return layout.sim_width, layout.sim_height
+    override = _env_render_scale_override()
+    if override is not None:
+        return (
+            max(1, int(round(layout.sim_width * override))),
+            max(1, int(round(layout.sim_height * override))),
+        )
+    dw, dh = layout.dest_pixel_size()
+    if dw <= FIXED_FBO_WIDTH and dh <= FIXED_FBO_HEIGHT:
+        return dw, dh
+    return FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT
+
+
+def fixed_fbo_render_multiplier(layout: DisplayLayout) -> float:
+    """Sim-to-FBO scale used for sprite baking (stable, not adaptive)."""
+    if not layout.uses_gpu_viewport:
+        return 1.0
+    fw, fh = fixed_fbo_pixel_size(layout)
+    return max(fw / layout.sim_width, fh / layout.sim_height)
+
+
+def fixed_sprite_bake_multiplier(layout: DisplayLayout) -> int:
+    """Bake sprites to match the fixed FBO scale (stable, not full display res)."""
+    if not layout.uses_gpu_viewport:
+        return 1
+    mult = fixed_fbo_render_multiplier(layout)
+    if mult < 1.15:
+        return 1
+    return max(1, min(2, int(math.ceil(mult))))
+
+
+def prewarm_draw_gpu_assets(layout: DisplayLayout) -> None:
+    """Register recurring draw textures with the GL atlas before FBO rendering."""
+    if not layout.uses_gpu_viewport:
+        return
+    from pathwise.traffic_light_batch import shared_traffic_light_batch
+
+    batch = shared_traffic_light_batch()
+    for on in (False, True):
+        for index in range(3):
+            batch._texture(on, index)
+
 
 def render_supersample(layout: DisplayLayout) -> int:
-    """Internal render multiplier (1–3) for antialiased upscaling."""
-    override = os.environ.get("PATHWISE_RENDER_SCALE", "").strip()
-    if override:
-        try:
-            return max(1, min(3, int(float(override))))
-        except ValueError:
-            pass
-    if layout.scale <= 1.01:
-        return 1
-    if layout.scale >= 2.0:
-        return 2
-    return 2
+    """Backward-compatible int scale helper used in tests."""
+    return max(1, int(round(fixed_fbo_render_multiplier(layout))))
+
+
+def _texture_filter(ctx):
+    if upscale_filter_mode() == "sharp":
+        return ctx.NEAREST, ctx.NEAREST
+    return ctx.LINEAR, ctx.LINEAR
 
 
 def _ndc_lbwh(
@@ -39,7 +102,7 @@ def _ndc_lbwh(
 
 
 class GameplaySurface:
-    """Reusable FBO + linear-filter blit for scaled fullscreen play."""
+    """Reusable FBO + filtered GPU blit for scaled fullscreen play."""
 
     def __init__(self) -> None:
         self._fbo = None
@@ -48,24 +111,20 @@ class GameplaySurface:
         self._blit_geo = None
         self._blit_vert_buf = None
         self._blit_uv_buf = None
-        self._blit_key: tuple[float, float, float, float, int, int] | None = None
+        self._blit_key: tuple[int, int, int, int, int, int] | None = None
 
     def needs_offscreen(self, layout: DisplayLayout) -> bool:
         return layout.uses_gpu_viewport
 
     def fbo_pixel_size(self, layout: DisplayLayout) -> tuple[int, int]:
-        ss = render_supersample(layout)
-        return (
-            max(1, int(round(layout.sim_width * ss))),
-            max(1, int(round(layout.sim_height * ss))),
-        )
+        return fixed_fbo_pixel_size(layout)
 
     def _ensure_fbo(self, ctx, width: int, height: int) -> None:
         if (width, height) == self._fbo_size and self._fbo is not None:
             return
         self._fbo_size = (width, height)
         self._tex = ctx.texture((width, height))
-        self._tex.filter = (ctx.LINEAR, ctx.LINEAR)
+        self._tex.filter = _texture_filter(ctx)
         self._fbo = ctx.framebuffer(color_attachments=[self._tex])
         self._blit_geo = None
         self._blit_key = None
@@ -73,10 +132,10 @@ class GameplaySurface:
     def _ensure_blit_geometry(
         self,
         ctx,
-        left: float,
-        bottom: float,
-        width: float,
-        height: float,
+        left: int,
+        bottom: int,
+        width: int,
+        height: int,
         win_w: int,
         win_h: int,
     ) -> None:
@@ -101,15 +160,8 @@ class GameplaySurface:
             return
         ctx = window.ctx
         ww, wh = layout.window_width, layout.window_height
-        self._ensure_blit_geometry(
-            ctx,
-            layout.dest_left,
-            layout.dest_bottom,
-            layout.dest_width,
-            layout.dest_height,
-            ww,
-            wh,
-        )
+        left, bottom, width, height = layout.snapped_dest_rect()
+        self._ensure_blit_geometry(ctx, left, bottom, width, height, ww, wh)
         if self._blit_geo is None:
             return
         window.use()
@@ -130,11 +182,7 @@ class GameplaySurface:
         with self._fbo.activate():
             window.clear()
             window.viewport = (0, 0, fw, fh)
-            from pyglet.math import Mat4
-
-            window.projection = Mat4.orthogonal_projection(
-                0, layout.sim_width, 0, layout.sim_height, -8192, 8192
-            )
+            window.projection = sim_projection(layout.sim_width, layout.sim_height)
             try:
                 yield
             finally:
@@ -155,4 +203,7 @@ def shared_gameplay_surface() -> GameplaySurface:
 def reset_shared_gameplay_surface() -> None:
     """Test hook — drop cached GL resources between headless runs."""
     global _shared_surface
+    from .projection_cache import reset_projection_cache
+
     _shared_surface = None
+    reset_projection_cache()

@@ -1,3 +1,6 @@
+from analytics.session_risks import normalize_risk_counts
+
+
 ARCHETYPES = {
     "risk_taker": {
         "label": "Risk-Taker",
@@ -35,10 +38,7 @@ def _ratio(numerator, denominator, default=0.0):
 def score_session(session):
     summary = session.get("summary", {})
     decisions = session.get("decision_sequence", [])
-    risky_risks = session.get(
-        "risky_risk_events", session.get("risk_events", 0)
-    )
-    reasonable_risks = session.get("reasonable_risk_events", 0)
+    risky_risks, reasonable_risks, legacy_risks = normalize_risk_counts(session)
     risks = risky_risks
     duration = max(session.get("duration_s", 1), 0.1)
     red_crosses = sum(1 for d in decisions if d.get("action") == "cross_on_red")
@@ -50,8 +50,8 @@ def score_session(session):
     slow_commits = summary.get("slow_commits", 0)
     outcome = session.get("outcome", "unknown")
 
-    risk_rate = risky_risks / duration
-    reasonable_rate = reasonable_risks / duration
+    risk_rate = risks / duration
+    reasonable_rate = 0.0 if legacy_risks else reasonable_risks / duration
     hesitation_per_road = hesitation_s / max(session.get("crossings", 1), 1)
 
     scores = {
@@ -79,7 +79,7 @@ def score_session(session):
             - red_crosses * 18
             - risk_rate * 90
             - reasonable_rate * 25
-            + (15 if risky_risks == 0 else 0)
+            + (15 if risks == 0 else 0)
         ),
         "cautious_deliberator": _clamp(
             20

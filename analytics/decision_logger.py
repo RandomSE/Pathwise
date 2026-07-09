@@ -1,6 +1,8 @@
 import math
 import time
 
+from analytics.session_risks import reconcile_finalize_risks
+
 
 HESITATION_THRESHOLD_S = 0.45
 BACKTRACK_MIN_PX = 8
@@ -220,9 +222,14 @@ class DecisionLogger:
         risk_events,
         failure_reason,
         *,
-        reasonable_risk_events=0,
-        risky_risk_events=0,
+        reasonable_risk_events=None,
+        risky_risk_events=None,
     ):
+        risk_events_out, reasonable_out, risky_out = reconcile_finalize_risks(
+            risk_events,
+            reasonable_risk_events=reasonable_risk_events,
+            risky_risk_events=risky_risk_events,
+        )
         if self._active_hesitation:
             now = time.time()
             duration_h = now - self._active_hesitation["start"]
@@ -243,9 +250,9 @@ class DecisionLogger:
             "duration_s": duration,
             "crossings": crossings,
             "collisions": collisions,
-            "risk_events": risk_events,
-            "reasonable_risk_events": reasonable_risk_events,
-            "risky_risk_events": risky_risk_events,
+            "risk_events": risk_events_out,
+            "reasonable_risk_events": reasonable_out,
+            "risky_risk_events": risky_out,
             "failure_reason": failure_reason,
             "map_id": self.map_id,
             "decision_sequence": self.decisions,
