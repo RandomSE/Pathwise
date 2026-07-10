@@ -104,11 +104,9 @@ class TestGeneratorBranches(unittest.TestCase):
 
 
 class TestGameDrawGaps(unittest.TestCase):
-    @patch("pathwise.game_draw.draw_sim_rect_outline")
-    @patch("pathwise.game_draw._entity_batch.draw_entities")
-    @patch("pathwise.game_draw.arcade.Text")
+    @patch("pathwise.game_draw.shared_traffic_light_batch")
     @patch("pathwise.game_draw.draw_sim_rect_filled")
-    @patch("pathwise.game_draw.draw_sim_circle_filled_world")
+    @patch("pathwise.game_draw.arcade.draw_text")
     def test_traffic_light_timer_colors(self, *_mocks):
         from pathwise.game_draw import draw_traffic_light_overlays
 

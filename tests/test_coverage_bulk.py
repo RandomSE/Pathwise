@@ -300,6 +300,7 @@ class TestMainSpawnExtended(unittest.TestCase):
             game.perf_profiler.begin_round(1)
             with patch.object(game, "save_session_log", return_value=None):
                 outcome = game.end_round(False, timed_out=True)
+                game.finalize_round_result()
             self.assertEqual(outcome, "timeout")
         finally:
             game.ENABLE_PERF_PROFILE = prev

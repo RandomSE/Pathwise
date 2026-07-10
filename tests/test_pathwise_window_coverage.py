@@ -41,14 +41,19 @@ class TestGamePlayView(unittest.TestCase):
     @patch("main.round_active", True)
     @patch("main.app_running", True)
     @patch("main.ENABLE_PERF_PROFILE", False)
-    def test_update_and_draw_active_round(self, _draw, update):
+    @patch.object(GamePlayView, "_fps_tracker_instance")
+    def test_update_and_draw_active_round(self, fps_tracker, _draw, update):
+        fps_tracker.return_value.hud_line.return_value = "FPS: 60"
         view = self._view()
         view.on_update(1 / 60)
         update.assert_called_once_with(view.keys)
         view._draw_state = {"hud_lines": []}
         view.on_draw()
         _draw.assert_called_once_with(
-            800, 600, view._draw_state, display_layout=view._display_layout
+            800,
+            600,
+            {"hud_lines": ["FPS: 60"]},
+            display_layout=view._display_layout,
         )
 
     @patch("main.round_active", False)

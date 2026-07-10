@@ -602,3 +602,12 @@ def _process_traffic_spawns_through_frame(
 
 
 set_car_removed_callback(_queue_car_respawn)
+
+
+def sync_state_to(target) -> None:
+    """Mirror spawn module state onto main or game_runtime."""
+    target.traffic_schedule = traffic_schedule
+    target.traffic_spawn_cursor = traffic_spawn_cursor
+    target.traffic_spawn_retry = traffic_spawn_retry
+    target.traffic_respawn_pending = traffic_respawn_pending
+    target.traffic_respawn_event_id = traffic_respawn_event_id

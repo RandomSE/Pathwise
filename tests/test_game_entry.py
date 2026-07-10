@@ -86,8 +86,10 @@ class TestGameEntry(unittest.TestCase):
             light_green_duration=self.game.LIGHT_GREEN_DURATION,
         )
 
-    def test_launch_draw_path_with_baked_map_tiles(self):
+    @patch("pathwise.game_draw.shared_traffic_light_batch")
+    def test_launch_draw_path_with_baked_map_tiles(self, traffic_batch):
         """Integration: start round and draw one frame (catches missing imports at draw time)."""
+        traffic_batch.return_value.draw_bulbs.return_value = None
         import arcade
         from pathwise.game_draw import draw_round_scene
         from pathwise.gameplay_framebuffer import reset_shared_gameplay_surface
