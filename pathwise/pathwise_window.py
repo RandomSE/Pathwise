@@ -118,12 +118,18 @@ class GamePlayView(arcade.View):
     def on_update(self, delta_time: float) -> None:
         game = self._game_module()
 
-        if not game.round_active or not game.app_running:
+        if not game.app_running:
             if self._on_round_complete and not self._round_complete_fired:
                 self._round_complete_fired = True
                 self._on_round_complete()
             return
-        self._draw_state = game.update_round_frame(self.keys)
+
+        if game.round_active:
+            self._draw_state = game.update_round_frame(self.keys)
+
+        if not game.round_active and self._on_round_complete and not self._round_complete_fired:
+            self._round_complete_fired = True
+            self._on_round_complete()
 
     def on_resize(self, width: int, height: int) -> None:
         from pathwise import sprites
@@ -336,6 +342,7 @@ class PathwiseWindow(arcade.Window):
                 "timeout": "Time expired",
             }
             label = labels.get(outcome, outcome)
+            game.finalize_round_result()
             self.show_view(
                 pre_game.MessageView(
                     title=f"Round {self._round_index} complete — {label}",
@@ -355,23 +362,26 @@ class PathwiseWindow(arcade.Window):
     def _finish_session(self) -> None:
         import main as game
 
-        if game.round_results:
-            dashboard = game.save_session_log()
-            print("Session complete:", {"rounds": self._outcomes, "dashboard": dashboard})
-            summary = " · ".join(f"R{i + 1}: {o}" for i, o in enumerate(self._outcomes))
-            subtitle = summary
-            if game.session_base_seed is not None:
-                subtitle += f"\nSession seed: {game.session_base_seed}"
-            self.show_view(
-                pre_game.MessageView(
-                    title=f"All {game.session_num_rounds} rounds complete",
-                    subtitle=subtitle,
-                    accent="Open logs_dashboard.html for per-round replays",
-                    on_complete=lambda _: arcade.close_window(),
-                )
-            )
-        else:
+        if not game.round_results:
             arcade.close_window()
+            return
+
+        summary = " · ".join(f"R{i + 1}: {o}" for i, o in enumerate(self._outcomes))
+        subtitle = summary
+        if game.session_base_seed is not None:
+            subtitle += f"\nSession seed: {game.session_base_seed}"
+
+        dashboard = game.save_session_log()
+        print("Session complete:", {"rounds": self._outcomes, "dashboard": dashboard})
+
+        self.show_view(
+            pre_game.MessageView(
+                title=f"All {game.session_num_rounds} rounds complete",
+                subtitle=subtitle,
+                accent="Open logs_dashboard.html for per-round replays",
+                on_complete=lambda _: arcade.close_window(),
+            )
+        )
 
 
 def run(*, auto_close_seconds: float | None = None) -> None:

@@ -16,8 +16,9 @@ class Pedestrian(Entity):
         self.rect = Rect(0, 0, self.image.get_width(), self.image.get_height())
         self.rect.center = start_pos
         self.sprint_enabled = False
-        self.sprint_suppressed_on_surface = False
-        self.was_on_road_or_crosswalk = False
+        self.sprint_suppressed_on_crosswalk = False
+        self.was_on_crosswalk = False
+        self.was_on_road = False
 
     def toggle_sprint(self) -> None:
         self.sprint_enabled = not self.sprint_enabled

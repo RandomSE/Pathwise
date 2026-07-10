@@ -179,6 +179,7 @@ def run_spectate_round(
             game.end_round(False, timed_out=True)
 
     wall_seconds = wall_time.perf_counter() - wall_t0
+    game.finalize_round_result()
     log = _session_log_dict(game)
     if log is None:
         raise RuntimeError("Spectate round produced no session log")
