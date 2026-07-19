@@ -142,6 +142,13 @@ class TestCrossingPlane(unittest.TestCase):
         active = self.game.update_legal_crossing_commit(True, False, False)
         self.assertFalse(active)
 
+    def test_legal_crossing_commit_holds_on_road_until_sidewalk(self):
+        active = self.game.update_legal_crossing_commit(False, True, True)
+        active = self.game.update_legal_crossing_commit(active, False, False, on_road=True)
+        self.assertTrue(active)
+        active = self.game.update_legal_crossing_commit(active, False, False, on_road=False)
+        self.assertFalse(active)
+
     def test_green_crossing_without_commit_is_not_legal(self):
         self.assertFalse(
             self.game.crosswalk_crossing_is_legal(on_car_red=False, legal_commit_active=False)

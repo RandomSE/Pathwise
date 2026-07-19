@@ -193,7 +193,14 @@ class DecisionLogger:
             self._approach_start[road_index] = time.time()
             self._record("approach_road", road_index=road_index)
 
-    def note_road_crossed(self, road_index, light_state):
+    def note_road_crossed(
+        self,
+        road_index,
+        light_state,
+        *,
+        crossing_tier=None,
+        time_bonus_s=None,
+    ):
         started = self._approach_start.pop(road_index, None)
         commit_s = round(time.time() - started, 2) if started else None
         attempt = {
@@ -202,6 +209,10 @@ class DecisionLogger:
             "light_at_cross": light_state,
             "t": self._elapsed(),
         }
+        if crossing_tier is not None:
+            attempt["crossing_tier"] = crossing_tier
+        if time_bonus_s is not None:
+            attempt["time_bonus_s"] = float(time_bonus_s)
         self.crossing_attempts.append(attempt)
         if commit_s is not None:
             if commit_s < 1.2:
@@ -212,6 +223,13 @@ class DecisionLogger:
                 self._record("deliberate_commit", road_index=road_index, commit_time_s=commit_s)
             else:
                 self._record("commit", road_index=road_index, commit_time_s=commit_s)
+        if crossing_tier is not None or time_bonus_s is not None:
+            self._record(
+                "crossing_time_bonus",
+                road_index=road_index,
+                crossing_tier=crossing_tier,
+                time_bonus_s=time_bonus_s,
+            )
 
     def finalize(
         self,

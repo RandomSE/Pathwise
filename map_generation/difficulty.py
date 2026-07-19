@@ -1,6 +1,6 @@
 """Difficulty profiles and adaptive scaling from prior runs."""
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 
 
 @dataclass
@@ -15,6 +15,7 @@ class DifficultyProfile:
     unpredictability: float
     stride_scale: float = 1.0
     target_play_time_s: int = 120
+    route_time_margin: float = 1.05
     round_escalation: float = 0.0
 
     @classmethod
@@ -45,7 +46,8 @@ class DifficultyProfile:
         profile = cls.from_level(levels.get(preset.lower(), 0.45))
         preset_targets = {
             "easy": {
-                "target_play_time_s": 120,
+                "target_play_time_s": 50,
+                "route_time_margin": 1.05,
                 "min_crossings": 4,
                 "max_crossings": 6,
                 "stride_scale": 1.32,
@@ -53,7 +55,8 @@ class DifficultyProfile:
                 "spawn_rate_mult": round(min(1.35, profile.spawn_rate_mult * 2.0), 3),
             },
             "normal": {
-                "target_play_time_s": 180,
+                "target_play_time_s": 65,
+                "route_time_margin": 1.10,
                 "min_crossings": 5,
                 "max_crossings": 7,
                 "stride_scale": 1.42,
@@ -61,7 +64,8 @@ class DifficultyProfile:
                 "spawn_rate_mult": round(min(1.35, profile.spawn_rate_mult * 2.0), 3),
             },
             "hard": {
-                "target_play_time_s": 300,
+                "target_play_time_s": 80,
+                "route_time_margin": 1.15,
                 "min_crossings": 6,
                 "max_crossings": 9,
                 "stride_scale": 1.52,
@@ -105,6 +109,7 @@ class DifficultyProfile:
         )
         profile.stride_scale = round(base.stride_scale + 0.10 * t, 3)
         profile.target_play_time_s = int(base.target_play_time_s * (1.0 + 0.06 * t))
+        profile.route_time_margin = round(base.route_time_margin + 0.04 * t, 3)
         profile.car_speed_mult = round(min(1.35, base.car_speed_mult + 0.14 * t), 3)
         profile.spawn_rate_mult = round(min(1.35, base.spawn_rate_mult + 0.22 * t), 3)
         profile.light_cycle_scale = round(max(0.72, base.light_cycle_scale - 0.14 * t), 3)
@@ -116,6 +121,28 @@ class DifficultyProfile:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def with_adaptive_traffic(self, prior_session: dict | None) -> "DifficultyProfile":
+        """
+        Keep preset map size and route timer; tune traffic/lights from prior run only.
+
+        When adaptive_map is on, map generation must not replace the menu preset with
+        a bare from_level() profile (that inflates crossings and ignores route_time_margin).
+        """
+        if not prior_session:
+            return self
+        adapted = adaptive_difficulty(prior_session)
+        return replace(
+            self,
+            level=adapted.level,
+            car_speed_mult=adapted.car_speed_mult,
+            spawn_rate_mult=adapted.spawn_rate_mult,
+            light_cycle_scale=adapted.light_cycle_scale,
+            traffic_density=min(
+                1.0, (self.traffic_density + adapted.traffic_density) * 0.5
+            ),
+            unpredictability=adapted.unpredictability,
+        )
 
 
 def adaptive_difficulty(prior_session: dict | None) -> DifficultyProfile:

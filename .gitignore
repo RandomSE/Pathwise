@@ -35,7 +35,7 @@ spectate_dashboard.html
 tmp_spectate/
 tmp_spectate*/
 
-# Local debug scratch — never commit
+# Local debug scratch: never commit
 tmp/
 
 # Kodaelus / agent bug investigation (local only)

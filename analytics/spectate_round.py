@@ -2,9 +2,9 @@
 Run a full Pathwise round headless with synthetic sim-time and anomaly tracking.
 
 Produces:
-  - spectate_log.json      — session log (replay frames + metadata)
-  - spectate_report.json   — anomaly timeline + metrics
-  - spectate_dashboard.html — accelerated replay viewer (default 8×)
+  - spectate_log.json     : session log (replay frames + metadata)
+  - spectate_report.json  : anomaly timeline + metrics
+  - spectate_dashboard.html: accelerated replay viewer (default 8×)
 
 Example:
   python -m analytics.spectate_round --seed 1890416619

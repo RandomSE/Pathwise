@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class RenderBudget:
-    """No-op stub — quality stays locked; env override remains in gameplay_framebuffer."""
+    """No-op stub: quality stays locked; env override remains in gameplay_framebuffer."""
 
     multiplier: float = 1.0
 

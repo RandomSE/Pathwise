@@ -134,26 +134,26 @@ def _build_insights(
 ):
     insights = []
     if hesitation_s > 2:
-        insights.append(f"Paused for {hesitation_s:.1f}s total—shows deliberate evaluation before acting.")
+        insights.append(f"Paused for {hesitation_s:.1f}s total, which shows deliberate evaluation before acting.")
     elif hesitation_s < 0.5 and session.get("crossings", 0) > 0:
         insights.append("Rarely hesitated at crossings; decisions came quickly.")
 
     if backtracks > 2:
-        insights.append(f"Backtracked {backtracks} times—reconsidered path or retreated from danger.")
+        insights.append(f"Backtracked {backtracks} times; reconsidered path or retreated from danger.")
     elif backtracks == 0 and session.get("crossings", 0) > 1:
         insights.append("Moved forward consistently without reversing course.")
 
     if red_crosses > green_crosses and red_crosses > 0:
-        insights.append("Often crossed while traffic had priority—higher risk tolerance.")
+        insights.append("Often crossed while traffic had priority; higher risk tolerance.")
     elif green_crosses > 0 and red_crosses == 0:
-        insights.append("Aligned crossings with favorable signals—strong rule awareness.")
+        insights.append("Aligned crossings with favorable signals; strong rule awareness.")
 
     if quick_commits >= 2:
-        insights.append("Multiple fast commits at roads—acts decisively once opportunity appears.")
+        insights.append("Multiple fast commits at roads; acts decisively once opportunity appears.")
 
     if risky_risks >= 3:
         insights.append(
-            f"Logged {risky_risks} risky moves—comfort operating in tight traffic windows."
+            f"Logged {risky_risks} risky moves; comfortable operating in tight traffic windows."
         )
     elif risky_risks == 0 and session.get("outcome") == "success":
         insights.append("Completed run with zero flagged risky moves.")

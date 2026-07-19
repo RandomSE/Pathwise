@@ -349,25 +349,58 @@ def _draw_crosswalk_pil(draw, crosswalk: Rect, origin: tuple[int, int]) -> None:
             draw.line((left, sy, right, sy), fill=stripe_color, width=2)
 
 
+def _draw_traffic_housing_box_pil(
+    draw,
+    housing: Rect,
+    origin: tuple[int, int],
+) -> None:
+    h_left = housing.left - origin[0]
+    h_top = housing.top - origin[1]
+    h_right = housing.right - origin[0]
+    h_bottom = housing.bottom - origin[1]
+    _draw_round_rect(draw, (h_left, h_top, h_right, h_bottom), fill=_rgba((25, 25, 25)), radius=2)
+    _draw_round_rect(
+        draw,
+        (h_left, h_top, h_right, h_bottom),
+        outline=_rgba((70, 70, 70)),
+        width=2,
+        radius=2,
+    )
+
+
+def redraw_crosswalks_and_housing_pil(draw, road_states: list, origin: tuple[int, int]) -> None:
+    """Re-draw crosswalk stripes and signal housings (not bulbs) over wet-road bake."""
+    from pathwise.modifiers import highway, lawless
+
+    draw_housing = lawless.signals_enabled() and highway.signals_enabled()
+    seen_crosswalk: set[tuple[int, int, int, int]] = set()
+    for state in road_states:
+        crosswalk = state["crosswalk"]
+        key = (crosswalk.x, crosswalk.y, crosswalk.w, crosswalk.h)
+        if key in seen_crosswalk:
+            continue
+        seen_crosswalk.add(key)
+        _draw_crosswalk_pil(draw, crosswalk, origin)
+        if not draw_housing:
+            continue
+        approach = state.get("approach", "west")
+        housing = traffic_housing_rect(crosswalk, state["direction"], approach)
+        _draw_traffic_housing_box_pil(draw, housing, origin)
+
+
 def _draw_traffic_static_pil(draw, road_states: list, origin: tuple[int, int]) -> None:
+    from pathwise.modifiers import highway, lawless
+
+    draw_signals = lawless.signals_enabled() and highway.signals_enabled()
     for state in road_states:
         crosswalk = state["crosswalk"]
         _draw_crosswalk_pil(draw, crosswalk, origin)
+        if not draw_signals:
+            continue
 
         approach = state.get("approach", "west")
         housing = traffic_housing_rect(crosswalk, state["direction"], approach)
-        h_left = housing.left - origin[0]
-        h_top = housing.top - origin[1]
-        h_right = housing.right - origin[0]
-        h_bottom = housing.bottom - origin[1]
-        _draw_round_rect(draw, (h_left, h_top, h_right, h_bottom), fill=_rgba((25, 25, 25)), radius=2)
-        _draw_round_rect(
-            draw,
-            (h_left, h_top, h_right, h_bottom),
-            outline=_rgba((70, 70, 70)),
-            width=2,
-            radius=2,
-        )
+        _draw_traffic_housing_box_pil(draw, housing, origin)
         for bx, by in _bulb_positions_pil(
             housing, state["direction"], approach, origin
         ):
@@ -443,6 +476,23 @@ def _tile_baked_image(img: Image.Image, world_bounds: Rect, map_id: str) -> tupl
             )
             tiles.append(MapTile(world_rect=world_rect, texture=tile_texture))
     return tuple(tiles)
+
+
+def apply_rainy_road_overlay(
+    baked: BakedMapLayer,
+    *,
+    road_states: list,
+    session_base_seed: int,
+    round_index: int,
+) -> BakedMapLayer:
+    from pathwise.modifiers.weather_visuals import bake_rainy_road_overlay
+
+    return bake_rainy_road_overlay(
+        baked,
+        road_states=road_states,
+        session_base_seed=session_base_seed,
+        round_index=round_index,
+    )
 
 
 def draw_baked_map(

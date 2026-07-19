@@ -591,6 +591,102 @@ def make_pedestrian_surface(size=PEDESTRIAN_SIZE) -> SpriteAsset:
 
 
 _honk_label: arcade.Text | None = None
+_slip_trip_label: arcade.Text | None = None
+_time_bonus_label: arcade.Text | None = None
+
+
+def draw_slip_trip_message(sim_height: int, ped_rect, camera_offset, layout=None):
+    """Trip feedback while the player is slip-stunned."""
+    from pathwise.modifiers.rainy_roads import SLIP_TRIP_MESSAGE
+
+    global _slip_trip_label
+    shifted = ped_rect.move(-camera_offset[0], -camera_offset[1])
+    cx = shifted.centerx
+    cy = shifted.top - 8
+    from .pathwise_render import sim_point_to_arcade, sim_rect_to_arcade_lbwh
+    from .viewport import DisplayLayout
+
+    font_size = 14
+    if isinstance(layout, DisplayLayout):
+        font_size = layout.map_font_size(14)
+
+    if _slip_trip_label is None:
+        _slip_trip_label = arcade.Text(
+            SLIP_TRIP_MESSAGE,
+            0,
+            0,
+            (80, 60, 120),
+            font_size=font_size,
+            anchor_x="center",
+            anchor_y="center",
+        )
+    label = _slip_trip_label
+    label.text = SLIP_TRIP_MESSAGE
+    label.font_size = font_size
+    pad_x, pad_y = 10, 6
+    bubble_w = label.content_width + pad_x * 2
+    bubble_h = label.content_height + pad_y * 2
+    bubble_cx = cx
+    bubble_cy = cy - 18
+    left = bubble_cx - bubble_w // 2
+    top = bubble_cy - bubble_h // 2
+    lbwh = sim_rect_to_arcade_lbwh(left, top, bubble_w, bubble_h, sim_height, layout)
+    outline_w = layout.map_line_width(2) if isinstance(layout, DisplayLayout) else 2
+    arcade.draw_lbwh_rectangle_filled(lbwh[0], lbwh[1], lbwh[2], lbwh[3], (235, 228, 255))
+    arcade.draw_lbwh_rectangle_outline(
+        lbwh[0], lbwh[1], lbwh[2], lbwh[3], (120, 90, 180), outline_w
+    )
+    tx, ty = sim_point_to_arcade(bubble_cx, bubble_cy, sim_height, layout)
+    label.x = tx
+    label.y = ty
+    label.draw()
+
+
+def draw_time_bonus_popup(
+    sim_height: int, ped_rect, camera_offset, text: str, layout=None
+):
+    """Brief +Ns feedback above the player after a time-pressure crossing bonus."""
+    global _time_bonus_label
+    shifted = ped_rect.move(-camera_offset[0], -camera_offset[1])
+    cx = shifted.centerx
+    cy = shifted.top - 28
+    from .pathwise_render import sim_point_to_arcade, sim_rect_to_arcade_lbwh
+    from .viewport import DisplayLayout
+
+    font_size = 16
+    if isinstance(layout, DisplayLayout):
+        font_size = layout.map_font_size(16)
+
+    if _time_bonus_label is None:
+        _time_bonus_label = arcade.Text(
+            text,
+            0,
+            0,
+            (20, 90, 50),
+            font_size=font_size,
+            anchor_x="center",
+            anchor_y="center",
+        )
+    label = _time_bonus_label
+    label.text = text
+    label.font_size = font_size
+    pad_x, pad_y = 8, 4
+    bubble_w = label.content_width + pad_x * 2
+    bubble_h = label.content_height + pad_y * 2
+    bubble_cx = cx
+    bubble_cy = cy
+    left = bubble_cx - bubble_w // 2
+    top = bubble_cy - bubble_h // 2
+    lbwh = sim_rect_to_arcade_lbwh(left, top, bubble_w, bubble_h, sim_height, layout)
+    outline_w = layout.map_line_width(2) if isinstance(layout, DisplayLayout) else 2
+    arcade.draw_lbwh_rectangle_filled(lbwh[0], lbwh[1], lbwh[2], lbwh[3], (210, 245, 220))
+    arcade.draw_lbwh_rectangle_outline(
+        lbwh[0], lbwh[1], lbwh[2], lbwh[3], (40, 130, 70), outline_w
+    )
+    tx, ty = sim_point_to_arcade(bubble_cx, bubble_cy, sim_height, layout)
+    label.x = tx
+    label.y = ty
+    label.draw()
 
 
 def draw_honk_bubble(sim_height: int, car_rect, camera_offset, layout=None):

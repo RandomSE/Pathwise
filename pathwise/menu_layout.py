@@ -28,10 +28,10 @@ def _fit_stack_heights(heights: list[int], *, max_height: int, gap: int) -> list
     if total <= max_height:
         return heights
     scale = max_height / total
-    fitted = [max(20, int(h * scale)) for h in heights]
+    fitted = [max(14, int(h * scale)) for h in heights]
     while sum(fitted) + gap * max(0, len(fitted) - 1) > max_height:
         tallest = max(range(len(fitted)), key=lambda i: fitted[i])
-        if fitted[tallest] <= 20:
+        if fitted[tallest] <= 14:
             break
         fitted[tallest] -= 1
     return fitted
@@ -84,7 +84,10 @@ class RecruiterLayout:
     difficulty_label_top: int
     preset_rects: dict[str, Rect]
     modifiers_label_top: int
-    modifiers_hint_top: int
+    modifier_toggle_rects: dict[str, Rect]
+    modifier_action_rects: dict[str, Rect]
+    modifier_info_label_top: int
+    modifier_explain_rect: Rect
     stale_hint_top: int
     generated_label_top: int
     seed_display_rect: Rect
@@ -109,8 +112,10 @@ def layout_candidate(width: int, height: int) -> CandidateLayout:
     stack_h = error_h + gap + label_h + gap + seed_h + gap + play_h + gap + configure_h
     top_margin = subtitle_top + int(24 * scale)
     start = max(_centered_start(height, stack_h, top_margin=top_margin), top_margin)
-    tops = _stack_tops(start, [error_h, label_h, seed_h, play_h, configure_h], gap)
+    block_heights = [error_h, label_h, seed_h, play_h, configure_h]
+    tops = _stack_tops(start, block_heights, gap)
     seed_top = tops[2]
+    play_top = tops[3]
     return CandidateLayout(
         title_top=title_top,
         subtitle_top=subtitle_top,
@@ -118,7 +123,7 @@ def layout_candidate(width: int, height: int) -> CandidateLayout:
         seed_label_top=tops[1] + label_h // 2,
         seed_field_rect=Rect(cx - 210, seed_top, 268, seed_h),
         paste_rect=Rect(cx + 70, seed_top, 80, seed_h),
-        play_rect=Rect(cx - 120, tops[3], 240, play_h),
+        play_rect=Rect(cx - 120, play_top, 240, play_h),
         configure_rect=Rect(cx - 120, tops[4], 240, configure_h),
     )
 
@@ -129,6 +134,7 @@ def layout_recruiter(
     *,
     num_rounds: int,
     show_stale_hint: bool,
+    modifier_ids: tuple[str, ...] = (),
 ) -> RecruiterLayout:
     cx = width // 2
     gap = _gap(height)
@@ -140,7 +146,7 @@ def layout_recruiter(
     difficulty_label_h = _scaled(18, height)
     preset_h = _scaled(48, height)
     modifiers_label_h = _scaled(16, height)
-    modifiers_hint_h = _scaled(16, height)
+    toggle_h = _scaled(34, height)
     stale_h = _scaled(18, height) if show_stale_hint else 0
     generated_label_h = _scaled(16, height)
     seed_h = _scaled(34, height)
@@ -157,79 +163,113 @@ def layout_recruiter(
         preset_h,
         preset_h,
         modifiers_label_h,
-        modifiers_hint_h,
-        stale_h,
-        generated_label_h,
-        seed_h,
-        action_h,
-        start_h,
-        back_h,
     ]
+    heights.extend([toggle_h] * max(1, len(modifier_ids)))
+    heights.extend([stale_h, generated_label_h, seed_h, action_h, start_h, back_h])
     heights = [h for h in heights if h > 0]
-    top_margin = subtitle_top + int(20 * _compact_scale(height))
+    top_margin = subtitle_top + int(28 * _compact_scale(height))
     max_stack = height - top_margin - MENU_FOOTER_HEIGHT - 8
-    heights = _fit_stack_heights(heights, max_height=max_stack, gap=gap)
-    stack_h = sum(heights) + gap * (len(heights) - 1)
+    # Prefer a slightly tighter gap when the stack is dense.
+    pack_gap = gap if sum(heights) + gap * (len(heights) - 1) <= max_stack else max(6, gap - 2)
+    heights = _fit_stack_heights(heights, max_height=max_stack, gap=pack_gap)
+    stack_h = sum(heights) + pack_gap * (len(heights) - 1)
     start = max(_centered_start(height, stack_h, top_margin=top_margin), top_margin)
-    tops = _stack_tops(start, heights, gap)
+    tops = _stack_tops(start, heights, pack_gap)
 
     index = 0
-    rounds_label_top = tops[index] + rounds_label_h // 2
+    rounds_label_top = tops[index] + heights[index] // 2
     index += 1
     rounds_top = tops[index]
+    fitted_rounds_h = heights[index]
     index += 1
     rounds_hint_top: int | None = None
     if num_rounds > 1:
-        rounds_hint_top = tops[index] + rounds_hint_h // 2
+        rounds_hint_top = tops[index] + heights[index] // 2
         index += 1
-    difficulty_top = tops[index] + difficulty_label_h // 2
+    difficulty_top = tops[index] + heights[index] // 2
     index += 1
 
     preset_rects: dict[str, Rect] = {}
     for preset_id in ("easy", "normal", "hard"):
-        preset_rects[preset_id] = Rect(cx - 200, tops[index], 400, preset_h)
+        preset_rects[preset_id] = Rect(cx - 200, tops[index], 400, heights[index])
         index += 1
 
-    modifiers_top = tops[index] + modifiers_label_h // 2
+    modifiers_top = tops[index] + heights[index] // 2
     index += 1
-    modifiers_hint_top = tops[index] + modifiers_hint_h // 2
-    index += 1
+
+    modifier_toggle_rects: dict[str, Rect] = {}
+    modifier_action_rects: dict[str, Rect] = {}
+    toggle_ids = modifier_ids or ("rainy_roads",)
+    first_toggle_top = tops[index] if toggle_ids else modifiers_top
+    action_w = 44
+    for modifier_id in toggle_ids:
+        row_top = tops[index]
+        row_h = heights[index]
+        modifier_toggle_rects[modifier_id] = Rect(
+            cx - 200, row_top, 400 - action_w - 8, row_h
+        )
+        modifier_action_rects[modifier_id] = Rect(
+            cx + 200 - action_w, row_top, action_w, row_h
+        )
+        index += 1
 
     stale_top = 0
     if show_stale_hint:
-        stale_top = tops[index] + stale_h // 2
+        stale_top = tops[index] + heights[index] // 2
         index += 1
 
-    generated_top = tops[index] + generated_label_h // 2
+    generated_top = tops[index] + heights[index] // 2
     index += 1
     seed_top = tops[index]
+    fitted_seed_h = heights[index]
     index += 1
     generate_top = tops[index]
+    fitted_action_h = heights[index]
     index += 1
     start_top = tops[index]
+    fitted_start_h = heights[index]
     index += 1
     back_top = tops[index]
+    fitted_back_h = heights[index]
+
+    # Side panel: ~4x the old 400x40 explain slot, right of the centered controls.
+    panel_w = max(360, min(520, width // 3 + 40))
+    panel_h = max(180, min(280, int(height * 0.32)))
+    panel_left = width - panel_w - 24
+    # Keep panel clear of the centered 400px control column.
+    min_left = cx + 200 + 24
+    if panel_left < min_left:
+        panel_left = min_left
+        panel_w = max(280, width - panel_left - 16)
+    panel_top = max(subtitle_top + 8, first_toggle_top - 28)
+    if panel_top + panel_h > height - MENU_FOOTER_HEIGHT - 8:
+        panel_top = max(8, height - MENU_FOOTER_HEIGHT - 8 - panel_h)
+    info_label_top = panel_top
+    explain_rect = Rect(panel_left, panel_top + 28, panel_w, panel_h - 28)
 
     return RecruiterLayout(
         title_top=title_top,
         subtitle_top=subtitle_top,
         rounds_label_top=rounds_label_top,
-        minus_rect=Rect(cx - 120, rounds_top, 44, rounds_h),
-        plus_rect=Rect(cx + 76, rounds_top, 44, rounds_h),
-        rounds_value_top=rounds_top + rounds_h // 2,
+        minus_rect=Rect(cx - 120, rounds_top, 44, fitted_rounds_h),
+        plus_rect=Rect(cx + 76, rounds_top, 44, fitted_rounds_h),
+        rounds_value_top=rounds_top + fitted_rounds_h // 2,
         rounds_hint_top=rounds_hint_top,
         difficulty_label_top=difficulty_top,
         preset_rects=preset_rects,
         modifiers_label_top=modifiers_top,
-        modifiers_hint_top=modifiers_hint_top,
+        modifier_toggle_rects=modifier_toggle_rects,
+        modifier_action_rects=modifier_action_rects,
+        modifier_info_label_top=info_label_top,
+        modifier_explain_rect=explain_rect,
         stale_hint_top=stale_top,
         generated_label_top=generated_top,
-        seed_display_rect=Rect(cx - 210, seed_top, 268, seed_h),
-        copy_rect=Rect(cx + 70, seed_top, 80, seed_h),
+        seed_display_rect=Rect(cx - 210, seed_top, 268, fitted_seed_h),
+        copy_rect=Rect(cx + 70, seed_top, 80, fitted_seed_h),
         copy_feedback_top=seed_top - 6,
-        generate_rect=Rect(cx - 120, generate_top, 240, action_h),
-        start_rect=Rect(cx - 120, start_top, 240, start_h),
-        back_rect=Rect(cx - 120, back_top, 240, back_h),
+        generate_rect=Rect(cx - 120, generate_top, 240, fitted_action_h),
+        start_rect=Rect(cx - 120, start_top, 240, fitted_start_h),
+        back_rect=Rect(cx - 120, back_top, 240, fitted_back_h),
     )
 
 
@@ -258,7 +298,8 @@ def layout_vertical_spans(layout: CandidateLayout | RecruiterLayout) -> list[tup
     spans.append((layout.difficulty_label_top - 10, layout.difficulty_label_top + 10))
     spans.extend((rect.top, rect.bottom) for rect in layout.preset_rects.values())
     spans.append((layout.modifiers_label_top - 9, layout.modifiers_label_top + 9))
-    spans.append((layout.modifiers_hint_top - 9, layout.modifiers_hint_top + 9))
+    spans.extend((rect.top, rect.bottom) for rect in layout.modifier_toggle_rects.values())
+    # Action +/- buttons share the toggle row; do not double-count vertical spans.
     if layout.stale_hint_top > 0:
         spans.append((layout.stale_hint_top - 9, layout.stale_hint_top + 9))
     spans.append((layout.generated_label_top - 9, layout.generated_label_top + 9))

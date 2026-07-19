@@ -1,10 +1,10 @@
-"""Round performance profiler — shareable lag diagnosis (JSONL + HTML report).
+"""Round performance profiler: shareable lag diagnosis (JSONL + HTML report).
 
 Enable with environment variable ``PATHWISE_PERF_PROFILE=1`` before launching the game.
 
 Outputs (project root):
-- ``perf_profile.jsonl`` — sampled per-frame timings + growth counters
-- ``perf_report.html``  — charts and regression summary (open in browser)
+- ``perf_profile.jsonl``: sampled per-frame timings + growth counters
+- ``perf_report.html`` : charts and regression summary (open in browser)
 
 Share both files when reporting progressive FPS drops.
 """
@@ -338,7 +338,7 @@ def build_perf_report_html(
 </head>
 <body>
   <h1>Pathwise performance report</h1>
-  <p class="sub">Generated from <code>{jsonl_path}</code> — share this HTML + JSONL for lag diagnosis.</p>
+  <p class="sub">Generated from <code>{jsonl_path}</code>: share this HTML + JSONL for lag diagnosis.</p>
   <div class="card" id="summary"></div>
   <div class="card"><h2>Frame time (ms)</h2><canvas id="chart-total" width="960" height="220"></canvas></div>
   <div class="card"><h2>Update vs draw (ms)</h2><canvas id="chart-split" width="960" height="220"></canvas></div>
@@ -391,7 +391,7 @@ def build_perf_report_html(
     const causes = (summary.likely_causes || []).map(c => '<li>' + esc(c) + '</li>').join('');
     const timing = summary.timing || {{}};
     document.getElementById('summary').innerHTML =
-      '<h2>Round ' + esc(summary.round || '?') + ' — ' + esc(summary.outcome || '') + '</h2>' +
+      '<h2>Round ' + esc(summary.round || '?') + ': ' + esc(summary.outcome || '') + '</h2>' +
       '<p><span class="tag">' + esc(summary.duration_s || 0) + 's</span>' +
       '<span class="tag">' + esc(summary.samples || 0) + ' samples</span></p>' +
       '<p>Total frame: <strong>' + esc(timing.total_ms_first10pct) + 'ms</strong> (early) → ' +

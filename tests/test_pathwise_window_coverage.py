@@ -93,12 +93,19 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         window._elapsed = 0.0
         window._smoke_mode = False
         window._config = None
+        window._pending_config = None
+        window._modifiers_from_recruiter = False
+        window._disclaimer_accepted = False
+        window._disclaimer_return_to = "candidate"
         window._base_profile = None
         window._round_index = 1
         window._outcomes = []
         window._seed_text = ""
+        window._recruiter_generated_text = ""
         window.show_view = MagicMock()
         window.closed = False
+        window.set_update_rate = MagicMock()
+        window.set_draw_rate = MagicMock()
         return window
 
     def test_smoke_auto_close(self):
@@ -167,6 +174,7 @@ class TestPathwiseWindowFlow(unittest.TestCase):
     @patch("pathwise.pathwise_window.resolve_candidate_play_seed", return_value=(5, "menu", False))
     def test_on_pre_game_done_starts_session(self, resolve_seed, start_round, profiler, diag):
         window = self._window()
+        window._disclaimer_accepted = True
         config = SessionConfig(preset="normal", num_rounds=1, seed=5)
         window._on_pre_game_done(config)
         resolve_seed.assert_called_once_with(5)
@@ -180,11 +188,84 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         window._on_pre_game_done(None)
         close.assert_called_once()
 
+    def test_pre_game_done_without_disclaimer_blocks_start(self):
+        window = self._window()
+        config = SessionConfig(preset="normal", num_rounds=1, seed=5)
+        with patch.object(window, "_commit_session_start") as commit:
+            window._on_pre_game_done(config)
+            commit.assert_not_called()
+        self.assertIs(window._pending_config, config)
+        shown = window.show_view.call_args.args[0]
+        self.assertIsInstance(shown, pre_game.DisclaimerView)
+
+    def test_recruiter_start_without_disclaimer_blocks_start(self):
+        window = self._window()
+        config = SessionConfig(preset="hard", num_rounds=1, seed=9, audience="recruiter")
+        with patch.object(window, "_commit_session_start") as commit:
+            window._on_recruiter_start(config)
+            commit.assert_not_called()
+        shown = window.show_view.call_args.args[0]
+        self.assertIsInstance(shown, pre_game.DisclaimerView)
+        self.assertEqual(window._disclaimer_return_to, "recruiter")
+
+    @patch("main.car_diagnostics")
+    @patch("main.perf_profiler")
+    @patch("main.ENABLE_PERF_PROFILE", False)
+    @patch("main.start_round")
+    @patch("main.session_num_rounds", 1)
+    @patch("main.session_base_seed", 1)
+    @patch("main.session_seed_source", "menu")
+    @patch("main.session_use_adaptive_map", False)
+    @patch("main.round_results", [])
+    @patch("pathwise.pathwise_window.resolve_candidate_play_seed", return_value=(5, "menu", False))
+    def test_disclaimer_agree_then_starts_session(self, resolve_seed, start_round, _profiler, diag):
+        window = self._window()
+        config = SessionConfig(preset="normal", num_rounds=1, seed=5)
+        window._on_pre_game_done(config)
+        start_round.assert_not_called()
+        window._on_disclaimer_agreed()
+        self.assertTrue(window._disclaimer_accepted)
+        resolve_seed.assert_called_once_with(5)
+        diag.begin_session.assert_called_once()
+        start_round.assert_called_once()
+
+    @patch("main.app_running", True)
+    @patch("main.round_results", [{"outcome": "trip"}])
+    @patch("main.session_num_rounds", 1)
+    def test_trip_shows_notice_before_round_over(self):
+        window = self._window()
+        window._round_index = 1
+        window._config = SessionConfig(preset="normal")
+        with patch.object(window, "_finish_session") as finish:
+            window._on_round_done()
+            finish.assert_not_called()
+        self.assertEqual(window._outcomes, ["trip"])
+        notice = window.show_view.call_args.args[0]
+        self.assertIsInstance(notice, pre_game.MessageView)
+        self.assertEqual(notice.title, pre_game.TRIP_NOTICE_TITLE)
+        window.show_view.reset_mock()
+        with patch("main.save_session_log", return_value="dash.html"):
+            with patch("main.session_base_seed", 1):
+                with patch("main.round_results", [{"outcome": "trip", "session": {}}]):
+                    # After notice, continue into session complete.
+                    window._continue_after_round_outcome()
+        shown = window.show_view.call_args.args[0]
+        self.assertIsInstance(shown, pre_game.MessageView)
+        self.assertIn("Tripped", shown.title)
+
     @patch("main.app_running", True)
     @patch("main.start_round")
     def test_start_round_play(self, _start):
         window = self._window()
-        window._start_round_play()
+        import main as game
+
+        previous = game.start_time
+        try:
+            with patch("time.time", return_value=1234.5):
+                window._start_round_play()
+            self.assertEqual(game.start_time, 1234.5)
+        finally:
+            game.start_time = previous
         window.show_view.assert_called()
 
     @patch("pathwise.pathwise_window.PathwiseWindow")
@@ -210,7 +291,9 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         candidate._on_configure("seed-from-candidate")
         recruiter = window.show_view.call_args.args[0]
         self.assertIsInstance(recruiter, pre_game.RecruiterConfigView)
-        self.assertEqual(recruiter.generated_seed_text, "seed-from-candidate")
+        # Opening recruiter from candidate starts blank; candidate seed stays in window state.
+        self.assertEqual(recruiter.generated_seed_text, "")
+        self.assertEqual(window._seed_text, "seed-from-candidate")
         recruiter._on_back("generated-99")
         self.assertEqual(window._seed_text, "generated-99")
         window.show_view.assert_called()
@@ -230,6 +313,7 @@ class TestPathwiseWindowFlow(unittest.TestCase):
     @patch("pathwise.pathwise_window.resolve_candidate_play_seed", return_value=(50, "menu", False))
     def test_recruiter_start_starts_session(self, _resolve, start_round, _profiler, _diag):
         window = self._window()
+        window._disclaimer_accepted = True
         config = SessionConfig(preset="hard", num_rounds=3, seed=50)
         window._on_recruiter_start(config)
         start_round.assert_called_once()

@@ -32,6 +32,18 @@ def _game():
 
 def update_light_timers(road_states, elapsed):
     m = _game()
+    from pathwise.modifiers import highway, lawless
+
+    if not lawless.signals_enabled() or not highway.signals_enabled():
+        for state in road_states:
+            state["light_state"] = "off"
+            state["seconds_to_change"] = 0.0
+            state["next_light"] = "off"
+            state["turn_light_state"] = "off"
+            state["turn_seconds_to_change"] = 0.0
+            state["next_turn_light"] = "off"
+        return
+
     for state in road_states:
         arm_vertical = state["direction"] == "vertical"
         light, secs, nxt = seconds_to_change_arm(
@@ -50,6 +62,9 @@ def update_light_timers(road_states, elapsed):
 
 
 def serialize_lights_for_frame(road_states):
+    from pathwise.modifiers import highway, lawless
+
+    enabled = lawless.signals_enabled() and highway.signals_enabled()
     return [
         {
             "s": state["light_state"],
@@ -58,12 +73,18 @@ def serialize_lights_for_frame(road_states):
             "tin": round(state.get("turn_seconds_to_change", 0), 1),
             "next": state.get("next_light", "green"),
             "tnext": state.get("next_turn_light", "green"),
+            "enabled": enabled,
         }
         for state in road_states
     ]
 
 
 def build_road_states(roads):
+    from pathwise.modifiers import highway
+
+    if not highway.crosswalks_enabled():
+        return []
+
     m = _game()
     road_id_to_index = {id(road): idx for idx, road in enumerate(roads)}
 

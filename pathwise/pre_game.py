@@ -13,8 +13,14 @@ from .arcade_loop import pump_frame
 from .geom import Rect
 from map_generation.difficulty import DifficultyProfile
 from .menu_layout import CandidateLayout, RecruiterLayout, layout_candidate, layout_recruiter
+from pathwise.modifiers.registry import (
+    MODIFIER_CATALOG,
+    available_modifier_ids,
+    modifier_is_blocked,
+)
 from .session_seed import (
     MAP_SEED_MOD,
+    MAP_SEED_MOD_V9,
     SeedInputState,
     classify_seed_input,
     decode_recruiter_seed,
@@ -33,13 +39,24 @@ MENU_ERROR = (220, 53, 69)
 MIN_ROUNDS = 1
 MAX_ROUNDS = 5
 DEFAULT_ROUNDS = 1
-MAX_SEED_DIGITS = 10
+MAX_SEED_DIGITS = 12
 
 ROUND_CONTROLS_HINT = (
     "Move: Arrow keys or WASD\n"
     "Sprint: Shift - toggle 2× speed (risky on roads & crosswalks; \n stops when you enter road)"
 )
 ROUND_START_PROMPT = "Click or press any key to go"
+
+ROUND_OUTCOME_LABELS = {
+    "success": "Goal reached",
+    "collision": "Collision",
+    "timeout": "Time expired",
+    "trip": "Tripped",
+}
+
+
+def round_outcome_label(outcome: str) -> str:
+    return ROUND_OUTCOME_LABELS.get(outcome, outcome.replace("_", " ").title())
 
 DIFFICULTY_PRESETS = [
     ("easy", "Easy", "Relaxed traffic · forgiving timing"),
@@ -48,9 +65,26 @@ DIFFICULTY_PRESETS = [
 ]
 
 INVALID_SEED_MESSAGE = "That is an invalid seed"
-STALE_SEED_MESSAGE = "Settings changed — regenerate seed"
+STALE_SEED_MESSAGE = "Settings changed; regenerate seed"
 COPY_FEEDBACK_SECONDS = 1.5
 COPY_FEEDBACK_MESSAGE = "Copied!"
+
+DISCLAIMER_TITLE = "Safety disclaimer"
+DISCLAIMER_AGREE_LABEL = "I understand and agree"
+DISCLAIMER_BODY = (
+    "Pathwise is a fictional educational and assessment simulation only. "
+    "It is not training for real traffic, and it is not advice about "
+    "crossing roads or highways in the real world.\n\n"
+    "Do not copy anything you see here in real life. Never walk into "
+    "traffic, cross against signals, or enter highways or roadway lanes "
+    "outside a controlled, lawful setting. Real roads and vehicles can "
+    "cause serious injury or death.\n\n"
+    "By continuing you confirm you understand this is a simulation and "
+    "you will not treat Pathwise as guidance for real-world road "
+    "behavior."
+)
+TRIP_NOTICE_TITLE = "You tripped"
+TRIP_NOTICE_ACCENT = "Click or press any key to continue"
 
 
 @dataclass
@@ -58,6 +92,9 @@ class SessionConfig:
     preset: str
     num_rounds: int = DEFAULT_ROUNDS
     seed: int | None = None
+    modifiers: frozenset[str] = frozenset()
+    # "candidate" conceals HUD / other modifiers under Hidden; "recruiter" sees all.
+    audience: str = "candidate"
 
 
 def _parse_seed_text(text: str) -> int | None:
@@ -81,10 +118,12 @@ def build_candidate_session_config(seed_text: str) -> SessionConfig:
             preset=decoded.preset,
             num_rounds=decoded.num_rounds,
             seed=decoded.map_seed,
+            modifiers=decoded.modifiers,
+            audience="candidate",
         )
     state = classify_seed_input(seed_text)
     seed = parse_seed_value(seed_text) if state == "valid" else None
-    return SessionConfig(preset="normal", num_rounds=1, seed=seed)
+    return SessionConfig(preset="normal", num_rounds=1, seed=seed, audience="candidate")
 
 
 def build_recruiter_session_config(
@@ -100,6 +139,177 @@ def build_recruiter_session_config(
         preset=decoded.preset,
         num_rounds=decoded.num_rounds,
         seed=decoded.map_seed,
+        modifiers=decoded.modifiers,
+        audience="recruiter",
+    )
+
+
+def modifier_detail_lines(
+    modifiers: frozenset[str], *, audience: str = "candidate"
+) -> list[tuple[str, str]]:
+    from pathwise.modifiers import hidden
+
+    visible = hidden.visible_modifiers(modifiers, audience=audience)
+    lines: list[tuple[str, str]] = []
+    if {"rainy_roads", "time_pressure"} <= visible:
+        lines.append(
+            (
+                "Rain + Time pressure",
+                (
+                    "Together these start the timer at 20 seconds and make crossing "
+                    "bonuses 75% larger."
+                ),
+            )
+        )
+    for entry in MODIFIER_CATALOG:
+        if entry["id"] in visible:
+            lines.append((entry["title"], entry["description"]))
+    return lines
+
+
+def modifier_explain_body(modifier_id: str, active_modifiers: frozenset[str]) -> str | None:
+    """Body text for the recruiter modifier info panel."""
+    meta = next((entry for entry in MODIFIER_CATALOG if entry["id"] == modifier_id), None)
+    if meta is None:
+        return None
+    body = f"{meta['title']}\n\n{meta['description'].replace(chr(10), ' ')}"
+    if (
+        modifier_id in ("rainy_roads", "time_pressure")
+        and {"rainy_roads", "time_pressure"} <= active_modifiers
+    ):
+        body += (
+            "\n\nActive together now: timer starts at 20 seconds; crossing bonuses "
+            "are 75% larger."
+        )
+    return body
+
+
+POPUP_MODIFIER_TEXT_INSET = 48
+POPUP_HEADER_TOP = 36
+POPUP_HEADER_HEIGHT = 32
+POPUP_HEADER_GAP = 20
+POPUP_TITLE_DESC_GAP = 12
+POPUP_ENTRY_GAP = 20
+POPUP_TITLE_FONT = 20
+POPUP_DESC_FONT = 14
+POPUP_SCROLL_STEP = 28
+POPUP_CARD_BOTTOM_PAD = 16
+
+
+def _modifier_popup_text_width(card_width: int) -> int:
+    return max(200, card_width - POPUP_MODIFIER_TEXT_INSET)
+
+
+def wrap_text_words(
+    text: str,
+    *,
+    width_px: int,
+    font_size: int,
+    char_width_factor: float = 0.62,
+) -> str:
+    """Wrap text on word boundaries. Never splits a word across lines.
+
+    Pair with arcade.Text(multiline=True, width=multiline_text_width(...)).
+    Arcade requires a non-zero width for multiline; use multiline_text_width so
+    Arcade will not re-flow (and mid-word split) the pre-wrapped lines.
+    """
+    max_chars = max(8, int(width_px / max(0.1, font_size * char_width_factor)))
+    paragraphs = str(text).split("\n")
+    wrapped_paragraphs: list[str] = []
+    for paragraph in paragraphs:
+        raw = paragraph.strip()
+        if not raw:
+            wrapped_paragraphs.append("")
+            continue
+        words = raw.split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = word if not current else f"{current} {word}"
+            if not current or len(candidate) <= max_chars:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        wrapped_paragraphs.append("\n".join(lines))
+    return "\n".join(wrapped_paragraphs)
+
+
+def multiline_text_width(content_width_px: int) -> int:
+    """Non-zero Arcade multiline width that will not re-wrap pre-broken lines."""
+    # Arcade forbids width=None when multiline=True. A huge width keeps our
+    # explicit newlines as the only breaks (avoids mid-word reflow).
+    return max(10_000, int(content_width_px) * 4, 1)
+
+
+def modifier_desc_draw_x(card_left: int, card_width: int, *, text_width: int | None = None) -> int:
+    """Left x for left-aligned popup descriptions.
+
+    Arcade multiline Text left-aligns glyphs inside its width box. A huge
+    ``multiline_text_width`` plus ``anchor_x='center'`` places that box far left
+    of the card scissor, which hid descriptions while titles (no width) stayed
+    visible. Draw left-aligned at the centered content block instead.
+    """
+    tw = (
+        int(text_width)
+        if text_width is not None
+        else _modifier_popup_text_width(card_width)
+    )
+    return int(card_left) + max(0, (int(card_width) - tw) // 2)
+
+
+def _estimated_wrapped_text_height(text: str, *, font_size: int, width_px: int) -> int:
+    wrapped = wrap_text_words(text, width_px=width_px, font_size=font_size)
+    total_lines = max(1, len(wrapped.split("\n")))
+    # Arcade multiline line spacing is taller than font_size alone.
+    return int(total_lines * font_size * 1.9)
+
+
+def _safe_text_content_height(text: arcade.Text, *, fallback: int) -> int:
+    try:
+        height = int(text.content_height)
+    except (RuntimeError, TypeError, ValueError):
+        return fallback
+    return height if height > 0 else fallback
+
+
+def measure_modifier_popup_body_height(
+    card_width: int,
+    modifiers: frozenset[str],
+    *,
+    audience: str = "candidate",
+) -> int:
+    """Height of modifier entries only (below the fixed popup header)."""
+    text_width = _modifier_popup_text_width(card_width)
+    cursor = 0
+    entries = modifier_detail_lines(modifiers, audience=audience)
+    for index, (title, description) in enumerate(entries):
+        cursor += _estimated_wrapped_text_height(title, font_size=POPUP_TITLE_FONT, width_px=text_width)
+        cursor += POPUP_TITLE_DESC_GAP
+        cursor += _estimated_wrapped_text_height(
+            description,
+            font_size=POPUP_DESC_FONT,
+            width_px=text_width,
+        )
+        if index < len(entries) - 1:
+            cursor += POPUP_ENTRY_GAP
+    # Extra slack until the live draw pass syncs scroll from real Text metrics.
+    return int(cursor * 1.2) + 96
+
+
+def measure_modifier_popup_height(
+    card_width: int,
+    modifiers: frozenset[str],
+    *,
+    audience: str = "candidate",
+) -> int:
+    header = POPUP_HEADER_TOP + POPUP_HEADER_HEIGHT + POPUP_HEADER_GAP
+    return (
+        header
+        + measure_modifier_popup_body_height(card_width, modifiers, audience=audience)
+        + POPUP_CARD_BOTTOM_PAD
     )
 
 
@@ -111,8 +321,13 @@ def recruiter_copy_enabled(generated_seed_text: str) -> bool:
     return bool(str(generated_seed_text).strip())
 
 
-def recruiter_settings_fingerprint(preset: str, num_rounds: int) -> str:
-    return f"{preset}:{num_rounds}"
+def recruiter_settings_fingerprint(
+    preset: str,
+    num_rounds: int,
+    modifiers: frozenset[str] | None = None,
+) -> str:
+    mods = ",".join(sorted(modifiers or ()))
+    return f"{preset}:{num_rounds}:{mods}"
 
 
 def recruiter_seed_stale(
@@ -216,7 +431,15 @@ class _MenuView(arcade.View):
         return rect.collidepoint(_mouse_screen_pos(self.window, x, y))
 
     def _apply_seed_paste(self, pasted: str) -> None:
-        self.seed_text = normalize_pasted_seed(pasted)
+        normalized = normalize_pasted_seed(pasted)
+        if not normalized:
+            return
+        if classify_seed_input(normalized) == "invalid":
+            self.seed_text = normalized
+            self.seed_editing = False
+            self._layout()
+            return
+        self.seed_text = normalized
         self.seed_editing = True
 
     def _paste_seed_from_clipboard(self) -> None:
@@ -292,7 +515,10 @@ class CandidateHomeView(_MenuView):
         self._layout()
 
     def _layout(self) -> None:
-        layout = layout_candidate(self.window.width, self.window.height)
+        layout = layout_candidate(
+            self.window.width,
+            self.window.height,
+        )
         self._layout_state = layout
         self.seed_field_rect = layout.seed_field_rect
         self.paste_rect = layout.paste_rect
@@ -304,6 +530,19 @@ class CandidateHomeView(_MenuView):
             return
         self.finish(build_candidate_session_config(self.seed_text))
 
+    def _apply_seed_paste(self, pasted: str) -> None:
+        normalized = normalize_pasted_seed(pasted)
+        if not normalized:
+            return
+        if classify_seed_input(normalized) == "invalid":
+            self.seed_text = normalized
+            self.seed_editing = False
+            self._layout()
+            return
+        self.seed_text = normalized
+        self.seed_editing = True
+        self._layout()
+
     def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
         if symbol == arcade.key.ESCAPE:
             if self.seed_editing:
@@ -314,6 +553,7 @@ class CandidateHomeView(_MenuView):
         if self.seed_editing:
             if symbol == arcade.key.BACKSPACE:
                 self.seed_text = self.seed_text[:-1]
+                self._layout()
             elif symbol in (arcade.key.ENTER, arcade.key.RETURN):
                 self.seed_editing = False
             elif symbol == arcade.key.V and modifiers & arcade.key.MOD_CTRL:
@@ -333,6 +573,7 @@ class CandidateHomeView(_MenuView):
             self._apply_seed_paste(text)
         elif not text.isspace():
             self.seed_text += text
+            self._layout()
         return True
 
     def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
@@ -353,7 +594,10 @@ class CandidateHomeView(_MenuView):
 
     def on_draw(self) -> None:
         self.clear()
-        layout = self._layout_state or layout_candidate(self.window.width, self.window.height)
+        layout = self._layout_state or layout_candidate(
+            self.window.width,
+            self.window.height,
+        )
         cx = self.window.width // 2
         arcade.Text(
             "Pathwise",
@@ -426,13 +670,18 @@ class RecruiterConfigView(_MenuView):
         super().__init__()
         self.selected_preset = "normal"
         self.num_rounds = DEFAULT_ROUNDS
+        self.selected_modifiers: set[str] = set()
         self.generated_seed_text = generated_seed_text
         self._generated_settings_fingerprint = ""
         decoded = decode_recruiter_seed(generated_seed_text)
         if decoded is not None:
+            self.selected_preset = decoded.preset
+            self.num_rounds = decoded.num_rounds
+            self.selected_modifiers = set(decoded.modifiers)
             self._generated_settings_fingerprint = recruiter_settings_fingerprint(
                 decoded.preset,
                 decoded.num_rounds,
+                decoded.modifiers,
             )
         self._copy_feedback_until = 0.0
         self._rng = rng or random.Random()
@@ -447,12 +696,24 @@ class RecruiterConfigView(_MenuView):
         self.start_rect = Rect(0, 0, 0, 0)
         self.back_rect = Rect(0, 0, 0, 0)
         self.preset_rects: dict[str, Rect] = {}
+        self.modifier_toggle_rects: dict[str, Rect] = {}
+        self.modifier_action_rects: dict[str, Rect] = {}
+        self.modifier_explain_rect = Rect(0, 0, 0, 0)
+        self._explained_modifier_id: str | None = None
+
+    @property
+    def active_modifiers(self) -> frozenset[str]:
+        return frozenset(self.selected_modifiers)
 
     @property
     def seed_stale(self) -> bool:
         return recruiter_seed_stale(
             self.generated_seed_text,
-            current_fingerprint=recruiter_settings_fingerprint(self.selected_preset, self.num_rounds),
+            current_fingerprint=recruiter_settings_fingerprint(
+                self.selected_preset,
+                self.num_rounds,
+                self.active_modifiers,
+            ),
             generated_fingerprint=self._generated_settings_fingerprint,
         )
 
@@ -469,11 +730,15 @@ class RecruiterConfigView(_MenuView):
             self.window.height,
             num_rounds=self.num_rounds,
             show_stale_hint=self.seed_stale,
+            modifier_ids=available_modifier_ids(),
         )
         self._layout_state = layout
         self.minus_rect = layout.minus_rect
         self.plus_rect = layout.plus_rect
         self.preset_rects = layout.preset_rects
+        self.modifier_toggle_rects = layout.modifier_toggle_rects
+        self.modifier_action_rects = layout.modifier_action_rects
+        self.modifier_explain_rect = layout.modifier_explain_rect
         self.seed_display_rect = layout.seed_display_rect
         self.copy_rect = layout.copy_rect
         self.generate_rect = layout.generate_rect
@@ -481,27 +746,31 @@ class RecruiterConfigView(_MenuView):
         self.back_rect = layout.back_rect
 
     def _generate_seed(self) -> None:
-        map_seed = self._rng.randint(0, MAP_SEED_MOD - 1)
+        map_seed = self._rng.randint(0, MAP_SEED_MOD_V9 - 1)
         self.generated_seed_text = encode_recruiter_seed(
             map_seed,
             self.selected_preset,
             self.num_rounds,
+            modifiers=self.active_modifiers,
         )
         self._generated_settings_fingerprint = recruiter_settings_fingerprint(
             self.selected_preset,
             self.num_rounds,
+            self.active_modifiers,
         )
         self._layout()
 
-    def _try_start(self) -> None:
-        if self._on_start is None:
-            return
-        config = build_recruiter_session_config(
+    def _session_config(self) -> SessionConfig:
+        return build_recruiter_session_config(
             self.generated_seed_text,
             preset=self.selected_preset,
             num_rounds=self.num_rounds,
         )
-        self._on_start(config)
+
+    def _try_start(self) -> None:
+        if self._on_start is None:
+            return
+        self._on_start(self._session_config())
 
     def _go_back(self) -> None:
         if self._on_back is not None:
@@ -528,6 +797,17 @@ class RecruiterConfigView(_MenuView):
                 self._generate_seed()
         return True
 
+    def _toggle_modifier_selection(self, modifier_id: str) -> None:
+        """Add/remove a modifier (respecting conflicts) and show its info panel."""
+        if modifier_id in self.selected_modifiers:
+            self.selected_modifiers.discard(modifier_id)
+        elif modifier_is_blocked(modifier_id, self.selected_modifiers):
+            pass
+        else:
+            self.selected_modifiers.add(modifier_id)
+        self._explained_modifier_id = modifier_id
+        self._layout()
+
     def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
         if button != arcade.MOUSE_BUTTON_LEFT:
             return True
@@ -536,6 +816,14 @@ class RecruiterConfigView(_MenuView):
             if rect.collidepoint(pos):
                 self.selected_preset = preset_id
                 self._layout()
+        for modifier_id, rect in self.modifier_action_rects.items():
+            if rect.collidepoint(pos):
+                self._toggle_modifier_selection(modifier_id)
+                return True
+        for modifier_id, rect in self.modifier_toggle_rects.items():
+            if rect.collidepoint(pos):
+                self._toggle_modifier_selection(modifier_id)
+                return True
         if self.minus_rect.collidepoint(pos):
             self.num_rounds = max(MIN_ROUNDS, self.num_rounds - 1)
             self._layout()
@@ -559,6 +847,7 @@ class RecruiterConfigView(_MenuView):
             self.window.height,
             num_rounds=self.num_rounds,
             show_stale_hint=self.seed_stale,
+            modifier_ids=available_modifier_ids(),
         )
         cx = self.window.width // 2
         arcade.Text(
@@ -601,7 +890,7 @@ class RecruiterConfigView(_MenuView):
         self._draw_button(self.plus_rect, "+", 24)
         if layout.rounds_hint_top is not None:
             arcade.Text(
-                "One seed — each round uses a derived map from that seed",
+                "One seed: each round uses a derived map from that seed",
                 cx,
                 _arcade_y(self.window, layout.rounds_hint_top),
                 MENU_MUTED,
@@ -630,14 +919,69 @@ class RecruiterConfigView(_MenuView):
             anchor_x="center",
             anchor_y="center",
         ).draw()
+        for entry in MODIFIER_CATALOG:
+            modifier_id = entry["id"]
+            rect = layout.modifier_toggle_rects.get(modifier_id)
+            action = layout.modifier_action_rects.get(modifier_id)
+            if rect is None or action is None:
+                continue
+            selected = modifier_id in self.selected_modifiers
+            blocked = modifier_is_blocked(modifier_id, self.selected_modifiers)
+            self._draw_button(rect, "", 18, selected=selected, disabled=blocked)
+            center_y = _screen_y(self.window, rect)
+            title_color = MENU_MUTED if blocked else (MENU_ACCENT if selected else MENU_TEXT)
+            arcade.Text(
+                entry["title"],
+                rect.centerx,
+                center_y,
+                title_color,
+                18,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
+            self._draw_button(
+                action,
+                "-" if selected else "+",
+                22,
+                selected=selected,
+                disabled=blocked,
+            )
+        explain = layout.modifier_explain_rect
         arcade.Text(
-            "Coming soon",
-            cx,
-            _arcade_y(self.window, layout.modifiers_hint_top),
+            "modifier info",
+            explain.centerx,
+            _arcade_y(self.window, layout.modifier_info_label_top + 12),
             MENU_MUTED,
-            18,
+            16,
             anchor_x="center",
             anchor_y="center",
+        ).draw()
+        self._draw_button(explain, "", 14)
+        if self._explained_modifier_id:
+            body = modifier_explain_body(
+                self._explained_modifier_id, self.active_modifiers
+            )
+            if body is not None:
+                color = MENU_TEXT
+            else:
+                body = "no modifier is selected"
+                color = MENU_MUTED
+        else:
+            body = "no modifier is selected"
+            color = MENU_MUTED
+        pad = 16
+        text_width = max(120, explain.width - pad * 2)
+        body = wrap_text_words(body, width_px=text_width, font_size=14)
+        arcade.Text(
+            body,
+            explain.left + pad,
+            _arcade_y(self.window, explain.top + pad),
+            color,
+            14,
+            anchor_x="left",
+            anchor_y="top",
+            multiline=True,
+            width=multiline_text_width(text_width),
         ).draw()
         if self.seed_stale:
             arcade.Text(
@@ -665,7 +1009,7 @@ class RecruiterConfigView(_MenuView):
                 self.seed_display_rect,
                 "",
                 editing=False,
-                placeholder="— generate to create —",
+                placeholder="(generate to create)",
             )
         copy_disabled = not recruiter_copy_enabled(self.generated_seed_text)
         self._draw_button(self.copy_rect, "Copy", 18, disabled=copy_disabled)
@@ -704,6 +1048,255 @@ class RecruiterConfigView(_MenuView):
 PreGameMenuView = RecruiterConfigView
 
 
+class DisclaimerView(_MenuView):
+    """Mandatory safety disclaimer before any playable session starts."""
+
+    def __init__(
+        self,
+        *,
+        on_agree: Callable[[], None] | None = None,
+        on_back: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._on_agree = on_agree
+        self._on_back = on_back
+        self.agreed = False
+        self.checkbox_rect = Rect(0, 0, 0, 0)
+        self.agree_rect = Rect(0, 0, 0, 0)
+        self.back_rect = Rect(0, 0, 0, 0)
+        self._title_ay = 0
+        self._body_top_ay = 0
+        self._body_floor_ay = 0
+
+    def on_show_view(self) -> None:
+        arcade.set_background_color(MENU_BG)
+        self._layout()
+
+    def on_resize(self, width: int, height: int) -> None:
+        self._layout()
+
+    def _layout(self) -> None:
+        cx = self.window.width // 2
+        h = self.window.height
+        # y-down Rect tops (larger = lower on screen) for hit testing.
+        self.checkbox_rect = Rect(cx - 220, int(h * 0.58), 440, 40)
+        self.agree_rect = Rect(cx - 120, int(h * 0.70), 240, 42)
+        self.back_rect = Rect(cx - 120, int(h * 0.80), 240, 36)
+        # Arcade Y (larger = higher on screen) for title/body.
+        self._title_ay = int(h * 0.92)
+        self._body_top_ay = int(h * 0.86)
+        checkbox_arcade_top = h - self.checkbox_rect.top
+        # Body ends above the checkbox with clear padding (no overlap).
+        self._body_floor_ay = checkbox_arcade_top + 32
+
+    def _toggle_agree(self) -> None:
+        self.agreed = not self.agreed
+
+    def _try_agree(self) -> None:
+        if not self.agreed:
+            return
+        if self._on_agree is not None:
+            self._on_agree()
+
+    def _go_back(self) -> None:
+        if self._on_back is not None:
+            self._on_back()
+
+    def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
+        if symbol == arcade.key.ESCAPE:
+            self._go_back()
+            return True
+        if symbol == arcade.key.SPACE:
+            self._toggle_agree()
+            return True
+        if symbol in (arcade.key.ENTER, arcade.key.RETURN):
+            self._try_agree()
+            return True
+        return True
+
+    def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
+        if button != arcade.MOUSE_BUTTON_LEFT:
+            return True
+        pos = _mouse_screen_pos(self.window, x, y)
+        if self.checkbox_rect.collidepoint(pos):
+            self._toggle_agree()
+        elif self.agree_rect.collidepoint(pos):
+            self._try_agree()
+        elif self.back_rect.collidepoint(pos):
+            self._go_back()
+        return True
+
+    def on_draw(self) -> None:
+        self.clear()
+        cx = self.window.width // 2
+        h = self.window.height
+        arcade.Text(
+            DISCLAIMER_TITLE,
+            cx,
+            self._title_ay,
+            MENU_TEXT,
+            36,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        body_width = min(620, self.window.width - 80)
+        wrapped = wrap_text_words(DISCLAIMER_BODY, width_px=body_width, font_size=16)
+        body_h = max(1, self._body_top_ay - self._body_floor_ay)
+        left = cx - body_width // 2
+        prev_scissor = self.window.ctx.scissor
+        self.window.ctx.scissor = (
+            max(0, left - 4),
+            max(0, self._body_floor_ay),
+            body_width + 8,
+            body_h,
+        )
+        try:
+            arcade.Text(
+                wrapped,
+                modifier_desc_draw_x(left, body_width, text_width=body_width),
+                self._body_top_ay,
+                MENU_MUTED,
+                16,
+                anchor_x="left",
+                anchor_y="top",
+                multiline=True,
+                width=multiline_text_width(body_width),
+            ).draw()
+        finally:
+            self.window.ctx.scissor = prev_scissor
+        box = self.checkbox_rect
+        mark = "[x]" if self.agreed else "[ ]"
+        arcade.Text(
+            f"{mark}  {DISCLAIMER_AGREE_LABEL}",
+            box.centerx,
+            _screen_y(self.window, box),
+            MENU_ACCENT if self.agreed else MENU_TEXT,
+            18,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        self._draw_button(
+            self.agree_rect,
+            "Agree and continue",
+            20,
+            primary=self.agreed,
+            disabled=not self.agreed,
+        )
+        self._draw_button(self.back_rect, "Back", 18)
+
+
+class ModifiersDetailView(_MenuView):
+    def __init__(
+        self,
+        *,
+        config: SessionConfig,
+        on_back: Callable[[], None] | None = None,
+        on_start: Callable[[SessionConfig], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self._on_back = on_back
+        self._on_start = on_start
+        self.start_rect = Rect(0, 0, 0, 0)
+        self.back_rect = Rect(0, 0, 0, 0)
+
+    def on_show_view(self) -> None:
+        arcade.set_background_color(MENU_BG)
+        self._layout()
+
+    def on_resize(self, width: int, height: int) -> None:
+        self._layout()
+
+    def _layout(self) -> None:
+        cx = self.window.width // 2
+        h = self.window.height
+        self.start_rect = Rect(cx - 120, int(h * 0.28), 240, 42)
+        self.back_rect = Rect(cx - 120, int(h * 0.20), 240, 36)
+
+    def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
+        if symbol == arcade.key.ESCAPE:
+            self._go_back()
+            return True
+        if symbol in (arcade.key.ENTER, arcade.key.RETURN, arcade.key.SPACE):
+            self._try_start()
+        return True
+
+    def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
+        if button != arcade.MOUSE_BUTTON_LEFT:
+            return True
+        pos = _mouse_screen_pos(self.window, x, y)
+        if self.start_rect.collidepoint(pos):
+            self._try_start()
+        if self.back_rect.collidepoint(pos):
+            self._go_back()
+        return True
+
+    def _try_start(self) -> None:
+        if self._on_start is not None:
+            self._on_start(self.config)
+
+    def _go_back(self) -> None:
+        if self._on_back is not None:
+            self._on_back()
+
+    def on_draw(self) -> None:
+        self.clear()
+        cx = self.window.width // 2
+        h = self.window.height
+        arcade.Text(
+            "Session modifiers",
+            cx,
+            h * 0.78,
+            MENU_TEXT,
+            40,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        arcade.Text(
+            "Active rules for this seed",
+            cx,
+            h * 0.70,
+            MENU_MUTED,
+            20,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        y = h * 0.58
+        detail_width = min(560, self.window.width - 80)
+        for title, description in modifier_detail_lines(
+            self.config.modifiers, audience=self.config.audience
+        ):
+            arcade.Text(
+                title,
+                cx,
+                y,
+                MENU_ACCENT,
+                22,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
+            y -= 28
+            wrapped = wrap_text_words(
+                description, width_px=detail_width, font_size=15
+            )
+            arcade.Text(
+                wrapped,
+                modifier_desc_draw_x(
+                    cx - detail_width // 2, detail_width, text_width=detail_width
+                ),
+                y,
+                MENU_MUTED,
+                15,
+                anchor_x="left",
+                anchor_y="center",
+                multiline=True,
+                width=multiline_text_width(detail_width),
+            ).draw()
+            y -= 56
+        self._draw_button(self.start_rect, "Start session", 22, primary=True)
+        self._draw_button(self.back_rect, "Back", 20)
+
+
 class MessageView(_MenuView):
     def __init__(
         self,
@@ -712,19 +1305,86 @@ class MessageView(_MenuView):
         subtitle: str = "",
         accent: str = "",
         details: str = "",
+        modifiers: frozenset[str] = frozenset(),
+        audience: str = "candidate",
         auto_advance_s: float | None = None,
         on_complete: Callable | None = None,
     ) -> None:
         super().__init__(on_complete=on_complete)
+        from pathwise.modifiers import hidden
+
         self.title = title
         self.subtitle = subtitle
         self.accent = accent
         self.details = details
+        self.audience = "recruiter" if audience == "recruiter" else "candidate"
+        self.modifiers = hidden.visible_modifiers(modifiers, audience=self.audience)
         self.auto_advance_s = auto_advance_s
         self._elapsed = 0.0
+        self._modifiers_popup_open = False
+        self.modifiers_btn_rect: Rect | None = None
+        self._popup_card_rect = Rect(0, 0, 0, 0)
+        self._popup_scroll = 0
+        self._popup_content_h = 0
+        self._popup_max_scroll = 0
 
     def on_show_view(self) -> None:
         arcade.set_background_color(MENU_BG)
+        self._layout_message()
+
+    def on_resize(self, width: int, height: int) -> None:
+        self._layout_message()
+
+    def _layout_message(self) -> None:
+        if not self.modifiers:
+            self.modifiers_btn_rect = None
+            self._popup_card_rect = Rect(0, 0, 0, 0)
+            self._popup_content_h = 0
+            self._popup_max_scroll = 0
+            self._popup_scroll = 0
+            return
+        cx = self.window.width // 2
+        h = self.window.height
+        btn_h = max(34, int(h * 0.045))
+        btn_top = int(h * 0.31)
+        self.modifiers_btn_rect = Rect(cx - 120, btn_top, 240, btn_h)
+        card_w = min(520, max(280, self.window.width - 80))
+        body_content_h = measure_modifier_popup_body_height(
+            card_w, self.modifiers, audience=self.audience
+        )
+        header_budget = POPUP_HEADER_TOP + POPUP_HEADER_HEIGHT + POPUP_HEADER_GAP
+        self._popup_content_h = header_budget + body_content_h + POPUP_CARD_BOTTOM_PAD
+        # Tall enough to read several entries, still short enough to require scroll.
+        max_card_h = min(h - 80, max(240, int(h * 0.72)))
+        card_h = max_card_h
+        card_top = (h - card_h) // 2
+        self._popup_card_rect = Rect(cx - card_w // 2, card_top, card_w, card_h)
+        body_h = max(1, card_h - header_budget - POPUP_CARD_BOTTOM_PAD)
+        self._popup_max_scroll = max(0, body_content_h - body_h)
+        self._clamp_popup_scroll()
+
+    def _clamp_popup_scroll(self) -> None:
+        self._popup_scroll = max(0, min(int(self._popup_scroll), int(self._popup_max_scroll)))
+
+    def _open_modifiers_popup(self) -> None:
+        self._modifiers_popup_open = True
+        self._popup_scroll = 0
+        self._layout_message()
+
+    def _close_modifiers_popup(self) -> None:
+        self._modifiers_popup_open = False
+        self._popup_scroll = 0
+
+    def _scroll_modifiers_popup(self, delta: float) -> None:
+        if not self._modifiers_popup_open or self._popup_max_scroll <= 0:
+            return
+        # Trackpads / Windows can emit fractional scroll units; never truncate to 0.
+        raw = float(delta) * POPUP_SCROLL_STEP
+        step = int(raw)
+        if delta != 0 and step == 0:
+            step = 1 if delta > 0 else -1
+        self._popup_scroll -= step
+        self._clamp_popup_scroll()
 
     def on_update(self, delta_time: float) -> None:
         if self.auto_advance_s is None:
@@ -734,12 +1394,140 @@ class MessageView(_MenuView):
             self.finish(True)
 
     def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
+        if self._modifiers_popup_open:
+            if symbol == arcade.key.ESCAPE:
+                self._close_modifiers_popup()
+            elif symbol in (arcade.key.DOWN, arcade.key.S):
+                self._scroll_modifiers_popup(-1)
+            elif symbol in (arcade.key.UP, arcade.key.W):
+                self._scroll_modifiers_popup(1)
+            elif symbol == arcade.key.PAGEDOWN:
+                self._scroll_modifiers_popup(-3)
+            elif symbol == arcade.key.PAGEUP:
+                self._scroll_modifiers_popup(3)
+            return True
         self.finish(True)
         return True
 
+    def on_mouse_scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> bool | None:
+        if self._modifiers_popup_open:
+            self._scroll_modifiers_popup(scroll_y)
+            return True
+        return None
+
     def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
+        if button != arcade.MOUSE_BUTTON_LEFT:
+            return True
+        pos = _mouse_screen_pos(self.window, x, y)
+        if self._modifiers_popup_open:
+            if self._popup_card_rect.collidepoint(pos):
+                return True
+            self._close_modifiers_popup()
+            return True
+        if self.modifiers_btn_rect and self.modifiers_btn_rect.collidepoint(pos):
+            self._open_modifiers_popup()
+            return True
         self.finish(True)
         return True
+
+    def _draw_modifiers_popup(self) -> None:
+        w = self.window.width
+        h = self.window.height
+        arcade.draw_lbwh_rectangle_filled(0, 0, w, h, (20, 28, 36, 160))
+        card = self._popup_card_rect
+        left = card.left
+        bottom = h - card.bottom
+        arcade.draw_lbwh_rectangle_filled(left, bottom, card.width, card.height, MENU_CARD)
+        arcade.draw_lbwh_rectangle_outline(left, bottom, card.width, card.height, MENU_BORDER, 2)
+        cx = card.centerx
+        text_width = _modifier_popup_text_width(card.width)
+        header_y = card.top + POPUP_HEADER_TOP
+        arcade.Text(
+            "Session modifiers",
+            cx,
+            _arcade_y(self.window, header_y),
+            MENU_TEXT,
+            26,
+            anchor_x="center",
+            anchor_y="top",
+        ).draw()
+        body_top = header_y + POPUP_HEADER_HEIGHT + POPUP_HEADER_GAP
+        body_bottom = card.bottom - POPUP_CARD_BOTTOM_PAD
+        body_h = max(1, body_bottom - body_top)
+        scissor_bottom = h - body_bottom
+        prev_scissor = self.window.ctx.scissor
+        self.window.ctx.scissor = (left + 4, scissor_bottom, max(1, card.width - 8), body_h)
+        try:
+            cursor = body_top - self._popup_scroll
+            entries = modifier_detail_lines(self.modifiers, audience=self.audience)
+            for index, (title, description) in enumerate(entries):
+                title_text = arcade.Text(
+                    title,
+                    cx,
+                    _arcade_y(self.window, cursor),
+                    MENU_ACCENT,
+                    POPUP_TITLE_FONT,
+                    anchor_x="center",
+                    anchor_y="top",
+                )
+                title_text.draw()
+                title_height = _safe_text_content_height(
+                    title_text,
+                    fallback=_estimated_wrapped_text_height(
+                        title,
+                        font_size=POPUP_TITLE_FONT,
+                        width_px=text_width,
+                    ),
+                )
+                cursor += title_height + POPUP_TITLE_DESC_GAP
+                wrapped_desc = wrap_text_words(
+                    description, width_px=text_width, font_size=POPUP_DESC_FONT
+                )
+                desc_x = modifier_desc_draw_x(left, card.width, text_width=text_width)
+                desc_text = arcade.Text(
+                    wrapped_desc,
+                    desc_x,
+                    _arcade_y(self.window, cursor),
+                    MENU_MUTED,
+                    POPUP_DESC_FONT,
+                    anchor_x="left",
+                    anchor_y="top",
+                    multiline=True,
+                    width=multiline_text_width(text_width),
+                )
+                desc_text.draw()
+                desc_height = _safe_text_content_height(
+                    desc_text,
+                    fallback=_estimated_wrapped_text_height(
+                        wrapped_desc,
+                        font_size=POPUP_DESC_FONT,
+                        width_px=text_width,
+                    ),
+                )
+                cursor += desc_height
+                if index < len(entries) - 1:
+                    cursor += POPUP_ENTRY_GAP
+            # Sync scroll range to measured text so long catalogs stay reachable.
+            measured_body = max(0, int(cursor - body_top + self._popup_scroll))
+            synced_max = max(0, measured_body - body_h)
+            if synced_max > self._popup_max_scroll:
+                self._popup_max_scroll = synced_max
+            self._clamp_popup_scroll()
+        finally:
+            self.window.ctx.scissor = prev_scissor
+        if self._popup_max_scroll > 0:
+            hint = "Scroll for more"
+            if self._popup_scroll >= self._popup_max_scroll:
+                hint = "Scroll up"
+            arcade.Text(
+                hint,
+                cx,
+                _arcade_y(self.window, card.bottom - 8),
+                MENU_MUTED,
+                12,
+                anchor_x="center",
+                anchor_y="bottom",
+            ).draw()
 
     def on_draw(self) -> None:
         self.clear()
@@ -774,11 +1562,13 @@ class MessageView(_MenuView):
                 anchor_x="center",
                 anchor_y="center",
             ).draw()
+        if self.modifiers_btn_rect is not None:
+            self._draw_button(self.modifiers_btn_rect, "See modifiers", 18, primary=True)
         if self.details:
             arcade.Text(
                 self.details,
                 cx,
-                h * 0.28,
+                h * 0.22,
                 MENU_MUTED,
                 16,
                 anchor_x="center",
@@ -786,6 +1576,8 @@ class MessageView(_MenuView):
                 multiline=True,
                 width=min(560, self.window.width - 80),
             ).draw()
+        if self._modifiers_popup_open:
+            self._draw_modifiers_popup()
 
 
 def run_pre_game_menu(window: arcade.Window) -> SessionConfig | None:
@@ -796,23 +1588,37 @@ def run_pre_game_menu(window: arcade.Window) -> SessionConfig | None:
     return view._result
 
 
+def round_intro_hint(
+    profile: DifficultyProfile,
+    *,
+    time_limit_s: int,
+    round_index: int = 1,
+) -> str:
+    """Subtitle for round intro: uses the map's actual route timer."""
+    hint = (
+        f"~{profile.min_crossings}-{profile.max_crossings} roads · "
+        f"{int(time_limit_s)}s route timer · denser traffic"
+    )
+    if round_index > 1:
+        hint += f" (+{int(profile.round_escalation * 100)}% vs round 1)"
+    return hint
+
+
 def run_round_intro(
     window: arcade.Window,
     round_index: int,
     total_rounds: int,
     profile: DifficultyProfile,
+    *,
+    time_limit_s: int,
+    modifiers: frozenset[str] = frozenset(),
 ) -> bool:
-    hint = (
-        f"~{profile.min_crossings}-{profile.max_crossings} roads · "
-        f"{profile.target_play_time_s}s · denser traffic"
-    )
-    if round_index > 1:
-        hint += f" (+{int(profile.round_escalation * 100)}% vs round 1)"
     view = MessageView(
         title=f"Round {round_index} of {total_rounds}",
-        subtitle=hint,
+        subtitle=round_intro_hint(profile, time_limit_s=time_limit_s, round_index=round_index),
         accent=ROUND_START_PROMPT,
         details=ROUND_CONTROLS_HINT,
+        modifiers=modifiers,
     )
     window.show_view(view)
     while not view._done and not window.closed:
@@ -826,11 +1632,10 @@ def run_between_rounds(
     total_rounds: int,
     outcome: str,
 ) -> bool:
-    labels = {"success": "Goal reached", "collision": "Collision", "timeout": "Time expired"}
-    label = labels.get(outcome, outcome)
+    label = round_outcome_label(outcome)
     sub = "Next round will be harder" if round_index < total_rounds else "Session finishing…"
     view = MessageView(
-        title=f"Round {round_index} complete — {label}",
+        title=f"Round {round_index} complete: {label}",
         subtitle=sub,
         accent="Click or press any key to continue",
     )
@@ -846,12 +1651,20 @@ def run_session_complete(
     total_rounds: int,
     session_seed: int | None = None,
 ) -> None:
-    summary = " · ".join(f"R{i + 1}: {o}" for i, o in enumerate(outcomes))
+    summary = " · ".join(
+        f"R{i + 1}: {round_outcome_label(o)}" for i, o in enumerate(outcomes)
+    )
     subtitle = summary
     if session_seed is not None:
         subtitle += f"\nSession seed: {session_seed}"
+    last_label = round_outcome_label(outcomes[-1]) if outcomes else "Done"
+    title = (
+        f"Round complete: {last_label}"
+        if total_rounds == 1
+        else f"All {total_rounds} rounds complete"
+    )
     view = MessageView(
-        title=f"All {total_rounds} rounds complete",
+        title=title,
         subtitle=subtitle,
         accent="Open logs_dashboard.html for per-round replays",
     )

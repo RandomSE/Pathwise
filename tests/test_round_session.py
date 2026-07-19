@@ -60,6 +60,18 @@ class TestRoundSession(unittest.TestCase):
         self.assertLessEqual(bounds.left, 50 - 80 - 120)
         self.assertGreaterEqual(bounds.right, 400 + 40 + 120)
 
+    def test_build_world_bounds_respects_hint(self):
+        road = MagicMock()
+        road.rect = Rect(0, 200, 2000, 400)
+        hint = Rect(0, 200, 2000, 700)
+        bounds = build_world_bounds(
+            [road], (1000, 650), Rect(980, 220, 40, 40), hint=hint
+        )
+        self.assertEqual(bounds.left, hint.left)
+        self.assertEqual(bounds.right, hint.right)
+        self.assertEqual(bounds.top, hint.top)
+        self.assertEqual(bounds.bottom, hint.bottom)
+
     def test_end_round_inactive_returns_failure_reason(self):
         self.game.round_active = False
         self.game.failure_reason = "timeout"

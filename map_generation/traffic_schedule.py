@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathwise import commonUtils
 from pathwise import sprites
 from map_generation.difficulty import DifficultyProfile
-from map_generation.lane_geometry import lane_center_xy, lateral_axis_value
+from map_generation.lane_geometry import (
+    lane_center_xy,
+    lateral_axis_value,
+    parallel_lanes_per_dir,
+)
 
 CAR_WIDTH = commonUtils.CAR_WIDTH
 CAR_HEIGHT = commonUtils.CAR_HEIGHT
@@ -47,6 +51,8 @@ class TrafficSpawn:
     archetype_index: int
     event_id: int
     phase: str = PHASE_ONGOING
+    lane_index: int = 0
+    on_road: bool = False
 
 
 def _traffic_rng(map_seed: int, profile: DifficultyProfile, stream: int = 0) -> random.Random:
@@ -86,15 +92,17 @@ def _along_coord(road, along_frac: float) -> int:
     return road.rect.top + ROAD_MARGIN + int(span * frac)
 
 
-def car_pose_for_spawn(road, along_frac: float, direction: int) -> tuple[int, int, int, bool]:
+def car_pose_for_spawn(
+    road, along_frac: float, direction: int, *, lane_index: int = 0
+) -> tuple[int, int, int, bool]:
     """Return x, y, signed speed sign (±1), vertical flag (speed magnitude applied by caller)."""
     direction = 1 if direction >= 0 else -1
     if road.direction == "vertical":
         x = _along_coord(road, along_frac)
-        y = lateral_axis_value(road, direction) - CAR_HEIGHT // 2
+        y = lateral_axis_value(road, direction, lane_index=lane_index) - CAR_HEIGHT // 2
         x, y = _clamp_lateral_on_road(road, x, y)
         return x, y, direction, False
-    x = lateral_axis_value(road, direction) - CAR_WIDTH // 2
+    x = lateral_axis_value(road, direction, lane_index=lane_index) - CAR_WIDTH // 2
     y = _along_coord(road, along_frac)
     x, y = _clamp_lateral_on_road(road, x, y)
     return x, y, direction, True
@@ -106,7 +114,7 @@ def entry_along_frac(direction: int) -> float:
 
 
 def car_pose_edge_entry(
-    road, direction: int, queue_index: float = 0.0
+    road, direction: int, queue_index: float = 0.0, *, lane_index: int = 0
 ) -> tuple[int, int, int, bool]:
     """
     Spawn just off the road so cars drive in (avoids intersection gridlock).
@@ -115,14 +123,14 @@ def car_pose_edge_entry(
     direction = 1 if direction >= 0 else -1
     q = int(queue_index * EDGE_QUEUE_SPACING)
     if road.direction == "vertical":
-        y = lateral_axis_value(road, direction) - CAR_HEIGHT // 2
+        y = lateral_axis_value(road, direction, lane_index=lane_index) - CAR_HEIGHT // 2
         if direction > 0:
             x = road.rect.left - CAR_WIDTH - EDGE_CLEARANCE - q
         else:
             x = road.rect.right + EDGE_CLEARANCE + q
         x, y = _clamp_lateral_on_road(road, x, y)
         return x, y, direction, False
-    x = lateral_axis_value(road, direction) - CAR_WIDTH // 2
+    x = lateral_axis_value(road, direction, lane_index=lane_index) - CAR_WIDTH // 2
     if direction > 0:
         y = road.rect.top - CAR_HEIGHT - EDGE_CLEARANCE - q
     else:
@@ -146,7 +154,13 @@ def count_lane_cars(cars, road, direction: int) -> int:
 
 
 def lane_spawn_allowed(cars, road, direction: int, phase: str = PHASE_ONGOING) -> bool:
-    cap = MAX_LANE_ACTIVE_OPENING if phase == PHASE_OPENING else MAX_LANE_ACTIVE
+    from pathwise.modifiers import highway
+
+    highway_cap = highway.highway_max_lane_active()
+    if highway_cap is not None:
+        cap = int(highway_cap)
+    else:
+        cap = MAX_LANE_ACTIVE_OPENING if phase == PHASE_OPENING else MAX_LANE_ACTIVE
     return count_lane_cars(cars, road, direction) < cap
 
 
@@ -156,15 +170,22 @@ def edge_spawn_lane_allowed(
     direction: int,
     world_rect,
     max_queue: int = 2,
+    *,
+    lane_index: int = 0,
 ) -> bool:
     """Ongoing edge spawns: only limit cars queued near the map entry, not whole-lane count."""
     if world_rect is None:
         return lane_spawn_allowed(cars, road, direction, PHASE_ONGOING)
     direction = 1 if direction >= 0 else -1
     vertical = road.direction == "horizontal"
-    tcx, tcy = lane_center_xy(road, direction)
+    tcx, tcy = lane_center_xy(road, direction, lane_index=lane_index)
+    # Multi-lane roads must count per track; a full-width lateral made one queue of 2
+    # block every highway lane.
+    if parallel_lanes_per_dir(road) > 1:
+        lateral = 40
+    else:
+        lateral = max(road.rect.width, road.rect.height) // 2 + 48
     depth = 340
-    lateral = max(road.rect.width, road.rect.height) // 2 + 48
     queued = 0
     for car in cars:
         if car.vertical != vertical or car.direction != direction:
@@ -208,10 +229,17 @@ def _largest_clear_gap(
 
 
 def _approach_pose_from_frac(
-    road, frac: float, direction: int, queue_index: float = 0.0
+    road,
+    frac: float,
+    direction: int,
+    queue_index: float = 0.0,
+    *,
+    lane_index: int = 0,
 ) -> tuple[int, int, int, bool]:
     """Place car one vehicle length before `frac`, driving into the road (not in the box)."""
-    x, y, d, vertical = car_pose_for_spawn(road, frac, direction)
+    x, y, d, vertical = car_pose_for_spawn(
+        road, frac, direction, lane_index=lane_index
+    )
     q = int(queue_index * EDGE_QUEUE_SPACING)
     if not vertical:
         if d > 0:
@@ -232,11 +260,13 @@ def spawn_poses_from_world_edge(
     direction: int,
     world_rect,
     queue_slots: int = 6,
+    *,
+    lane_index: int = 0,
 ) -> list[tuple[int, int, int, bool]]:
     """Ongoing traffic: enter from outside the map boundary, drive inward."""
     direction = 1 if direction >= 0 else -1
     vertical = road.direction == "horizontal"
-    tcx, tcy = lane_center_xy(road, direction)
+    tcx, tcy = lane_center_xy(road, direction, lane_index=lane_index)
     poses: list[tuple[int, int, int, bool]] = []
     for k in range(queue_slots):
         q = int(k * EDGE_QUEUE_SPACING)
@@ -267,8 +297,16 @@ def spawn_poses_for_event(
     Opening: spawn on open road inside the map.
     Ongoing: spawn outside the map edge and drive inward.
     """
+    lane_index = int(getattr(event, "lane_index", 0) or 0)
+    if getattr(event, "on_road", False):
+        pose = car_pose_for_spawn(
+            road, event.along_frac, event.direction, lane_index=lane_index
+        )
+        return [pose]
     if event.phase == PHASE_ONGOING and world_rect is not None:
-        return spawn_poses_from_world_edge(road, event.direction, world_rect)
+        return spawn_poses_from_world_edge(
+            road, event.direction, world_rect, lane_index=lane_index
+        )
     intersection_rects = intersection_rects or []
     direction = 1 if event.direction >= 0 else -1
     forbidden = _intersection_frac_ranges(road, intersection_rects)
@@ -286,7 +324,9 @@ def spawn_poses_for_event(
             frac = max(g0 + 0.03, min(g1 - 0.03, frac))
             if _frac_in_ranges(frac, forbidden):
                 continue
-            pose = _approach_pose_from_frac(road, frac, direction, queue_index=float(k))
+            pose = _approach_pose_from_frac(
+                road, frac, direction, queue_index=float(k), lane_index=lane_index
+            )
             if pose_overlaps_intersection_rects(
                 pose[0], pose[1], pose[3], intersection_rects
             ):
@@ -294,7 +334,9 @@ def spawn_poses_for_event(
             poses.append(pose)
     if not poses:
         for k in range(6):
-            pose = car_pose_edge_entry(road, direction, queue_index=float(k))
+            pose = car_pose_edge_entry(
+                road, direction, queue_index=float(k), lane_index=lane_index
+            )
             if pose_overlaps_intersection_rects(
                 pose[0], pose[1], pose[3], intersection_rects
             ):
@@ -350,17 +392,38 @@ def _rects_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -
     )
 
 
+def _vertical_gap_ok(
+    rect: tuple[int, int, int, int],
+    occupied: list[tuple[int, int, int, int]],
+    min_gap: int,
+) -> bool:
+    """True when every car overlapping ``rect`` along x leaves >= ``min_gap`` vertically."""
+    ax, ay, aw, ah = rect
+    for bx, by, bw, bh in occupied:
+        # Only cars sharing the same horizontal (travel-axis) span can pin the player.
+        if ax < bx + bw and ax + aw > bx:
+            vgap = max(by - (ay + ah), ay - (by + bh))
+            if vgap < min_gap:
+                return False
+    return True
+
+
 def _along_metrics(road) -> tuple[int, int]:
     if road.direction == "vertical":
         return max(0, road.rect.width - ROAD_MARGIN * 2), CAR_WIDTH
     return max(0, road.rect.height - ROAD_MARGIN * 2), CAR_HEIGHT
 
 
+def _road_density_mult(road) -> float:
+    return max(1.0, float(getattr(road, "traffic_density_mult", 1.0) or 1.0))
+
+
 def _max_cars_per_direction(road) -> int:
     span, car_len = _along_metrics(road)
     if span < car_len + MIN_ALONG_GAP:
         return 1
-    return max(1, int(span // (car_len + MIN_ALONG_GAP)))
+    base = max(1, int(span // (car_len + MIN_ALONG_GAP)))
+    return base * parallel_lanes_per_dir(road)
 
 
 def _target_per_direction(road, density: float, *, initial: bool = False) -> int:
@@ -368,7 +431,8 @@ def _target_per_direction(road, density: float, *, initial: bool = False) -> int
     frac = INITIAL_FILL_FRACTION if initial else FILL_FRACTION
     target = max(1, int(cap * frac * (0.88 + density * 0.18)))
     if initial:
-        return min(target, INITIAL_MAX_PER_DIR)
+        parallel = parallel_lanes_per_dir(road)
+        return min(target, INITIAL_MAX_PER_DIR * parallel)
     return target
 
 
@@ -562,7 +626,13 @@ def _try_place_initial_edge(
     frac = max(g0 + 0.04, min(g1 - 0.04, frac))
     if _frac_in_ranges(frac, forbidden):
         return event_id
-    x, y, _, vertical = _approach_pose_from_frac(road, frac, direction, queue_index=0.0)
+    lane_index = 0
+    parallel = parallel_lanes_per_dir(road)
+    if parallel > 1:
+        lane_index = int(rng.randrange(parallel))
+    x, y, _, vertical = _approach_pose_from_frac(
+        road, frac, direction, queue_index=0.0, lane_index=lane_index
+    )
     rect = _candidate_rect_from_pose(x, y, vertical)
     if pose_overlaps_intersection_rects(x, y, vertical, intersection_rects):
         return event_id
@@ -579,11 +649,67 @@ def _try_place_initial_edge(
             archetype_index=arch,
             event_id=event_id,
             phase=PHASE_OPENING,
+            lane_index=lane_index,
         )
     )
     lane_fracs.setdefault(road_index, []).append((direction, frac))
     occupied_rects.append(rect)
     return event_id + 1
+
+
+def _fill_highway_on_road(
+    events: list[TrafficSpawn],
+    event_id: int,
+    road_index: int,
+    road,
+    rng: random.Random,
+    occupied_rects: list[tuple[int, int, int, int]],
+    initial_spawn_index: int,
+) -> tuple[int, int]:
+    """Pack cars onto the asphalt at round start so the highway looks busy immediately."""
+    from pathwise.modifiers import highway
+
+    target = max(0, int(getattr(road, "opening_fleet", 0) or 0))
+    if target <= 0:
+        return event_id, initial_spawn_index
+    parallel = parallel_lanes_per_dir(road)
+    min_vgap = highway.min_vertical_weave_gap_px()
+    placed = 0
+    attempts = 0
+    max_attempts = target * 8
+    while placed < target and attempts < max_attempts:
+        attempts += 1
+        direction = 1 if rng.random() < 0.5 else -1
+        lane_index = int(rng.randrange(parallel))
+        frac = rng.uniform(0.12, 0.88)
+        x, y, _, vertical = car_pose_for_spawn(
+            road, frac, direction, lane_index=lane_index
+        )
+        rect = _candidate_rect_from_pose(x, y, vertical)
+        if any(_rects_overlap(rect, other) for other in occupied_rects):
+            continue
+        if not _vertical_gap_ok(rect, occupied_rects, min_vgap):
+            continue
+        arch = sprites.pick_random_archetype_index(rng)
+        frame = min(OPENING_WARMUP_FRAMES, initial_spawn_index * INITIAL_STAGGER_FRAMES)
+        events.append(
+            TrafficSpawn(
+                frame=frame,
+                road_index=road_index,
+                along_frac=round(frac, 4),
+                direction=direction,
+                archetype_index=arch,
+                event_id=event_id,
+                phase=PHASE_OPENING,
+                lane_index=lane_index,
+                on_road=True,
+            )
+        )
+        occupied_rects.append(rect)
+        event_id += 1
+        initial_spawn_index += 1
+        placed += 1
+    return event_id, initial_spawn_index
 
 
 def _fill_road_initial(
@@ -598,6 +724,17 @@ def _fill_road_initial(
     initial_spawn_index: int,
     intersection_rects: list[tuple[int, int, int, int]],
 ) -> tuple[int, int]:
+    if int(getattr(road, "opening_fleet", 0) or 0) > 0:
+        return _fill_highway_on_road(
+            events,
+            event_id,
+            road_index,
+            road,
+            rng,
+            occupied_rects,
+            initial_spawn_index,
+        )
+
     per_dir = _target_per_direction(road, density, initial=True)
 
     for direction in (1, -1):
@@ -654,7 +791,7 @@ def _generate_opening_surge(
     intersection_rects = _build_intersection_rects(roads)
     for ri, road in enumerate(roads):
         w = _weight(roads, traffic_weights, ri)
-        road_density = density * (0.92 + 0.14 * w)
+        road_density = density * (0.92 + 0.14 * w) * _road_density_mult(road)
         event_id, initial_spawn_index = _fill_road_initial(
             events,
             event_id,
@@ -688,15 +825,17 @@ def _generate_ongoing_spawns(
     num_roads = len(roads)
     density = profile.traffic_density * profile.spawn_rate_mult * TRAFFIC_SCHEDULE_MULT
     density *= 1.0 + profile.round_escalation * 0.4 + profile.level * 0.12
+    peak_mult = max((_road_density_mult(r) for r in roads), default=1.0)
+    density *= peak_mult
 
-    max_active = min(500, 110 + num_roads * 34)
+    max_active = min(800, int((110 + num_roads * 34) * max(1.0, peak_mult)))
     duration_frames = max(fps * 30, int(time_limit_s * fps) + fps)
 
     events: list[TrafficSpawn] = []
     event_id = event_id_start
-    interval = max(5, int(22 / max(0.45, density * (0.75 + num_roads * 0.02))))
+    interval = max(2, int(22 / max(0.45, density * (0.75 + num_roads * 0.02))))
     max_events = min(
-        max_active * 3,
+        max_active * 4,
         int(max_active + duration_frames / interval * 1.15),
     )
     frame = start_frame
@@ -704,22 +843,35 @@ def _generate_ongoing_spawns(
     while frame < duration_frames and len(events) < max_events:
         ri = road_cursor % num_roads
         road_cursor += 1
+        road = roads[ri]
         w = _weight(roads, traffic_weights, ri)
-        if rng.random() < min(0.98, 0.62 + 0.18 * w + density * 0.12):
-            direction = rng.choice([1, -1])
-            arch = sprites.pick_random_archetype_index(rng)
-            events.append(
-                TrafficSpawn(
-                    frame=frame,
-                    road_index=ri,
-                    along_frac=entry_along_frac(direction),
-                    direction=direction,
-                    archetype_index=arch,
-                    event_id=event_id,
-                    phase=PHASE_ONGOING,
+        burst = parallel_lanes_per_dir(road)
+        if burst > 1:
+            # One schedule tick can feed several parallel tracks.
+            burst = min(burst, 4 if _road_density_mult(road) >= 5.0 else 1)
+        else:
+            burst = 1
+        for _ in range(burst):
+            if len(events) >= max_events:
+                break
+            if rng.random() < min(0.98, 0.62 + 0.18 * w + density * 0.12):
+                direction = rng.choice([1, -1])
+                arch = sprites.pick_random_archetype_index(rng)
+                parallel = parallel_lanes_per_dir(road)
+                lane_index = int(rng.randrange(parallel)) if parallel > 1 else 0
+                events.append(
+                    TrafficSpawn(
+                        frame=frame,
+                        road_index=ri,
+                        along_frac=entry_along_frac(direction),
+                        direction=direction,
+                        archetype_index=arch,
+                        event_id=event_id,
+                        phase=PHASE_ONGOING,
+                        lane_index=lane_index,
+                    )
                 )
-            )
-            event_id += 1
+                event_id += 1
         frame += interval + rng.randint(0, 3)
     return events
 

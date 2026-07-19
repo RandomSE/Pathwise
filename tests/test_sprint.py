@@ -5,13 +5,7 @@ import unittest
 from pathwise.input_keys import KEY_RIGHT, KeyState
 from pathwise.pedestrian import Pedestrian
 from pathwise.sim_constants import PEDESTRIAN_SPEED, SPRINT_SPEED_MULT
-from pathwise.sprint import (
-    apply_sprint_crosswalk_frame,
-    effective_pedestrian_speed,
-    should_cancel_sprint_on_crosswalk_entry,
-    should_cancel_sprint_on_surface_entry,
-    sprint_risk_reason,
-)
+from pathwise.sprint import effective_pedestrian_speed, sprint_risk_reason
 
 
 class TestSprintSpeed(unittest.TestCase):
@@ -46,6 +40,33 @@ class TestSprintSpeed(unittest.TestCase):
         self.assertTrue(ped.sprint_enabled)
         ped.toggle_sprint()
         self.assertFalse(ped.sprint_enabled)
+
+    def test_old_walk_speed_still_moves_via_subpixel_carry(self):
+        from pathwise.modifiers.registry import ModifierContext
+        from pathwise.modifiers import old, time_pressure
+
+        old.install_for_round(ModifierContext(frozenset({"old", "time_pressure"})))
+        time_pressure.install_for_round(
+            ModifierContext(frozenset({"old", "time_pressure"})),
+            preset_id="normal",
+        )
+        self.addCleanup(lambda: old.install_for_round(ModifierContext(frozenset())))
+        self.addCleanup(
+            lambda: time_pressure.install_for_round(ModifierContext(frozenset()))
+        )
+        ped = Pedestrian((100, 100))
+        keys = KeyState()
+        keys.press(KEY_RIGHT)
+        x0 = ped.rect.x
+        for _ in range(4):
+            ped.update(keys)
+        self.assertGreater(ped.rect.x, x0)
+
+    def test_pedestrian_has_no_crosswalk_suppression_state(self):
+        ped = Pedestrian((0, 0))
+        self.assertFalse(hasattr(ped, "sprint_suppressed_on_crosswalk"))
+        self.assertFalse(hasattr(ped, "was_on_crosswalk"))
+        self.assertFalse(hasattr(ped, "was_on_road"))
 
 
 class TestSprintRiskReason(unittest.TestCase):
@@ -90,119 +111,6 @@ class TestSprintRiskReason(unittest.TestCase):
                 on_crosswalk=False,
             )
         )
-
-
-class TestSprintSurfaceCancel(unittest.TestCase):
-    def test_cancels_on_first_crosswalk_entry(self):
-        self.assertTrue(
-            should_cancel_sprint_on_crosswalk_entry(
-                sprinting=True,
-                on_crosswalk=True,
-                was_on_crosswalk=False,
-                suppressed_this_visit=False,
-            )
-        )
-
-    def test_no_cancel_when_entering_road_only(self):
-        self.assertFalse(
-            should_cancel_sprint_on_crosswalk_entry(
-                sprinting=True,
-                on_crosswalk=False,
-                was_on_crosswalk=False,
-                suppressed_this_visit=False,
-            )
-        )
-
-    def test_cancels_on_first_surface_entry(self):
-        self.assertTrue(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=True,
-                on_surface=True,
-                was_on_surface=False,
-                suppressed_this_visit=False,
-            )
-        )
-
-    def test_no_cancel_when_already_on_surface(self):
-        self.assertFalse(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=True,
-                on_surface=True,
-                was_on_surface=True,
-                suppressed_this_visit=False,
-            )
-        )
-
-    def test_no_cancel_after_suppressed_until_leave(self):
-        self.assertFalse(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=True,
-                on_surface=True,
-                was_on_surface=False,
-                suppressed_this_visit=True,
-            )
-        )
-
-    def test_no_cancel_when_sprint_off(self):
-        self.assertFalse(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=False,
-                on_surface=True,
-                was_on_surface=False,
-                suppressed_this_visit=False,
-            )
-        )
-
-    def test_rain_exception_reserved_for_later(self):
-        self.assertFalse(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=True,
-                on_surface=True,
-                was_on_surface=False,
-                suppressed_this_visit=False,
-                raining=True,
-            )
-        )
-
-    def test_re_sprint_on_same_visit_not_auto_cancelled(self):
-        self.assertFalse(
-            should_cancel_sprint_on_surface_entry(
-                sprinting=True,
-                on_surface=True,
-                was_on_surface=True,
-                suppressed_this_visit=True,
-            )
-        )
-
-    def test_suppression_resets_after_leaving_crosswalk(self):
-        ped = Pedestrian((0, 0))
-        ped.sprint_enabled = True
-        ped.sprint_suppressed_on_crosswalk = True
-        ped.was_on_crosswalk = True
-        ped.was_on_road = False
-        apply_sprint_crosswalk_frame(ped, on_crosswalk=False, on_road=True)
-        self.assertFalse(ped.sprint_suppressed_on_crosswalk)
-        self.assertFalse(ped.was_on_crosswalk)
-        self.assertTrue(ped.was_on_road)
-
-    def test_road_then_crosswalk_cancels_sprint(self):
-        ped = Pedestrian((0, 0))
-        ped.sprint_enabled = True
-        apply_sprint_crosswalk_frame(ped, on_crosswalk=False, on_road=True)
-        self.assertTrue(ped.sprint_enabled)
-        self.assertTrue(ped.was_on_road)
-        self.assertFalse(ped.was_on_crosswalk)
-        apply_sprint_crosswalk_frame(ped, on_crosswalk=True, on_road=True)
-        self.assertFalse(ped.sprint_enabled)
-        self.assertTrue(ped.sprint_suppressed_on_crosswalk)
-
-    def test_suppression_clears_on_sidewalk(self):
-        ped = Pedestrian((0, 0))
-        ped.sprint_suppressed_on_crosswalk = True
-        ped.was_on_crosswalk = False
-        ped.was_on_road = False
-        apply_sprint_crosswalk_frame(ped, on_crosswalk=False, on_road=False)
-        self.assertFalse(ped.sprint_suppressed_on_crosswalk)
 
 
 if __name__ == "__main__":

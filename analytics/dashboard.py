@@ -12,6 +12,52 @@ from analytics.replay_playback import (
     replay_step_for_session,
 )
 
+DEFAULT_CITY_REPLAY_ZOOM = 6.0
+DEFAULT_HIGHWAY_REPLAY_ZOOM = 2.0
+OLD_DEFAULT_PLAYBACK_RATE = 2.0
+
+
+def session_modifier_ids(session: dict | None) -> frozenset[str]:
+    if not session:
+        return frozenset()
+    raw = session.get("modifiers") or []
+    return frozenset(str(item) for item in raw)
+
+
+def session_is_highway(session: dict | None) -> bool:
+    """True when this round was a Highway map/modifier run."""
+    if not session:
+        return False
+    if "highway" in session_modifier_ids(session):
+        return True
+    layout = session.get("map_layout") or {}
+    map_id = str(layout.get("map_id") or "")
+    if map_id.startswith("highway"):
+        return True
+    generation = layout.get("generation") or session.get("generation_meta") or {}
+    return generation.get("mode") == "highway"
+
+
+def replay_defaults_for_session(
+    session: dict | None,
+    *,
+    default_playback_rate: float = 1.0,
+) -> tuple[float, float]:
+    """Return (playback_rate, replay_zoom) for dashboard open defaults.
+
+    Old forces 2x playback (viewer only). Highway opens at 200% zoom; other
+    maps keep 600%. Caller default_playback_rate still wins when higher.
+    """
+    rate = float(default_playback_rate)
+    if "old" in session_modifier_ids(session):
+        rate = max(rate, OLD_DEFAULT_PLAYBACK_RATE)
+    zoom = (
+        DEFAULT_HIGHWAY_REPLAY_ZOOM
+        if session_is_highway(session)
+        else DEFAULT_CITY_REPLAY_ZOOM
+    )
+    return rate, zoom
+
 
 def build_dashboard_html(
     session_path,
@@ -86,6 +132,11 @@ def build_dashboard_html(
     if output_path is None:
         base = os.path.splitext(os.path.basename(session_path))[0]
         output_path = os.path.join(os.path.dirname(session_path) or ".", f"{base}_dashboard.html")
+
+    default_playback_rate, default_replay_zoom = replay_defaults_for_session(
+        session, default_playback_rate=default_playback_rate
+    )
+    default_zoom_label = f"{int(round(default_replay_zoom * 100))}%"
 
     data_json = json.dumps(
         {
@@ -312,7 +363,7 @@ def build_dashboard_html(
       color: var(--text);
     }}
     .event-log {{
-      max-height: 140px;
+      max-height: 420px;
       overflow-y: auto;
       font-family: ui-monospace, monospace;
       font-size: 0.72rem;
@@ -440,8 +491,9 @@ def build_dashboard_html(
         <button type="button" id="zoom-out" title="Zoom out">−</button>
         <button type="button" id="zoom-reset" title="Reset zoom">Reset</button>
         <button type="button" id="zoom-in" title="Zoom in">+</button>
-        <span id="zoom-level">100%</span>
+        <span id="zoom-level">{default_zoom_label}</span>
         <span class="replay-zoom-hint">Scroll to zoom · drag to pan</span>
+        <button type="button" id="camera-lock-toggle" title="Toggle camera lock">Unlock camera from candidate</button>
       </div>
       <div class="scrubber">
         <button type="button" id="frame-play" title="Play replay" aria-label="Play replay">&#9654;</button>
@@ -499,15 +551,17 @@ def build_dashboard_html(
     let playAnchorWall = 0;
     let playAnchorSim = 0;
     const DEFAULT_PLAYBACK_RATE = {default_playback_rate};
+    const DEFAULT_REPLAY_ZOOM = {default_replay_zoom};
     let playbackRate = DEFAULT_PLAYBACK_RATE;
     const REPLAY_STEP_S = {replay_step_s};
     const REPLAY_MIN_GAP_S = {replay_min_gap_s};
     const REPLAY_MAX_GAP_S = {replay_max_gap_s};
-    let replayZoom = 1;
+    let replayZoom = DEFAULT_REPLAY_ZOOM;
     let replayPanX = 0;
     let replayPanY = 0;
     let replayBaseBounds = null;
     let replayDrag = null;
+    let cameraFollowCandidate = true;
 
     let activeRoundIndex = 0;
     let scrubberInitialized = false;
@@ -550,7 +604,7 @@ def build_dashboard_html(
       el.innerHTML = rounds.map((r, i) => {{
         const active = i === activeRoundIndex ? " active" : "";
         const oc = r.outcome ? ` outcome-${{r.outcome}}` : "";
-        return `<button type="button" class="round-tab${{active}}${{oc}}" data-idx="${{i}}">Round ${{r.round}} — ${{r.outcome || "?"}}</button>`;
+        return `<button type="button" class="round-tab${{active}}${{oc}}" data-idx="${{i}}">Round ${{r.round}}: ${{r.outcome || "?"}}</button>`;
       }}).join("");
       el.querySelectorAll(".round-tab").forEach(btn => {{
         btn.addEventListener("click", () => selectRound(Number(btn.dataset.idx)));
@@ -662,11 +716,52 @@ def build_dashboard_html(
       applyReplayViewBox();
     }}
 
-    function resetReplayZoom() {{
-      replayZoom = 1;
-      replayPanX = 0;
-      replayPanY = 0;
+    function candidateFocusPoint() {{
+      const frames = DATA.frames || [];
+      const frame = frames[currentFrameIndex] || frames[0];
+      if (frame && frame.player) {{
+        return {{ x: frame.player.x, y: frame.player.y }};
+      }}
+      const start = (DATA.map_layout || {{}}).start;
+      if (!start) return null;
+      if (Array.isArray(start)) return {{ x: start[0], y: start[1] }};
+      return {{ x: start.x, y: start.y }};
+    }}
+
+    function centerPanOn(x, y) {{
+      const b = replayBaseBounds;
+      if (!b) return;
+      replayPanX = x - (b.x + b.w / 2);
+      replayPanY = y - (b.y + b.h / 2);
+    }}
+
+    function updateCameraLockButton() {{
+      const btn = document.getElementById("camera-lock-toggle");
+      if (!btn) return;
+      btn.textContent = cameraFollowCandidate
+        ? "Unlock camera from candidate"
+        : "Lock camera to candidate";
+    }}
+
+    function setCameraFollow(locked) {{
+      cameraFollowCandidate = !!locked;
+      updateCameraLockButton();
+      if (cameraFollowCandidate) applyFollowCamera();
+    }}
+
+    function applyFollowCamera() {{
+      if (!cameraFollowCandidate) return;
+      const point = candidateFocusPoint();
+      if (!point) return;
+      centerPanOn(point.x, point.y);
       applyReplayViewBox();
+    }}
+
+    function resetReplayZoom() {{
+      replayZoom = DEFAULT_REPLAY_ZOOM;
+      cameraFollowCandidate = true;
+      updateCameraLockButton();
+      applyFollowCamera();
     }}
 
     function initReplayZoom() {{
@@ -675,21 +770,30 @@ def build_dashboard_html(
       document.getElementById("zoom-in").addEventListener("click", () => {{
         const r = viewport.getBoundingClientRect();
         zoomReplayAt(1.25, r.left + r.width / 2, r.top + r.height / 2);
+        if (cameraFollowCandidate) applyFollowCamera();
       }});
       document.getElementById("zoom-out").addEventListener("click", () => {{
         const r = viewport.getBoundingClientRect();
         zoomReplayAt(0.8, r.left + r.width / 2, r.top + r.height / 2);
+        if (cameraFollowCandidate) applyFollowCamera();
       }});
       document.getElementById("zoom-reset").addEventListener("click", resetReplayZoom);
+      const lockBtn = document.getElementById("camera-lock-toggle");
+      if (lockBtn) {{
+        lockBtn.addEventListener("click", () => setCameraFollow(!cameraFollowCandidate));
+        updateCameraLockButton();
+      }}
 
       viewport.addEventListener("wheel", (e) => {{
         e.preventDefault();
         const factor = e.deltaY < 0 ? 1.12 : 0.89;
         zoomReplayAt(factor, e.clientX, e.clientY);
+        if (cameraFollowCandidate) applyFollowCamera();
       }}, {{ passive: false }});
 
       viewport.addEventListener("mousedown", (e) => {{
         if (e.button !== 0) return;
+        setCameraFollow(false);
         replayDrag = {{ startX: e.clientX, startY: e.clientY, panX: replayPanX, panY: replayPanY }};
         viewport.classList.add("is-dragging");
       }});
@@ -1152,10 +1256,11 @@ def build_dashboard_html(
       const dec = frame.decision;
       let decLabel = "";
       if (dec && !isRiskAction(dec.action, dec.risk)) {{
-        decLabel = (dec.id ? dec.id + " — " : "") + dec.label;
+        decLabel = (dec.id ? dec.id + ": " : "") + dec.label;
       }}
       document.getElementById("frame-decision-label").textContent = decLabel;
       if (!fromPlayback) highlightReplayLogs(frames[idx]);
+      if (cameraFollowCandidate) applyFollowCamera();
       drawFrame(frame);
     }}
 
@@ -1243,7 +1348,7 @@ def build_dashboard_html(
       const max = frames.length - 1;
       ticksEl.innerHTML = marks.map(m => {{
         const pct = (m.frame / max) * 100;
-        const tip = (m.id ? m.id + " — " : "") + m.label + " @ " + m.t + "s";
+        const tip = (m.id ? m.id + ": " : "") + m.label + " @ " + m.t + "s";
         return `<button type="button" class="decision-tick" style="left:${{pct}}%" title="${{tip}}" data-frame="${{m.frame}}" data-decision-id="${{m.id || ""}}"></button>`;
       }}).join("");
       ticksEl.querySelectorAll(".decision-tick").forEach(btn => {{
@@ -1278,7 +1383,7 @@ def build_dashboard_html(
       const extra = anomalies.map(a => {{
         const frame = frameForSimTime(a.sim_t);
         const pct = (frame / max) * 100;
-        const tip = (a.kind || "anomaly") + " @ " + a.sim_t + "s — " + (a.summary || "");
+        const tip = (a.kind || "anomaly") + " @ " + a.sim_t + "s: " + (a.summary || "");
         return `<button type="button" class="decision-tick spectate-tick" style="left:${{pct}}%;background:#b86bff" title="${{tip}}" data-frame="${{frame}}"></button>`;
       }}).join("");
       ticksEl.insertAdjacentHTML("beforeend", extra);
@@ -1308,7 +1413,7 @@ def build_dashboard_html(
         jump.innerHTML = '<option value="">Jump to anomaly…</option>' +
           anomalies.map((a, i) => {{
             const frame = frameForSimTime(a.sim_t);
-            return `<option value="${{frame}}">${{a.sim_t.toFixed(1)}}s — ${{a.kind}} — ${{a.summary || ""}}</option>`;
+            return `<option value="${{frame}}">${{a.sim_t.toFixed(1)}}s: ${{a.kind}}: ${{a.summary || ""}}</option>`;
           }}).join("");
       }}
       if (log) {{
@@ -1331,7 +1436,7 @@ def build_dashboard_html(
       const max = frames.length - 1;
       ticksEl.innerHTML = marks.map(m => {{
         const pct = (m.frame / max) * 100;
-        const tip = (m.id ? m.id + " — " : "") + m.label + " @ " + m.t + "s";
+        const tip = (m.id ? m.id + ": " : "") + m.label + " @ " + m.t + "s";
         return `<button type="button" class="decision-tick risk-tick" style="left:${{pct}}%" title="${{tip}}" data-frame="${{m.frame}}"></button>`;
       }}).join("");
       ticksEl.querySelectorAll(".risk-tick").forEach(btn => {{
@@ -1344,14 +1449,14 @@ def build_dashboard_html(
       if (jump) {{
         jump.innerHTML = '<option value="">Jump to decision…</option>' +
           (DATA.decision_marks || []).map(m =>
-            `<option value="${{m.frame}}" data-decision-id="${{m.id || ""}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
+            `<option value="${{m.frame}}" data-decision-id="${{m.id || ""}}">${{m.id || "?"}}: ${{m.t.toFixed(1)}}s: ${{m.label}}</option>`
           ).join("");
       }}
       const riskJump = document.getElementById("frame-risk-jump");
       if (riskJump) {{
         riskJump.innerHTML = '<option value="">Jump to risk…</option>' +
           (DATA.risk_marks || []).map(m =>
-            `<option value="${{m.frame}}">${{m.id || "?"}} — ${{m.t.toFixed(1)}}s — ${{m.label}}</option>`
+            `<option value="${{m.frame}}">${{m.id || "?"}}: ${{m.t.toFixed(1)}}s: ${{m.label}}</option>`
           ).join("");
       }}
     }}
@@ -1494,8 +1599,8 @@ def build_dashboard_html(
         <strong>${{sum.slow_commits || 0}}</strong> deliberate commits</p>`;
 
       const seq = s.decision_sequence || [];
-      const decisions = seq.filter(d => !isRiskAction(d.action, d.risk)).slice(-40);
-      const risks = seq.filter(d => isRiskAction(d.action, d.risk)).slice(-40);
+      const decisions = seq.filter(d => !isRiskAction(d.action, d.risk));
+      const risks = seq.filter(d => isRiskAction(d.action, d.risk));
       document.getElementById("decision-log").innerHTML = decisions
         .map(d => `<div>${{formatDecisionLine(d)}}</div>`)
         .join("") || "<div class='subtitle'>No decisions logged.</div>";
@@ -1503,14 +1608,29 @@ def build_dashboard_html(
       const rm = DATA.risk_marks || [];
       const replayDec = document.getElementById("replay-decision-log");
       if (replayDec) {{
-        replayDec.innerHTML = decisions.map(d => replayEventRow(d, dm, formatDecisionLine)).join("")
-          || "<div class='subtitle'>No decisions.</div>";
+        // Use uncapped decision_marks (same source as Jump to decision), not the trimmed sequence.
+        replayDec.innerHTML = dm.map(m => {{
+          const row = {{
+            id: m.id,
+            t: m.t,
+            action: m.label || m.action,
+          }};
+          return `<div class="event-row" data-decision-id="${{m.id || ""}}" data-frame="${{m.frame}}">${{formatDecisionLine(row)}}</div>`;
+        }}).join("") || "<div class='subtitle'>No decisions.</div>";
         bindReplayLog(replayDec);
       }}
       const replayRisk = document.getElementById("replay-risk-log");
       if (replayRisk) {{
-        replayRisk.innerHTML = risks.map(d => replayEventRow(d, rm, formatRiskLine)).join("")
-          || "<div class='subtitle'>No risks.</div>";
+        replayRisk.innerHTML = rm.map(m => {{
+          const row = {{
+            id: m.id,
+            t: m.t,
+            action: m.action,
+            risk: m.risk,
+            risk_label: m.risk_label || m.label || m.risk,
+          }};
+          return `<div class="event-row" data-decision-id="${{m.id || ""}}" data-frame="${{m.frame}}">${{formatRiskLine(row)}}</div>`;
+        }}).join("") || "<div class='subtitle'>No risks.</div>";
         bindReplayLog(replayRisk);
       }}
 

@@ -6,9 +6,11 @@ import heapq
 import math
 from dataclasses import dataclass
 
-# Pedestrian ~60 px/s at PEDESTRIAN_SPEED=1, 60 FPS
+# Pedestrian ~60 px/s at PEDESTRIAN_SPEED=1, 60 FPS; sprint is 2× on sidewalks.
 PX_PER_SECOND = 60.0
+SPRINT_SPEED_MULT = 2.0
 CROSSING_BASE_S = 1.8
+MODERATE_SAFE_WAIT_FRAC = 0.35
 
 
 @dataclass(frozen=True)
@@ -60,9 +62,14 @@ def walk_cell_cost_s(stride_px: float) -> float:
     return max(1.0, stride_px / PX_PER_SECOND * 0.92)
 
 
+def sprint_cell_cost_s(stride_px: float) -> float:
+    """Seconds to sprint one block on sidewalk (2× walk speed)."""
+    return walk_cell_cost_s(stride_px) / SPRINT_SPEED_MULT
+
+
 def cross_road_cost_s(crossing_wait_s: float) -> float:
-    """Extra time to cross one road (lights + crossing)."""
-    return CROSSING_BASE_S + crossing_wait_s * 0.5
+    """Extra time to cross one road at walk speed (moderate-safe light waits)."""
+    return CROSSING_BASE_S + crossing_wait_s * MODERATE_SAFE_WAIT_FRAC
 
 
 def _neighbors(cell: Cell, cols: int, rows: int) -> list[Cell]:
@@ -96,18 +103,68 @@ def bfs_solvable(start: Cell, goal: Cell, cols: int, rows: int) -> bool:
 
 
 def _heuristic(a: Cell, b: Cell, stride_px: float) -> float:
-    walk = walk_cell_cost_s(stride_px)
-    return (abs(a.col - b.col) + abs(a.row - b.row)) * walk
+    # Admissible under the same cost model as _edge_cost: sidewalks use sprint
+    # seconds, and crossings only add non-negative wait. Manhattan * sprint
+    # never overestimates g, and is consistent because each step reduces
+    # Manhattan by 1 while costing at least one sprint cell.
+    sprint = sprint_cell_cost_s(stride_px)
+    return (abs(a.col - b.col) + abs(a.row - b.row)) * sprint
 
 
 def _edge_cost(a: Cell, b: Cell, crossing_wait_s: float, stride_px: float) -> float:
-    cost = walk_cell_cost_s(stride_px)
+    cost = sprint_cell_cost_s(stride_px)
     cross = cross_road_cost_s(crossing_wait_s)
     if a.col != b.col:
         cost += cross
     if a.row != b.row:
         cost += cross
     return cost
+
+
+def _route_crossings_between(a: Cell, b: Cell) -> int:
+    """Road crossings when moving between adjacent grid cells along the A* model."""
+    return int(a.col != b.col) + int(a.row != b.row)
+
+
+def astar_route_estimate(
+    start: Cell,
+    goal: Cell,
+    cols: int,
+    rows: int,
+    crossing_wait_s: float,
+    stride_px: float,
+) -> tuple[float, int] | None:
+    """Estimated seconds and road crossings along the shortest time-aware path."""
+    if not bfs_solvable(start, goal, cols, rows):
+        return None
+
+    open_heap: list[tuple[float, int, float, int, Cell]] = []
+    tie = 0
+    heapq.heappush(open_heap, (0.0, tie, 0.0, 0, start))
+    g_score: dict[Cell, float] = {start: 0.0}
+    crossings_score: dict[Cell, int] = {start: 0}
+
+    while open_heap:
+        _, _, g, crossings, current = heapq.heappop(open_heap)
+        if g > g_score.get(current, math.inf):
+            continue
+        if current == goal:
+            return g, crossings
+
+        for nxt in _neighbors(current, cols, rows):
+            tentative = g + _edge_cost(current, nxt, crossing_wait_s, stride_px)
+            if tentative < g_score.get(nxt, math.inf):
+                step_crossings = _route_crossings_between(current, nxt)
+                g_score[nxt] = tentative
+                crossings_score[nxt] = crossings + step_crossings
+                f = tentative + _heuristic(nxt, goal, stride_px)
+                tie += 1
+                heapq.heappush(
+                    open_heap,
+                    (f, tie, tentative, crossings_score[nxt], nxt),
+                )
+
+    return None
 
 
 def astar_travel_time(
@@ -119,27 +176,10 @@ def astar_travel_time(
     stride_px: float,
 ) -> float | None:
     """Estimated seconds along shortest time-aware path (None if unreachable)."""
-    if not bfs_solvable(start, goal, cols, rows):
+    result = astar_route_estimate(
+        start, goal, cols, rows, crossing_wait_s, stride_px
+    )
+    if result is None:
         return None
-
-    open_heap: list[tuple[float, int, float, Cell]] = []
-    tie = 0
-    heapq.heappush(open_heap, (0.0, tie, 0.0, start))
-    g_score: dict[Cell, float] = {start: 0.0}
-
-    while open_heap:
-        _, _, g, current = heapq.heappop(open_heap)
-        if g > g_score.get(current, math.inf):
-            continue
-        if current == goal:
-            return g
-
-        for nxt in _neighbors(current, cols, rows):
-            tentative = g + _edge_cost(current, nxt, crossing_wait_s, stride_px)
-            if tentative < g_score.get(nxt, math.inf):
-                g_score[nxt] = tentative
-                f = tentative + _heuristic(nxt, goal, stride_px)
-                tie += 1
-                heapq.heappush(open_heap, (f, tie, tentative, nxt))
-
-    return None
+    travel_s, _crossings = result
+    return travel_s
