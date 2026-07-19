@@ -18,6 +18,7 @@ from pathwise.traffic_signal_layout import (
     APPROACH_SOUTH,
     APPROACH_WEST,
 )
+from pathwise.modifiers import high_speed, highway, ignored, lag, lawless, rainy_roads, untrustworthy, variable_speed_zones
 from pathwise.sim_constants import *  # noqa: F403
 import pathwise.sim_constants as _tune
 
@@ -57,6 +58,7 @@ class CarSpawnOrigin:
     direction: int
     along_frac: float
     phase: str
+    lane_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -247,12 +249,14 @@ class Car(Entity):
         spawn_id=0,
         road_index=None,
         spawn_origin: CarSpawnOrigin | None = None,
+        lane_index: int = 0,
     ):
         super().__init__()
         self.direction = 1 if speed >= 0 else -1
         self.vertical = vertical
         self.spawn_id = spawn_id
         self.road_index = road_index
+        self.lane_index = int(lane_index)
         self._spawn_origin = spawn_origin
         if archetype_index is None:
             archetype_index = sprites.pick_random_archetype_index()
@@ -319,7 +323,9 @@ class Car(Entity):
         if self.road_index is None or self.road_index >= len(roads):
             return
         road = roads[self.road_index]
-        tcx, tcy = lane_center_xy(road, self.direction)
+        tcx, tcy = lane_center_xy(
+            road, self.direction, lane_index=getattr(self, "lane_index", 0)
+        )
         if road.direction == "vertical":
             if max_nudge is None:
                 self.rect.centery = tcy
@@ -906,7 +912,7 @@ class Car(Entity):
         )
 
     def _in_street_corridor(self, roads) -> bool:
-        """Segment gaps between intersections — center can miss thin road rects."""
+        """Segment gaps between intersections: center can miss thin road rects."""
         cx, cy = self.rect.centerx, self.rect.centery
         for road in roads:
             if not self._matches_road_travel(road):
@@ -1158,10 +1164,16 @@ class Car(Entity):
                 best = zone
         return best
 
+    def _spawn_ramp_limit(self) -> int:
+        if highway.is_active():
+            return highway.spawn_ramp_frames()
+        return CAR_SPAWN_RAMP_FRAMES
+
     def _spawn_ramp_cap(self) -> float:
-        if self._spawn_age >= CAR_SPAWN_RAMP_FRAMES:
+        ramp = self._spawn_ramp_limit()
+        if self._spawn_age >= ramp:
             return self.base_speed
-        t = self._spawn_age / CAR_SPAWN_RAMP_FRAMES
+        t = self._spawn_age / max(1, ramp)
         ease = t * t * (3.0 - 2.0 * t)
         return self.base_speed * ease
 
@@ -1169,7 +1181,7 @@ class Car(Entity):
         self, roads, intersection_zones, world_rect
     ) -> bool:
         """Despawn only after the car fully leaves the map (exit corridor handles segment ends)."""
-        if self._spawn_age < CAR_SPAWN_RAMP_FRAMES:
+        if self._spawn_age < self._spawn_ramp_limit():
             return False
         if self._near_intersection_bbox(intersection_zones) and self._shell_overlaps_intersection(
             intersection_zones, INTERSECTION_SHELL_PAD
@@ -1189,7 +1201,7 @@ class Car(Entity):
         self, roads, intersection_zones, world_rect, frame_index: int = 0
     ) -> str | None:
         """Why this car should despawn; None = keep."""
-        if self._spawn_age < CAR_SPAWN_RAMP_FRAMES:
+        if self._spawn_age < self._spawn_ramp_limit():
             return None
         if (
             self._gridlock_frames >= INTERSECTION_GRIDLOCK_FRAMES
@@ -1277,6 +1289,57 @@ class Car(Entity):
             return 0.0
         depth = zone.height if self.vertical else zone.width
         return float(entry) + float(depth)
+
+    def _obeys_traffic_signals(self) -> bool:
+        return lawless.signals_enabled() and highway.signals_enabled()
+
+    def _runs_red_lights(self) -> bool:
+        if not self._obeys_traffic_signals():
+            return True
+        return untrustworthy.should_skip_red_stop(spawn_id=self.spawn_id)
+
+    def _ignores_player(self) -> bool:
+        return (
+            ignored.should_disable_player_yield()
+            or highway.should_disable_player_yield()
+            or untrustworthy.should_disable_player_yield(spawn_id=self.spawn_id)
+        )
+
+    def _skips_player_body_block(self) -> bool:
+        return (
+            ignored.should_skip_player_body_block()
+            or highway.should_skip_player_body_block()
+            or untrustworthy.should_skip_player_body_block(spawn_id=self.spawn_id)
+        )
+
+    def _shared_intersection_zone(self, other, intersection_zones, *, pad: int = 96):
+        if not intersection_zones:
+            return None
+        for zone in intersection_zones:
+            expanded = zone.inflate(pad * 2, pad * 2)
+            if rects_overlap(expanded, self.rect) and rects_overlap(expanded, other.rect):
+                return zone
+        return None
+
+    def _propagate_unlawful_to_cars_ahead(self, peers, intersection_zones) -> None:
+        """If this car is lawless, infect cars ahead in the same intersection queue."""
+        if not untrustworthy.is_active() or not self._runs_red_lights():
+            return
+        if not intersection_zones:
+            return
+        for other in peers:
+            if other is self or not other.alive():
+                continue
+            if other.vertical != self.vertical or other.direction != self.direction:
+                continue
+            if not self._same_lane(other):
+                continue
+            if self._shared_intersection_zone(other, intersection_zones) is None:
+                continue
+            ahead, _lane_gap = self._distance_to_other(other)
+            if ahead <= 0 or ahead > untrustworthy.CONTAGION_RANGE_PX:
+                continue
+            untrustworthy.mark_unlawful(other.spawn_id)
 
     def _signal_stop_axis(self, crosswalk: Rect) -> int:
         """Crosswalk edge along our travel axis (white stop line)."""
@@ -1441,7 +1504,7 @@ class Car(Entity):
         return best
 
     def _committed_past_signal_stop(self, state: dict) -> bool:
-        """Past the stop line on the approach crosswalk — must clear, not re-queue."""
+        """Past the stop line on the approach crosswalk: must clear, not re-queue."""
         crosswalk = state.get("crosswalk")
         if crosswalk is None:
             return False
@@ -1498,18 +1561,40 @@ class Car(Entity):
         committed = (
             approach is not None and self._committed_past_signal_stop(approach)
         )
-        if approach is not None:
+        signals_on = self._obeys_traffic_signals()
+        if approach is not None and signals_on:
             light = self._effective_approach_light(approach)
             cannot_clear = not self._can_clear_signal_in_time(approach, target_zone)
             if light == "red":
-                if entering:
+                if entering and not self._runs_red_lights():
                     return True
             elif light == "yellow" and cannot_clear and not committed:
                 return True
-            elif light == "green" and entering and cannot_clear and not committed:
-                return True
+            # Green never hard-blocks for cannot_clear timing. Valid green stops are
+            # player yield / untrustworthy handling elsewhere, not signal entry gates.
 
         if not entering:
+            return False
+
+        # Past the stop line on green (or with signals off): clear into the box instead
+        # of freezing for moving cross traffic.
+        treat_as_green = (not signals_on) or (
+            approach is not None
+            and self._effective_approach_light(approach) == "green"
+        )
+        if committed and treat_as_green:
+            if self._exit_blocked_by_active_turn(
+                next_rect, move_peers or peers, intersection_zones
+            ):
+                return True
+            return False
+
+        # On green before the stop line (or unsignalized): keep advancing.
+        if treat_as_green:
+            if self._exit_blocked_by_active_turn(
+                next_rect, move_peers or peers, intersection_zones
+            ):
+                return True
             return False
 
         if self._entry_blocks_moving_cross_traffic(
@@ -1531,6 +1616,8 @@ class Car(Entity):
         self, next_rect, road_states, intersection_zones
     ) -> bool:
         """Do not step onto or creep across the crosswalk unless the signal allows clearing."""
+        if not self._obeys_traffic_signals() or self._runs_red_lights():
+            return False
         if self._turn_phase in ("turning", "settling", "to_hub"):
             return False
         if not road_states:
@@ -1570,9 +1657,16 @@ class Car(Entity):
         return not self._can_clear_signal_in_time(approach, zone)
 
     def _retreat_from_crosswalk_on_red(
-        self, state: dict, *, inside_intersection: bool, intersection_zones
+        self,
+        state: dict,
+        *,
+        inside_intersection: bool,
+        intersection_zones,
+        allow_overshoot: bool = False,
     ) -> bool:
         """Clamp cars behind the stop line instead of idling on the crosswalk."""
+        if allow_overshoot or self._runs_red_lights():
+            return False
         if inside_intersection or self._inside_intersection(intersection_zones):
             return False
         if self._turn_phase in ("turning", "settling", "to_hub"):
@@ -1608,7 +1702,8 @@ class Car(Entity):
         return False
 
     def _intersection_move_blocked(
-        self, next_rect, peers, intersection_zones, allow_perp_creep=False
+        self, next_rect, peers, intersection_zones, allow_perp_creep=False, *,
+        block_cross_traffic: bool = True,
     ):
         if not ENABLE_CAR_CAR_COLLISION:
             return False
@@ -1616,8 +1711,12 @@ class Car(Entity):
             return False
         if not self._in_or_entering_intersection(next_rect, intersection_zones):
             return False
-        if not allow_perp_creep and self._entry_blocks_moving_cross_traffic(
-            next_rect, peers, intersection_zones
+        if (
+            block_cross_traffic
+            and not allow_perp_creep
+            and self._entry_blocks_moving_cross_traffic(
+                next_rect, peers, intersection_zones
+            )
         ):
             return True
         my_n = sprites.car_collision_rect(next_rect, self.vertical)
@@ -1665,6 +1764,8 @@ class Car(Entity):
     ) -> None:
         """Off-screen straight traffic: signals + lane follow only (no turn/honk/player)."""
         desired_speed = self.base_speed
+        if variable_speed_zones.is_active():
+            desired_speed *= variable_speed_zones.speed_mult_for_car(self, roads)
         blocking_controls: list = []
         self._spawn_age += 1
         desired_speed = min(desired_speed, self._spawn_ramp_cap())
@@ -1675,16 +1776,21 @@ class Car(Entity):
             stop_axis = self._signal_stop_axis(nearest["crosswalk"])
             stop_distance = self._distance_to_signal_stop(stop_axis)
             if approach_light == "red":
-                desired_speed = self._apply_approach_signal_braking(
-                    nearest,
-                    stop_distance,
-                    desired_speed,
-                    blocking_controls,
-                    brake_dist=RED_SIGNAL_BRAKE_DIST,
-                    creep_dist=RED_SIGNAL_CREEP_DIST,
-                )
+                if not self._runs_red_lights():
+                    desired_speed = self._apply_approach_signal_braking(
+                        nearest,
+                        stop_distance,
+                        desired_speed,
+                        blocking_controls,
+                        brake_dist=RED_SIGNAL_BRAKE_DIST,
+                        creep_dist=RED_SIGNAL_CREEP_DIST,
+                    )
         # Snap back only a minor overshoot at a red light (e.g. spawned 1-2 frames past).
-        if self._turn_phase == "none" and self.current_speed < 0.5:
+        if (
+            not self._runs_red_lights()
+            and self._turn_phase == "none"
+            and self.current_speed < 0.5
+        ):
             for state in self._states_for_our_approach(road_states) or road_states:
                 cw = state["crosswalk"]
                 if not self._approach_crosswalk_relevant(cw):
@@ -1699,15 +1805,19 @@ class Car(Entity):
                         self._enforce_signal_stop_line(sa)
                         break
 
+        ramp = self._spawn_ramp_limit()
+        scale = high_speed.car_speed_scale() * lag.physics_scale()
+        desired_speed *= scale
         accel = (
-            self.base_speed / CAR_SPAWN_RAMP_FRAMES
-            if self._spawn_age < CAR_SPAWN_RAMP_FRAMES
-            else self.acceleration
+            self.base_speed * scale / max(1, ramp)
+            if self._spawn_age < ramp
+            else self.acceleration * scale
         )
         if self.current_speed < desired_speed:
             self.current_speed = min(desired_speed, self.current_speed + accel)
         else:
-            self.current_speed = max(desired_speed, self.current_speed - self.brake_strength)
+            brake = rainy_roads.effective_brake_strength(self.brake_strength)
+            self.current_speed = max(desired_speed, self.current_speed - brake)
 
         signed_speed = self.current_speed * self.direction
         blocked_by_line = False
@@ -1733,7 +1843,7 @@ class Car(Entity):
             if ENABLE_CAR_CAR_SOFT_AVOIDANCE:
                 next_rect = self._cap_next_rect_same_lane(next_rect, lane_peers)
             blocked_by_player = False
-            if player_body_rect is not None:
+            if player_body_rect is not None and not self._skips_player_body_block():
                 my_n = sprites.car_collision_rect_into(
                     next_rect, self.vertical, self._body_rect_scratch
                 )
@@ -1774,11 +1884,18 @@ class Car(Entity):
         game_time=0,
     ):
         desired_speed = self.base_speed
+        if variable_speed_zones.is_active():
+            desired_speed *= variable_speed_zones.speed_mult_for_car(self, roads)
         blocking_controls = []
         yield_roll = (_traffic_map_seed + self.spawn_id * 17) % 100
         will_yield_to_player = yield_roll < int(PLAYER_AVOIDANCE_CHANCE * 100)
         if ped_legal_crossing:
             will_yield_to_player = True
+        car_respect_player = respect_player and not self._ignores_player()
+        if self._ignores_player():
+            will_yield_to_player = False
+        runs_red = self._runs_red_lights()
+        self._propagate_unlawful_to_cars_ahead(lane_peers or move_peers, intersection_zones)
 
         inside_intersection = bool(intersection_zones) and self._rect_in_intersection(
             self.rect, intersection_zones
@@ -1861,6 +1978,8 @@ class Car(Entity):
         self._sync_collision_shell()
 
         for state in road_states:
+            if not self._obeys_traffic_signals():
+                break
             approach = state["approach_rect"]
             if not rects_overlap(self.rect, approach):
                 continue
@@ -1874,12 +1993,19 @@ class Car(Entity):
                 continue
 
             if in_crossing_lane:
+                crosswalk_key = crosswalk.x * 31 + crosswalk.y
+                overshoot_stop = rainy_roads.crosswalk_overshoot_enabled(
+                    spawn_id=self.spawn_id,
+                    crosswalk_key=crosswalk_key,
+                )
                 # Snap back over the stop line if the car is stopped at a red and
-                # slightly overshot (e.g. spawned 1–2 frames past the line).  Only
-                # correct minor overshoots (≤ STOP_LINE_GAP * 3) so we never teleport
+                # slightly overshot (e.g. spawned 1-2 frames past the line).  Only
+                # correct minor overshoots (<= STOP_LINE_GAP * 3) so we never teleport
                 # a car that is already deep inside the intersection.
                 if (
-                    not inside_intersection
+                    not runs_red
+                    and not overshoot_stop
+                    and not inside_intersection
                     and self._turn_phase == "none"
                     and self.current_speed < 0.5
                     and -STOP_LINE_GAP * 3 <= stop_distance < -STOP_LINE_GAP
@@ -1895,15 +2021,36 @@ class Car(Entity):
                             crosswalk, player_body_rect
                         ):
                             brake_dist = RED_SIGNAL_BRAKE_DIST + 24
-                        if approach_light == "red":
-                            desired_speed = self._apply_approach_signal_braking(
-                                state,
-                                stop_distance,
-                                desired_speed,
-                                blocking_controls,
-                                brake_dist=brake_dist,
-                                creep_dist=RED_SIGNAL_CREEP_DIST,
-                            )
+                        if approach_light == "red" and not runs_red:
+                            if overshoot_stop and stop_distance < RED_SIGNAL_CREEP_DIST:
+                                overshoot_px = rainy_roads.crosswalk_overshoot_distance_px(
+                                    spawn_id=self.spawn_id,
+                                    crosswalk_key=crosswalk_key,
+                                )
+                                if stop_distance <= -overshoot_px:
+                                    desired_speed = 0.0
+                                elif stop_distance < 0:
+                                    # Past the line, still closing on overshoot depth.
+                                    remain = overshoot_px + stop_distance
+                                    frac = max(0.0, remain / max(1, overshoot_px))
+                                    desired_speed = min(
+                                        desired_speed, self.base_speed * 0.2 * frac
+                                    )
+                                else:
+                                    desired_speed = min(
+                                        desired_speed,
+                                        self.base_speed
+                                        * max(0.12, stop_distance / max(1, overshoot_px)),
+                                    )
+                            else:
+                                desired_speed = self._apply_approach_signal_braking(
+                                    state,
+                                    stop_distance,
+                                    desired_speed,
+                                    blocking_controls,
+                                    brake_dist=brake_dist,
+                                    creep_dist=RED_SIGNAL_CREEP_DIST,
+                                )
                         elif (
                             approach_light == "yellow"
                             and stop_distance < YELLOW_SIGNAL_BRAKE_DIST
@@ -1932,13 +2079,19 @@ class Car(Entity):
                                     desired_speed, self.base_speed * 0.45
                                 )
 
-                        if state["stop_active"] and 0 < stop_distance < RED_SIGNAL_CREEP_DIST:
+                        if (
+                            not runs_red
+                            and approach_light in ("red", "yellow")
+                            and state["stop_active"]
+                            and 0 < stop_distance < RED_SIGNAL_CREEP_DIST
+                        ):
                             desired_speed = min(desired_speed, CAR_CREEP_SPEED)
 
                     self._retreat_from_crosswalk_on_red(
                         state,
                         inside_intersection=inside_intersection,
                         intersection_zones=intersection_zones,
+                        allow_overshoot=overshoot_stop,
                     )
 
         # Strong player-avoidance behavior: brake early when player is in/near lane ahead.
@@ -1949,7 +2102,7 @@ class Car(Entity):
             player_ahead = (player_body_rect.centerx - self.rect.centerx) * self.direction
             player_lane_gap = abs(player_body_rect.centery - self.rect.centery)
 
-        if ped_legal_crossing and respect_player and player_lane_gap < 58:
+        if ped_legal_crossing and car_respect_player and player_lane_gap < 58:
             for state in road_states:
                 if not collide(state["crosswalk"], player_body_rect):
                     continue
@@ -1960,7 +2113,7 @@ class Car(Entity):
                 if 0 < ped_stop_dist < RED_SIGNAL_BRAKE_DIST:
                     desired_speed = 0
                     break
-        elif respect_player and 0 < player_ahead < 220 and player_lane_gap < 52:
+        elif car_respect_player and 0 < player_ahead < 220 and player_lane_gap < 52:
             if will_yield_to_player:
                 if player_ahead < 70:
                     desired_speed = 0
@@ -2011,15 +2164,19 @@ class Car(Entity):
             )
         ):
             desired_speed = 0.0
-        if self._spawn_age < CAR_SPAWN_RAMP_FRAMES:
-            accel = self.base_speed / CAR_SPAWN_RAMP_FRAMES
+        ramp = self._spawn_ramp_limit()
+        scale = high_speed.car_speed_scale() * lag.physics_scale()
+        desired_speed *= scale
+        if self._spawn_age < ramp:
+            accel = self.base_speed * scale / max(1, ramp)
         else:
-            accel = self.acceleration
+            accel = self.acceleration * scale
 
         if self.current_speed < desired_speed:
             self.current_speed = min(desired_speed, self.current_speed + accel)
         else:
-            self.current_speed = max(desired_speed, self.current_speed - self.brake_strength)
+            brake = rainy_roads.effective_brake_strength(self.brake_strength)
+            self.current_speed = max(desired_speed, self.current_speed - brake)
 
         signed_speed = self.current_speed * self.direction
         if (
@@ -2101,11 +2258,21 @@ class Car(Entity):
             in_ix_move = self._in_or_entering_intersection(next_rect, intersection_zones)
             if signed_speed != 0:
                 if ENABLE_CAR_CAR_COLLISION:
+                    approach_state = (
+                        self._approach_state_for_signal(road_states)
+                        if road_states
+                        else None
+                    )
+                    approach_is_green = (
+                        approach_state is not None
+                        and self._effective_approach_light(approach_state) == "green"
+                    )
                     blocked = self._intersection_move_blocked(
                         next_rect,
                         move_peers if in_ix_move else lane_peers,
                         intersection_zones,
                         allow_perp_creep=intersection_creep,
+                        block_cross_traffic=not approach_is_green,
                     )
                     if not blocked and self._shell_hits_any_car(
                         next_rect, self.vertical, move_peers, shell=my_n
@@ -2161,6 +2328,7 @@ class Car(Entity):
                 )
                 if (
                     not blocked
+                    and not self._skips_player_body_block()
                     and not ped_legal_crossing
                     and player_feet_road
                     and collide(my_n, pbb)
@@ -2222,7 +2390,7 @@ class Car(Entity):
         ):
             if self.current_speed < 0.25 and self._stopped_frames > 8:
                 snap_nudge = 0
-            elif self._spawn_age < CAR_SPAWN_RAMP_FRAMES:
+            elif self._spawn_age < self._spawn_ramp_limit():
                 snap_nudge = 4
             else:
                 snap_nudge = None

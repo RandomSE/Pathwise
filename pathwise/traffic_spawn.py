@@ -113,6 +113,36 @@ def _blocks_player_spawn_shell(shell: Rect, player_rect) -> bool:
     return rects_overlap(shell, pb) or rects_overlap(shell, zone)
 
 
+def _highway_blocks_near_player_spawn(
+    x: int,
+    y: int,
+    vertical: bool,
+    player_rect,
+    road,
+    event: TrafficSpawn,
+) -> bool:
+    """Block mid-carriageway pop-ins within ~4 car lengths (not initial / curb)."""
+    from pathwise.modifiers import highway
+
+    if not highway.is_active() or player_rect is None:
+        return False
+    if getattr(event, "on_road", False):
+        return False
+    if highway.player_at_highway_side(player_rect, road):
+        return False
+    if vertical:
+        w, h = CAR_HEIGHT, CAR_WIDTH
+    else:
+        w, h = CAR_WIDTH, CAR_HEIGHT
+    cx = x + w // 2
+    cy = y + h // 2
+    if vertical:
+        along = abs(cy - player_rect.centery)
+    else:
+        along = abs(cx - player_rect.centerx)
+    return along < highway.near_player_spawn_gap_px()
+
+
 def _blocks_player_spawn(candidate: Car, player_rect) -> bool:
     return _blocks_player_spawn_shell(candidate._collision_shell, player_rect)
 
@@ -185,6 +215,29 @@ def _car_spawn_pose_valid(candidate: Car, roads, city_blocks=None) -> bool:
         road_index=candidate.road_index,
         block_rects=block_rects,
     )
+
+
+def _highway_vertical_gap_blocked(rect: Rect, vertical: bool, peers) -> bool:
+    """True when a highway spawn would sit too close vertically to a car sharing its column.
+
+    Guarantees at least 1.5 player bodies of vertical clearance between cars that
+    overlap along the travel (horizontal) axis, so the player can weave between them.
+    """
+    from pathwise.modifiers import highway
+
+    if vertical or not highway.is_active():
+        return False
+    min_gap = highway.min_vertical_weave_gap_px()
+    for other in peers:
+        if other.vertical != vertical:
+            continue
+        # Only cars sharing the same horizontal span can pin the player vertically.
+        if rect.left >= other.rect.right or rect.right <= other.rect.left:
+            continue
+        vgap = max(other.rect.top - rect.bottom, rect.top - other.rect.bottom)
+        if vgap < min_gap:
+            return True
+    return False
 
 
 def _spawn_forward_lane_clear(
@@ -332,14 +385,23 @@ def _spawn_car_from_event(
     scratch: list | None = None,
 ) -> bool:
     road = roads[event.road_index]
+    from pathwise.modifiers import highway
+
     if event.phase == PHASE_ONGOING:
-        queue_cap = 3 if for_respawn else EDGE_SPAWN_QUEUE_CAP
+        hw_queue = highway.edge_spawn_queue_cap()
+        if hw_queue is not None:
+            if not lane_spawn_allowed(cars_group, road, event.direction, event.phase):
+                return False
+            queue_cap = int(hw_queue)
+        else:
+            queue_cap = 3 if for_respawn else EDGE_SPAWN_QUEUE_CAP
         if not edge_spawn_lane_allowed(
             cars_group,
             road,
             event.direction,
             world_rect,
             max_queue=queue_cap,
+            lane_index=int(getattr(event, "lane_index", 0) or 0),
         ):
             return False
     elif not lane_spawn_allowed(cars_group, road, event.direction, event.phase):
@@ -352,6 +414,10 @@ def _spawn_car_from_event(
     block_rects = _round_city_block_rects or _city_block_rects_from(city_blocks)
     for x, y, direction_sign, vertical in poses:
         if pose_overlaps_intersection_rects(x, y, vertical, ix_rects):
+            continue
+        if _highway_blocks_near_player_spawn(
+            x, y, vertical, player_rect, road, event
+        ):
             continue
         probe_rect, probe_shell = _spawn_probe_geometry(x, y, vertical)
         direction = 1 if direction_sign >= 0 else -1
@@ -379,7 +445,14 @@ def _spawn_car_from_event(
             lane_peers = cars_group
         if not _spawn_forward_lane_clear(probe_rect, vertical, direction, lane_peers):
             continue
-        speed = CAR_SPEED * CAR_SPEED_MULT * direction_sign
+        if _highway_vertical_gap_blocked(probe_rect, vertical, lane_peers):
+            continue
+        speed = (
+            CAR_SPEED
+            * CAR_SPEED_MULT
+            * highway.car_speed_mult()
+            * direction_sign
+        )
         candidate = Car(
             x,
             y,
@@ -388,12 +461,14 @@ def _spawn_car_from_event(
             archetype_index=event.archetype_index,
             spawn_id=event.event_id,
             road_index=event.road_index,
+            lane_index=int(getattr(event, "lane_index", 0) or 0),
         )
         candidate._spawn_origin = CarSpawnOrigin(
             event.road_index,
             1 if direction_sign >= 0 else -1,
             event.along_frac,
             event.phase,
+            lane_index=int(getattr(event, "lane_index", 0) or 0),
         )
         cars_group.add(candidate)
         all_sprites_group.add(candidate)
@@ -472,6 +547,7 @@ def _process_car_respawns(
             archetype_index=sprites.pick_random_archetype_index(),
             event_id=traffic_respawn_event_id,
             phase=origin.phase,
+            lane_index=int(getattr(origin, "lane_index", 0) or 0),
         )
         if _spawn_car_from_event(
             event,
@@ -602,12 +678,3 @@ def _process_traffic_spawns_through_frame(
 
 
 set_car_removed_callback(_queue_car_respawn)
-
-
-def sync_state_to(target) -> None:
-    """Mirror spawn module state onto main or game_runtime."""
-    target.traffic_schedule = traffic_schedule
-    target.traffic_spawn_cursor = traffic_spawn_cursor
-    target.traffic_spawn_retry = traffic_spawn_retry
-    target.traffic_respawn_pending = traffic_respawn_pending
-    target.traffic_respawn_event_id = traffic_respawn_event_id

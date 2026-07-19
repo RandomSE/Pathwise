@@ -20,7 +20,24 @@ class TestCrosswalkRules(unittest.TestCase):
     def test_update_legal_crossing_commit_latches_on_red(self):
         self.assertTrue(update_legal_crossing_commit(False, True, True))
         self.assertTrue(update_legal_crossing_commit(True, True, False))
-        self.assertFalse(update_legal_crossing_commit(True, False, False))
+        self.assertTrue(update_legal_crossing_commit(True, False, False, on_road=True))
+        self.assertFalse(update_legal_crossing_commit(True, False, False, on_road=False))
+
+    def test_update_legal_crossing_commit_unsignalized_latches_without_red(self):
+        self.assertTrue(
+            update_legal_crossing_commit(False, True, False, unsignalized=True)
+        )
+        self.assertFalse(
+            update_legal_crossing_commit(False, True, False, unsignalized=False)
+        )
+
+    def test_commit_survives_light_change_on_road(self):
+        active = update_legal_crossing_commit(False, True, True)
+        active = update_legal_crossing_commit(active, True, False)
+        self.assertTrue(active)
+        active = update_legal_crossing_commit(active, False, False, on_road=True)
+        self.assertTrue(active)
+        self.assertTrue(crosswalk_crossing_is_legal(False, active))
 
     def test_crosswalk_crossing_is_legal(self):
         self.assertTrue(crosswalk_crossing_is_legal(True, False))
@@ -67,6 +84,8 @@ class TestCrosswalkRules(unittest.TestCase):
         road = Road(make_rectangle(100, 200, 110, 400), commonUtils.VERTICAL)
         self.assertTrue(road_midline_crossed((155, 500), (155, 300), road))
         self.assertFalse(road_midline_crossed((120, 300), (180, 300), road))
+        mid = road.rect.centery
+        self.assertTrue(road_midline_crossed((155, mid + 1), (155, mid), road))
 
 
 if __name__ == "__main__":

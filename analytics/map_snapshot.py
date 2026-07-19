@@ -22,6 +22,9 @@ def dedupe_road_states_by_crosswalk(road_states):
 
 def serialize_lights_for_replay(road_states) -> list[dict]:
     """One light record per map_layout crosswalk (deduped by geometry)."""
+    from pathwise.modifiers import lawless
+
+    enabled = lawless.signals_enabled()
     return [
         {
             "s": state["light_state"],
@@ -30,6 +33,7 @@ def serialize_lights_for_replay(road_states) -> list[dict]:
             "tin": round(state.get("turn_seconds_to_change", 0), 1),
             "next": state.get("next_light", "green"),
             "tnext": state.get("next_turn_light", "green"),
+            "enabled": enabled,
         }
         for state in dedupe_road_states_by_crosswalk(road_states)
     ]

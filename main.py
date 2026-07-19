@@ -1,4 +1,4 @@
-"""Pathwise game entry point — thin orchestration over pathwise modules."""
+"""Pathwise game entry point: thin orchestration over pathwise modules."""
 
 from __future__ import annotations
 
@@ -64,6 +64,9 @@ session_num_rounds = pre_game.DEFAULT_ROUNDS
 session_base_seed = 0
 session_seed_source = "random"
 session_use_adaptive_map = False
+session_modifiers = None
+session_audience = "candidate"
+rain_slip_tracker = None
 round_results = []
 world_bounds = None
 road_states = []
@@ -110,7 +113,7 @@ def _game_state():
 
 
 def _sync_spawn_state_from_module() -> None:
-    traffic_spawn.sync_state_to(_game_state())
+    sync_spawn_state_from_runtime()
 
 
 from pathwise.crosswalk_rules import (  # noqa: E402
@@ -164,6 +167,7 @@ from pathwise.round_session import (  # noqa: E402
     record_risk,
     save_session_log,
     start_round,
+    sync_spawn_state_from_runtime,
 )
 from pathwise.round_frame import draw_round_frame, update_round_frame  # noqa: E402
 

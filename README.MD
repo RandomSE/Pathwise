@@ -15,7 +15,7 @@ If successful, your terminal prompt will show (venv) before the path.
 From the project root with the venv activated: `pip install -r requirements.txt`
 
 - **Python 3.14:** may need `pip install "Pillow>=11.3.0"` before installing Arcade.
-- **Python 3.12–3.13:** `pip install -r requirements.txt` is usually sufficient.
+- **Python 3.12-3.13:** `pip install -r requirements.txt` is usually sufficient.
 
 Use Python 3.9+ (3.12 is the primary tested target).
 
@@ -24,15 +24,15 @@ In the same OS-specific terminal opened in step 2, run `python main.py` (or `pyt
 
 **Candidate (default):** the app opens on the play screen. Paste or type an optional recruiter seed, then **Play set seed** or **Play random seed** (empty field). **Ctrl+V** pastes into the seed field. **Configure seed** opens recruiter options.
 
-**Recruiter:** set rounds (1–5) and difficulty, then **Generate seed** to create a 10-digit code that encodes the map seed, rounds, and preset. **Start session** runs the full configuration locally; **Back to play area** copies the generated seed to the candidate screen for candidates to use.
+**Recruiter:** set rounds (1-5) and difficulty, then **Generate seed** to create a 10-digit code that encodes the map seed, rounds, and preset. **Start session** runs the full configuration locally; **Back to play area** copies the generated seed to the candidate screen for candidates to use.
 
 Cross roads without hitting cars; reach the goal before time runs out. With **more than one round**, each round uses a derived map from the same session seed and gets harder (faster traffic, denser spawns, tighter lights).
 
-**Recruiter fairness (env pin):** `set PATHWISE_SEED=12345` (Windows) still pins map generation for scripted runs and is recorded in `logs.json` (`session_seed`, `seed_source`, `pathwise_seed_env`). Candidate quick play with an empty seed does **not** use `PATHWISE_SEED` — it rolls random instead. **Adaptive maps:** when neither a typed/generated seed nor `PATHWISE_SEED` fixes a seed, map layout tunes from the prior session in `logs.json`.
+**Recruiter fairness (env pin):** `set PATHWISE_SEED=12345` (Windows) still pins map generation for scripted runs and is recorded in `logs.json` (`session_seed`, `seed_source`, `pathwise_seed_env`). Candidate quick play with an empty seed does **not** use `PATHWISE_SEED`; it rolls random instead. **Adaptive maps:** when neither a typed/generated seed nor `PATHWISE_SEED` fixes a seed, map layout tunes from the prior session in `logs.json`.
 
 5. View Recruiter Analytics
 After each run, Pathwise writes `logs.json` (decision sequence, hesitation events, heatmap samples) and auto-generates `logs_dashboard.html`.
-**Car motion diagnostics:** abnormal traffic events (backward movement, 10s+ stalls) append to `car_diagnostics.jsonl` — share this file when reporting car AI bugs.
+**Car motion diagnostics:** abnormal traffic events (backward movement, 10s+ stalls) append to `car_diagnostics.jsonl`: share this file when reporting car AI bugs.
 Open the HTML file in a browser to see role-tailored archetype scores and a **frame-by-frame replay** (roads, cars, traffic lights, player) with a scrubber and jump-to-decision markers.
 To rebuild the dashboard from an existing log: `python -m analytics.dashboard logs.json`
 
@@ -40,4 +40,4 @@ To rebuild the dashboard from an existing log: `python -m analytics.dashboard lo
 Install dev dependencies: `pip install -r requirements-dev.txt`
 Run tests: `python -m pytest tests/ -q`
 Coverage gate (≥95% line coverage on `pathwise/`, `map_generation/`, `analytics/`, `main.py`): `python -m pytest tests/ --cov=pathwise --cov=map_generation --cov=analytics --cov=main --cov-report=term-missing --cov-config=.coveragerc`
-Measured baseline (2026-06-11): **91.7%** — the gate fails until `main.py` Car logic is extracted and more unit tests can target `pathwise.car` (see Follow-Up Queue).
+Measured baseline (2026-06-11): **91.7%**: the gate fails until `main.py` Car logic is extracted and more unit tests can target `pathwise.car` (see Follow-Up Queue).

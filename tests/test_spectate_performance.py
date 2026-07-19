@@ -104,7 +104,7 @@ class TestRedLightStopDistance(unittest.TestCase):
         crosswalk = __import__("pathwise.geom", fromlist=["Rect"]).Rect(280, 190, 14, 90)
         stop_axis = car._signal_stop_axis(crosswalk)
         blocking: list = []
-        # Start ~60px before line — old code froze here; should still allow creep.
+        # Start ~60px before line: old code froze here; should still allow creep.
         car.rect.right = stop_axis - 60
         speed = car._apply_approach_signal_braking(
             {"crosswalk": crosswalk},
@@ -116,7 +116,7 @@ class TestRedLightStopDistance(unittest.TestCase):
         )
         self.assertGreater(speed, 0.0)
 
-        # Within creep zone — capped but non-zero until at line.
+        # Within creep zone: capped but non-zero until at line.
         car.rect.right = stop_axis - RED_SIGNAL_CREEP_DIST + 4
         creep_speed = car._apply_approach_signal_braking(
             {"crosswalk": crosswalk},
@@ -129,7 +129,7 @@ class TestRedLightStopDistance(unittest.TestCase):
         self.assertLessEqual(creep_speed, 1.2)
         self.assertGreater(creep_speed, 0.0)
 
-        # At the line — hard hold.
+        # At the line: hard hold.
         car.rect.right = stop_axis - STOP_LINE_GAP
         hold_speed = car._apply_approach_signal_braking(
             {"crosswalk": crosswalk},

@@ -59,12 +59,17 @@ RISK_LABELS = {
     "crosswalk_vehicle_conflict": "Vehicle conflict at crosswalk",
     "vehicle_too_close": "Vehicle too close",
     "near_miss": "Near miss with moving vehicle",
-    "car_honk_close": "Honk — too close",
-    "car_honk_blocked": "Honk — blocked lane",
-    "car_honk_jaywalk": "Honk — jaywalking",
-    "legal_crosswalk_clear": "Legal crossing — no traffic conflict",
+    "car_honk_close": "Honk: too close",
+    "car_honk_blocked": "Honk: blocked lane",
+    "car_honk_jaywalk": "Honk: jaywalking",
+    "legal_crosswalk_clear": "Legal crossing: no traffic conflict",
     "crosswalk_with_traffic": "Crossing with moving traffic",
     "crosswalk_against_light": "Crossing against pedestrian signal",
+    "uncontrolled_crosswalk_with_traffic": "Uncontrolled crosswalk with approaching traffic",
+    "road_jaywalk": "Crossing road away from crosswalk",
+    "highway_crossing": "Crossing unprotected highway lanes",
+    "sprint_on_road": "Sprinting on road",
+    "sprint_on_crosswalk": "Sprinting on crosswalk",
 }
 
 

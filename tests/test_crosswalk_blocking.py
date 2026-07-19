@@ -180,7 +180,7 @@ class TestCrosswalkBlocking(unittest.TestCase):
             )
         )
 
-    def test_green_blocks_ix_entry_before_stop_when_cannot_clear(self):
+    def test_green_does_not_block_ix_entry_for_cannot_clear(self):
         import main as game
 
         zone = Rect(200, 300, 100, 100)
@@ -200,11 +200,67 @@ class TestCrosswalkBlocking(unittest.TestCase):
         }
         next_rect = car.rect.copy()
         next_rect.y -= 40
-        self.assertTrue(
+        self.assertFalse(
             car._intersection_entry_blocked(
                 next_rect, [state], [zone], [], []
             )
         )
+
+    def test_green_past_stop_never_entry_blocked_any_direction(self):
+        import main as game
+
+        for vertical, direction, approach in (
+            (True, -1, "south"),
+            (True, 1, "north"),
+            (False, -1, "east"),
+            (False, 1, "west"),
+        ):
+            with self.subTest(vertical=vertical, direction=direction):
+                zone = Rect(200, 300, 100, 100)
+                if vertical:
+                    if direction < 0:
+                        crosswalk = Rect(zone.left, zone.bottom + 6, zone.w, 22)
+                        car = game.Car(zone.centerx, 440, 3.0, vertical=True, spawn_id=8)
+                        car.direction = -1
+                        car.rect.bottom = crosswalk.top - 2
+                    else:
+                        crosswalk = Rect(zone.left, zone.top - 28, zone.w, 22)
+                        car = game.Car(zone.centerx, 260, 3.0, vertical=True, spawn_id=8)
+                        car.direction = 1
+                        car.rect.top = crosswalk.bottom + 2
+                else:
+                    if direction < 0:
+                        crosswalk = Rect(zone.right + 6, zone.top, 22, zone.h)
+                        car = game.Car(360, zone.centery, 3.0, vertical=False, spawn_id=8)
+                        car.direction = -1
+                        car.rect.right = crosswalk.left - 2
+                    else:
+                        crosswalk = Rect(zone.left - 28, zone.top, 22, zone.h)
+                        car = game.Car(140, zone.centery, 3.0, vertical=False, spawn_id=8)
+                        car.direction = 1
+                        car.rect.left = crosswalk.right + 2
+                car.current_speed = 2.0
+                car._sync_collision_shell(force=True)
+                state = {
+                    "crosswalk": crosswalk,
+                    "light_state": "green",
+                    "seconds_to_change": 8.0,
+                    "direction": "vertical" if vertical else "horizontal",
+                    "approach": approach,
+                    "approach_rect": zone.inflate(240, 240),
+                    "stop_active": True,
+                }
+                next_rect = car.rect.copy()
+                if vertical:
+                    next_rect.y += int(40 * direction)
+                else:
+                    next_rect.x += int(40 * direction)
+                self.assertTrue(car._committed_past_signal_stop(state))
+                self.assertFalse(
+                    car._intersection_entry_blocked(
+                        next_rect, [state], [zone], [], []
+                    )
+                )
 
 
 if __name__ == "__main__":

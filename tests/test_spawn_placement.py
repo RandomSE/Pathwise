@@ -1,4 +1,4 @@
-"""Perimeter spawn/goal placement — deterministic and edge coverage."""
+"""Perimeter spawn/goal placement: deterministic and edge coverage."""
 
 import unittest
 

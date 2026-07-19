@@ -201,7 +201,7 @@ def shared_gameplay_surface() -> GameplaySurface:
 
 
 def reset_shared_gameplay_surface() -> None:
-    """Test hook — drop cached GL resources between headless runs."""
+    """Test hook: drop cached GL resources between headless runs."""
     global _shared_surface
     from .projection_cache import reset_projection_cache
 

@@ -48,6 +48,7 @@ class EntityDrawBatch:
             sprite.height = shifted.height
             sprite.center_x = shifted.centerx
             sprite.center_y = sim_y_to_arcade(shifted.centery, sim_height)
+            sprite.angle = float(getattr(entity, "draw_angle", 0.0))
             sprite.visible = True
         for index in range(count, len(self._pool)):
             self._pool[index].visible = False

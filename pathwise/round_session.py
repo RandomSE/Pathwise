@@ -27,6 +27,9 @@ from pathwise.car import (
 from pathwise.entity_group import EntityGroup
 from pathwise.geom import Rect
 from pathwise.game_tuning import install_for_round
+from pathwise.modifiers.registry import ModifierContext
+from pathwise.modifiers import exposure, hidden, high_speed, highway, ignored, lag, lawless, old, rainy_roads, time_pressure, untrustworthy, variable_speed_zones
+from pathwise.modifiers.weather_visuals import bake_rainy_road_overlay, install_rain_visuals, reset_rain_visuals
 from pathwise.pedestrian import Pedestrian
 from pathwise.sim_constants import (
     INTERSECTION_SHELL_PAD,
@@ -88,24 +91,73 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
     install_for_round(preset_id, difficulty_profile)
     _apply_difficulty_globals(difficulty_profile)
 
+    modifiers = getattr(m, "session_modifiers", None) or ModifierContext(frozenset())
+    modifiers = ModifierContext(
+        modifiers.active,
+        session_base_seed=m.session_base_seed,
+        round_index=round_index,
+    )
+    m.session_modifiers = modifiers
+    rainy_roads.install_for_round(modifiers)
+    ignored.install_for_round(modifiers)
+    untrustworthy.install_for_round(modifiers)
+    lawless.install_for_round(modifiers)
+    time_pressure.install_for_round(modifiers, preset_id=preset_id)
+    highway.install_for_round(modifiers, preset_id=preset_id)
+    variable_speed_zones.install_for_round(modifiers)
+    high_speed.install_for_round(modifiers)
+    lag.install_for_round(modifiers)
+    old.install_for_round(modifiers)
+    hidden.install_for_round(
+        modifiers,
+        audience=getattr(m, "session_audience", "candidate"),
+    )
+    # exposure installs after ROUND_TIME_LIMIT is known (below)
+    if modifiers.has("rainy_roads"):
+        install_rain_visuals(session_base_seed=m.session_base_seed, round_index=round_index)
+    else:
+        reset_rain_visuals()
+    m.rain_slip_tracker = rainy_roads.RainSlipTracker() if modifiers.has("rainy_roads") else None
+
     set_car_removed_callback(traffic_spawn._queue_car_respawn)
 
     map_seed = _map_seed_for_round(m.session_base_seed, round_index)
     prior_session = _load_prior_session() if m.session_use_adaptive_map else None
-    map_difficulty = None if m.session_use_adaptive_map else difficulty_profile
-
-    m.current_map = map_generator.generate_map(
-        seed=map_seed,
-        prior_session=prior_session,
-        difficulty=map_difficulty,
+    map_difficulty = (
+        difficulty_profile.with_adaptive_traffic(prior_session)
+        if m.session_use_adaptive_map
+        else difficulty_profile
     )
-    m.ROUND_TIME_LIMIT = m.current_map.time_limit
+
+    if modifiers.has("highway"):
+        m.current_map = highway.generate_highway_map(
+            seed=map_seed,
+            difficulty=map_difficulty,
+            preset_id=preset_id,
+        )
+    else:
+        m.current_map = map_generator.generate_map(
+            seed=map_seed,
+            prior_session=None,
+            difficulty=map_difficulty,
+        )
+    m.ROUND_TIME_LIMIT = rainy_roads.scaled_time_limit(m.current_map.time_limit)
+    m.ROUND_TIME_LIMIT = time_pressure.initial_time_limit(m.ROUND_TIME_LIMIT)
+    m.ROUND_TIME_LIMIT = old.scaled_time_limit(m.ROUND_TIME_LIMIT)
+    m.ROUND_TIME_LIMIT = time_pressure.clamp_timer_limit(
+        m.ROUND_TIME_LIMIT,
+        elapsed=0.0,
+        extra_mult=old.time_bonus_mult(),
+    )
+    exposure.install_for_round(modifiers, round_time_limit=m.ROUND_TIME_LIMIT)
 
     m.cars = EntityGroup()
     m.player = Pedestrian(m.current_map.start_pos)
     m.player_prev_center = (m.player.rect.centerx, m.player.rect.centery)
     m.all_sprites = EntityGroup(m.player)
     m.start_time = time.time()
+    m.sim_elapsed = 0.0
+    m._sim_clock_last = m.start_time
     m.crossings = 0
     m.collisions = 0
     m.risk_events = 0
@@ -125,7 +177,13 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
         analytics_zones=getattr(m.current_map, "analytics_zones", None),
     )
 
-    m.world_bounds = build_world_bounds(m.current_map.roads, m.current_map.start_pos, m.current_map.goal_rect)
+    hint = getattr(m.current_map, "world_bounds_hint", None)
+    m.world_bounds = build_world_bounds(
+        m.current_map.roads,
+        m.current_map.start_pos,
+        m.current_map.goal_rect,
+        hint=hint,
+    )
     m.road_states = build_road_states(m.current_map.roads)
     m.road_states_h = [s for s in m.road_states if s["direction"] == "horizontal"]
     m.road_states_v = [s for s in m.road_states if s["direction"] == "vertical"]
@@ -196,9 +254,18 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
         map_id=str(getattr(m.current_map, "map_id", map_seed)),
         road_states=m.road_states,
     )
+    if modifiers.has("rainy_roads") and m.current_map.baked_layer is not None:
+        m.current_map.baked_layer = bake_rainy_road_overlay(
+            m.current_map.baked_layer,
+            road_states=m.road_states,
+            session_base_seed=m.session_base_seed,
+            round_index=round_index,
+        )
 
 
-def build_world_bounds(roads, start_pos, goal_rect):
+def build_world_bounds(roads, start_pos, goal_rect, *, hint=None):
+    if hint is not None:
+        return Rect(hint.left, hint.top, hint.width, hint.height)
     min_left = min([r.rect.left for r in roads] + [start_pos[0] - 80, goal_rect.left]) - 120
     max_right = max([r.rect.right for r in roads] + [start_pos[0] + 80, goal_rect.right]) + 120
     min_top = min([r.rect.top for r in roads] + [start_pos[1] - 80, goal_rect.top]) - 120
@@ -236,7 +303,7 @@ def _perf_counter_snapshot(
     }
 
 
-def end_round(collided, timed_out=False) -> str:
+def end_round(collided, timed_out=False, *, reason: str | None = None) -> str:
     m = _game()
     if not m.round_active:
         return m.failure_reason if m.failure_reason != "none" else "collision"
@@ -247,8 +314,11 @@ def end_round(collided, timed_out=False) -> str:
         m.collisions += 1
         m.failure_reason = "collision"
         outcome = "collision"
+    elif reason == "trip":
+        m.failure_reason = "trip"
+        outcome = "trip"
     elif timed_out:
-        m.failure_reason = "timeout"
+        m.failure_reason = reason or "timeout"
         outcome = "timeout"
     else:
         m.failure_reason = "goal_reached"
@@ -323,6 +393,15 @@ def finalize_round_result(*, round_index: int | None = None) -> None:
     session["path_estimate_s"] = getattr(m.current_map, "path_estimate_s", None)
     session["generation_meta"] = getattr(m.current_map, "generation_meta", None)
     session["car_archetypes"] = sprites.serialize_archetypes_for_log()
+    modifiers = getattr(m, "session_modifiers", None)
+    if modifiers is not None and getattr(modifiers, "active", None) is not None:
+        session["modifiers"] = sorted(modifiers.active)
+    else:
+        session["modifiers"] = []
+    if time_pressure.is_active():
+        session["time_pressure"] = time_pressure.bonus_summary()
+    if exposure.is_active():
+        session["exposure"] = exposure.summary()
     archetypes = score_session(session)
 
     entry["session"] = session

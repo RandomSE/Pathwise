@@ -1,4 +1,4 @@
-"""Central simulation tuning — one dataclass per difficulty preset."""
+"""Central simulation tuning: one dataclass per difficulty preset."""
 
 from __future__ import annotations
 

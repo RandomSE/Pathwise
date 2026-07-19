@@ -1,4 +1,4 @@
-"""Extended pathwise.car coverage — unit tests for extracted vehicle logic."""
+"""Extended pathwise.car coverage: unit tests for extracted vehicle logic."""
 
 import unittest
 from unittest.mock import patch

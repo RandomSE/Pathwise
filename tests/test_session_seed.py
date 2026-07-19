@@ -71,9 +71,16 @@ class TestClassifySeedInput(unittest.TestCase):
         self.assertEqual(classify_seed_input(""), "empty")
         self.assertEqual(classify_seed_input("  \t "), "empty")
 
-    def test_valid(self):
+    def test_valid_plain_seed(self):
         self.assertEqual(classify_seed_input("0"), "valid")
-        self.assertEqual(classify_seed_input("1234567890"), "valid")
+        self.assertEqual(classify_seed_input("42"), "valid")
+
+    def test_valid_recruiter_encoded(self):
+        encoded = encode_recruiter_seed(123456, "normal", 3)
+        self.assertEqual(classify_seed_input(encoded), "valid")
+
+    def test_invalid_malformed_recruiter_length(self):
+        self.assertEqual(classify_seed_input("1234567890"), "invalid")
 
     def test_invalid(self):
         self.assertEqual(classify_seed_input("x"), "invalid")
@@ -108,12 +115,19 @@ class TestResolveCandidatePlaySeed(unittest.TestCase):
 class TestRecruiterSeedEncoding(unittest.TestCase):
     def test_round_trip(self):
         encoded = encode_recruiter_seed(123456, "normal", 3)
-        self.assertEqual(len(encoded), 10)
+        self.assertEqual(len(encoded), 13)
         payload = decode_recruiter_seed(encoded)
         self.assertIsNotNone(payload)
         self.assertEqual(payload.map_seed, 123456)
         self.assertEqual(payload.preset, "normal")
         self.assertEqual(payload.num_rounds, 3)
+
+    def test_v8_round_trip(self):
+        encoded = encode_recruiter_seed(123456, "normal", 3, version=8)
+        self.assertEqual(len(encoded), 10)
+        payload = decode_recruiter_seed(encoded)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.map_seed, 123456)
 
     def test_decode_rejects_plain_short_seed(self):
         self.assertIsNone(decode_recruiter_seed("42"))
@@ -122,6 +136,6 @@ class TestRecruiterSeedEncoding(unittest.TestCase):
     def test_encode_wraps_large_map_seed(self):
         encoded = encode_recruiter_seed(99_999_999, "hard", 5)
         payload = decode_recruiter_seed(encoded)
-        self.assertEqual(payload.map_seed, 9_999_999)
+        self.assertEqual(payload.map_seed, 99_999_999 % 1_000_000)
         self.assertEqual(payload.preset, "hard")
         self.assertEqual(payload.num_rounds, 5)

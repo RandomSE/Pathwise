@@ -11,6 +11,7 @@ from . import sprites
 from .entity_draw_batch import EntityDrawBatch
 from .geom import Rect, rects_overlap
 from .pathwise_render import draw_sim_rect_filled, sim_point_to_arcade
+from .modifiers.weather_visuals import draw_weather_overlay
 from .traffic_light_batch import shared_traffic_light_batch
 from .viewport import DisplayLayout, gameplay_draw_surface
 
@@ -112,6 +113,11 @@ def draw_traffic_light_overlays(
     layout: DisplayLayout | None = None,
 ) -> list[TrafficTimerLabel]:
     """Draw dynamic bulbs + timer bars in sim space; return timer labels for screen HUD."""
+    from pathwise.modifiers import highway, lawless
+
+    if not lawless.signals_enabled() or not highway.signals_enabled():
+        return []
+
     cam_x, cam_y = camera_offset
     timer_labels: list[TrafficTimerLabel] = []
     visible = _visible_traffic_light_states(road_states, view_rect)
@@ -269,6 +275,7 @@ def draw_round_scene(
     light_green_duration: float,
     draw_traffic_timer_bar: bool = True,
     display_layout: DisplayLayout | None = None,
+    draw_weather: bool = False,
 ) -> None:
     layout = display_layout or DisplayLayout.fit_window(window_width, window_height)
     sim_height = layout.sim_height
@@ -317,6 +324,27 @@ def draw_round_scene(
             honk_fn = getattr(entity, "is_honking", None)
             if honk_fn and honk_fn(elapsed):
                 sprites.draw_honk_bubble(sim_height, entity.rect, (cam_x, cam_y))
+
+        slip_fn = getattr(player, "is_slip_stunned", None)
+        if slip_fn and slip_fn(elapsed):
+            sprites.draw_slip_trip_message(sim_height, player.rect, (cam_x, cam_y))
+
+        from pathwise.modifiers import time_pressure as _time_pressure
+
+        bonus_text = _time_pressure.active_bonus_popup_text(elapsed)
+        if bonus_text:
+            sprites.draw_time_bonus_popup(
+                sim_height, player.rect, (cam_x, cam_y), bonus_text
+            )
+
+        if draw_weather:
+            draw_weather_overlay(
+                sim_width=sim_width,
+                sim_height=sim_height,
+                view_rect=view_rect,
+                camera_offset=camera_offset,
+                elapsed=elapsed,
+            )
 
         if not layout.uses_gpu_viewport:
             _draw_hud_sim_space(sim_height, hud_lines)

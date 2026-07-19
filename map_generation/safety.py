@@ -1,7 +1,5 @@
 """Safe-crossing time estimates using traffic-light cycles."""
 
-import math
-
 # Match main.py: long green, short yellow, red ~= cross time + ~2s
 LIGHT_GREEN_S = 20.0
 LIGHT_YELLOW_S = 1.0
@@ -28,14 +26,3 @@ def expected_wait_for_safe_crossing(scale: float = 1.0) -> float:
     unsafe_fraction = (green + yellow) / cycle
     avg_unsafe_wait = (green + yellow) * 0.5
     return PED_CROSSING_S + PED_WAIT_BUFFER_S + unsafe_fraction * avg_unsafe_wait
-
-
-def min_time_limit_for_route(
-    travel_time_s: float,
-    road_crossings: int,
-    light_scale: float = 1.0,
-    safety_margin: float = 1.18,
-) -> int:
-    wait = expected_wait_for_safe_crossing(light_scale)
-    total = (travel_time_s + road_crossings * wait) * safety_margin
-    return max(45, int(math.ceil(total)))

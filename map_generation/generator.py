@@ -16,8 +16,8 @@ from map_generation.constraints import (
 )
 from map_generation.difficulty import DifficultyProfile, adaptive_difficulty
 from map_generation.noise import fbm, simplex2
-from map_generation.pathfinding import Cell, astar_travel_time, bfs_solvable
-from map_generation.safety import expected_wait_for_safe_crossing, min_time_limit_for_route
+from map_generation.pathfinding import Cell, astar_route_estimate, bfs_solvable
+from map_generation.safety import expected_wait_for_safe_crossing
 from map_generation.spawn_placement import (
     pick_spawn_and_goal,
     placement_meets_distance,
@@ -168,19 +168,16 @@ def _traffic_weights(roads: list[Road], seed: int, difficulty: DifficultyProfile
     return weights
 
 
-def _compute_time_limit(
-    difficulty: DifficultyProfile,
-    travel_s: float,
-    manhattan: int,
-    safe_limit: int,
-) -> int:
-    """Round timer from preset targets (~2 min easy, ~5 min hard); extend only if route needs it."""
-    target = difficulty.target_play_time_s
-    minimum_viable = int(travel_s * 1.45 + manhattan * 5)
-    if minimum_viable <= target:
-        return target
-    extended = max(minimum_viable, safe_limit)
-    return min(extended, int(target * 1.18))
+def _compute_time_limit(travel_s: float, margin: float) -> int:
+    """Round timer from sprint-route estimate with preset safety margin.
+
+    Replaces the older (target_play_time / manhattan / min_time_limit_for_route)
+    blend: timer is ceil(travel_s * route_time_margin), floored at 28s.
+    travel_s already includes moderate-safe crossing waits from A*.
+    """
+    import math
+
+    return max(28, int(math.ceil(travel_s * margin)))
 
 
 def generate_map_layout(
@@ -252,20 +249,13 @@ def generate_map_layout(
             continue
 
         crossing_wait = expected_wait_for_safe_crossing(difficulty.light_cycle_scale)
-        travel_s = astar_travel_time(
+        route_estimate = astar_route_estimate(
             start_cell, goal_cell, n_v, n_h, crossing_wait, eff_stride
         )
-        if travel_s is None:
+        if route_estimate is None:
             continue
-
-        manhattan = abs(goal_col - start_col) + abs(goal_row - start_row)
-        safe_limit = min_time_limit_for_route(
-            travel_s,
-            manhattan,
-            difficulty.light_cycle_scale,
-            safety_margin=1.12,
-        )
-        time_limit = _compute_time_limit(difficulty, travel_s, manhattan, safe_limit)
+        travel_s, route_crossings = route_estimate
+        time_limit = _compute_time_limit(travel_s, difficulty.route_time_margin)
 
         sx = _block_center_x(start_col, v_xs, ORIGIN, world_right)
         sy = _block_center_y(start_row, h_ys, ORIGIN, world_bottom)
@@ -299,6 +289,7 @@ def generate_map_layout(
             "city_blocks": city_blocks,
             "decorations": decorations,
             "path_estimate_s": round(travel_s, 2),
+            "route_crossings": route_crossings,
             "generation": {
                 "attempt": attempt,
                 "noise_jitter": jitter_max,
@@ -329,6 +320,7 @@ class ProceduralMap(MapBase):
         self.analytics_zones = layout["analytics_zones"]
         self.traffic_weights = layout["traffic_weights"]
         self.path_estimate_s = layout["path_estimate_s"]
+        self.route_crossings = layout.get("route_crossings", 0)
         self.light_cycle_scale = layout["difficulty"]["light_cycle_scale"]
         self.generation_meta = layout["generation"]
         self.city_blocks = layout.get("city_blocks", [])

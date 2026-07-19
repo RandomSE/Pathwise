@@ -11,6 +11,7 @@ from . import commonUtils
 from . import pre_game
 from .input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KeyState
 from map_generation.difficulty import DifficultyProfile
+from .modifiers.registry import ModifierContext
 from .session_seed import resolve_candidate_play_seed
 
 WIDTH = commonUtils.WIDTH
@@ -167,6 +168,10 @@ class GamePlayView(arcade.View):
             self._fps_tracker_instance().hud_line(),
             *self._draw_state["hud_lines"],
         ]
+        from pathwise.modifiers import hidden
+
+        if hidden.suppress_hud():
+            hud_lines = []
         draw_state = {**self._draw_state, "hud_lines": hud_lines}
 
         game.draw_round_frame(
@@ -205,10 +210,15 @@ class PathwiseWindow(arcade.Window):
         self._elapsed = 0.0
         self._smoke_mode = auto_close_seconds is not None
         self._config: pre_game.SessionConfig | None = None
+        self._pending_config: pre_game.SessionConfig | None = None
+        self._modifiers_from_recruiter = False
+        self._disclaimer_accepted = False
+        self._disclaimer_return_to = "candidate"
         self._base_profile: DifficultyProfile | None = None
         self._round_index = 1
         self._outcomes: list[str] = []
         self._seed_text = ""
+        self._recruiter_generated_text = ""
 
     def run(self) -> None:
         if self._smoke_mode:
@@ -226,25 +236,57 @@ class PathwiseWindow(arcade.Window):
             )
         )
 
-    def _on_open_recruiter(self, seed_text: str) -> None:
-        self._seed_text = seed_text
+    def _show_modifiers_detail(self, config: pre_game.SessionConfig) -> None:
+        self._pending_config = config
+        self.show_view(
+            pre_game.ModifiersDetailView(
+                config=config,
+                on_back=self._on_modifiers_back,
+                on_start=self._on_pre_game_done,
+            )
+        )
+
+    def _on_modifiers_back(self) -> None:
+        if getattr(self, "_modifiers_from_recruiter", False):
+            self._modifiers_from_recruiter = False
+            self._show_recruiter_config(
+                generated_seed_text=self._recruiter_generated_text,
+            )
+            return
+        self._show_candidate_home()
+
+    def _show_recruiter_config(self, *, generated_seed_text: str = "") -> None:
         self.show_view(
             pre_game.RecruiterConfigView(
-                generated_seed_text=self._seed_text,
+                generated_seed_text=generated_seed_text,
                 on_back=self._on_recruiter_back,
                 on_start=self._on_recruiter_start,
             )
         )
+
+    def _on_open_recruiter(self, seed_text: str) -> None:
+        self._seed_text = seed_text
+        self._show_recruiter_config(generated_seed_text="")
+
+    def _show_modifiers_detail_from_recruiter(self, config: pre_game.SessionConfig) -> None:
+        view = self.current_view
+        if isinstance(view, pre_game.RecruiterConfigView):
+            self._recruiter_generated_text = view.generated_seed_text
+        self._modifiers_from_recruiter = True
+        self._show_modifiers_detail(config)
 
     def _on_recruiter_back(self, seed_text: str) -> None:
         self._seed_text = seed_text
         self._show_candidate_home()
 
     def _on_recruiter_start(self, config: pre_game.SessionConfig) -> None:
-        self._on_pre_game_done(config)
+        view = getattr(self, "_current_view", None)
+        if isinstance(view, pre_game.RecruiterConfigView):
+            self._recruiter_generated_text = view.generated_seed_text
+        self._request_session_start(config, return_to="recruiter")
 
     def on_draw(self) -> None:
-        # Do not clear when a View is active — its on_draw already clears and paints.
+        # Do not clear when a View is active; its on_draw already clears and paints.
         # Clearing here was wiping the menu/game after the view drew (white screen).
         if self.current_view is None:
             self.clear()
@@ -256,11 +298,60 @@ class PathwiseWindow(arcade.Window):
         if self._elapsed >= self._auto_close_seconds:
             arcade.close_window()
 
+    def _show_disclaimer(self) -> None:
+        self.show_view(
+            pre_game.DisclaimerView(
+                on_agree=self._on_disclaimer_agreed,
+                on_back=self._on_disclaimer_back,
+            )
+        )
+
+    def _on_disclaimer_agreed(self) -> None:
+        self._disclaimer_accepted = True
+        config = self._pending_config
+        self._pending_config = None
+        if config is None:
+            self._show_candidate_home()
+            return
+        self._commit_session_start(config)
+
+    def _on_disclaimer_back(self) -> None:
+        self._pending_config = None
+        if self._disclaimer_return_to == "recruiter":
+            self._show_recruiter_config(
+                generated_seed_text=self._recruiter_generated_text,
+            )
+            return
+        self._show_candidate_home()
+
+    def _request_session_start(
+        self,
+        config: pre_game.SessionConfig,
+        *,
+        return_to: str = "candidate",
+    ) -> None:
+        self._disclaimer_return_to = (
+            "recruiter" if return_to == "recruiter" else "candidate"
+        )
+        if self._disclaimer_accepted:
+            self._commit_session_start(config)
+            return
+        self._pending_config = config
+        self._show_disclaimer()
+
     def _on_pre_game_done(self, config: pre_game.SessionConfig | None) -> None:
         if config is None:
             arcade.close_window()
             return
+        return_to = "recruiter" if self._modifiers_from_recruiter else "candidate"
+        self._modifiers_from_recruiter = False
+        if return_to == "recruiter":
+            view = getattr(self, "_current_view", None)
+            if isinstance(view, pre_game.RecruiterConfigView):
+                self._recruiter_generated_text = view.generated_seed_text
+        self._request_session_start(config, return_to=return_to)
 
+    def _commit_session_start(self, config: pre_game.SessionConfig) -> None:
         import main as game
 
         self._config = config
@@ -270,6 +361,12 @@ class PathwiseWindow(arcade.Window):
             game.session_seed_source,
             game.session_use_adaptive_map,
         ) = resolve_candidate_play_seed(config.seed)
+        game.session_modifiers = ModifierContext.from_ids(
+            config.modifiers,
+            session_base_seed=game.session_base_seed,
+            round_index=1,
+        )
+        game.session_audience = config.audience
         game.base_preset_id = config.preset
         self._base_profile = DifficultyProfile.for_menu_preset(config.preset)
         game.round_results = []
@@ -293,7 +390,7 @@ class PathwiseWindow(arcade.Window):
                 num_rounds=game.session_num_rounds,
                 preset=config.preset,
             )
-            print(f"Perf profiling ON — log: {game.perf_profiler.jsonl_path}")
+            print(f"Perf profiling ON: log: {game.perf_profiler.jsonl_path}")
         self._begin_round()
 
     def _begin_round(self) -> None:
@@ -303,30 +400,53 @@ class PathwiseWindow(arcade.Window):
             self._base_profile, self._round_index - 1, game.session_num_rounds
         )
         game.start_round(self._round_index, profile, self._config.preset)
-        hint = (
-            f"~{profile.min_crossings}-{profile.max_crossings} roads · "
-            f"{profile.target_play_time_s}s · denser traffic"
+        hint = pre_game.round_intro_hint(
+            profile,
+            time_limit_s=int(game.ROUND_TIME_LIMIT),
+            round_index=self._round_index,
         )
-        if self._round_index > 1:
-            hint += f" (+{int(profile.round_escalation * 100)}% vs round 1)"
         self.show_view(
             pre_game.MessageView(
                 title=f"Round {self._round_index} of {game.session_num_rounds}",
                 subtitle=hint,
                 accent=pre_game.ROUND_START_PROMPT,
                 details=pre_game.ROUND_CONTROLS_HINT,
+                modifiers=self._config.modifiers,
+                audience=self._config.audience,
                 on_complete=lambda _: self._start_round_play(),
             )
         )
 
+    def _apply_frame_rate_for_modifiers(self) -> None:
+        from pathwise.modifiers import lag
+
+        period = lag.update_period_s()
+        self.set_update_rate(period)
+        if hasattr(self, "set_draw_rate"):
+            self.set_draw_rate(period)
+
+    def _restore_default_frame_rate(self) -> None:
+        self.set_update_rate(1 / 60)
+        if hasattr(self, "set_draw_rate"):
+            self.set_draw_rate(1 / 60)
+
     def _start_round_play(self) -> None:
+        import time
+
         import main as game
 
+        # Route timer / signal clocks start when gameplay begins, not on the intro screen.
+        game.start_time = time.time()
+        game.sim_elapsed = 0.0
+        game._sim_clock_last = game.start_time
         game.app_running = True
+        self._apply_frame_rate_for_modifiers()
         self.show_view(GamePlayView(on_round_complete=self._on_round_done))
 
     def _on_round_done(self) -> None:
         import main as game
+
+        self._restore_default_frame_rate()
 
         if not game.app_running:
             arcade.close_window()
@@ -335,17 +455,33 @@ class PathwiseWindow(arcade.Window):
         outcome = game.round_results[-1]["outcome"] if game.round_results else "timeout"
         self._outcomes.append(outcome)
 
+        if outcome == "trip":
+            from pathwise.modifiers.rainy_roads import SLIP_TRIP_MESSAGE
+
+            self.show_view(
+                pre_game.MessageView(
+                    title=pre_game.TRIP_NOTICE_TITLE,
+                    subtitle=SLIP_TRIP_MESSAGE.capitalize()
+                    if SLIP_TRIP_MESSAGE
+                    else pre_game.round_outcome_label("trip"),
+                    accent=pre_game.TRIP_NOTICE_ACCENT,
+                    on_complete=lambda _: self._continue_after_round_outcome(),
+                )
+            )
+            return
+
+        self._continue_after_round_outcome()
+
+    def _continue_after_round_outcome(self) -> None:
+        import main as game
+
         if self._round_index < game.session_num_rounds:
-            labels = {
-                "success": "Goal reached",
-                "collision": "Collision",
-                "timeout": "Time expired",
-            }
-            label = labels.get(outcome, outcome)
+            outcome = self._outcomes[-1] if self._outcomes else "timeout"
+            label = pre_game.round_outcome_label(outcome)
             game.finalize_round_result()
             self.show_view(
                 pre_game.MessageView(
-                    title=f"Round {self._round_index} complete — {label}",
+                    title=f"Round {self._round_index} complete: {label}",
                     subtitle="Next round will be harder",
                     accent="Click or press any key to continue",
                     on_complete=lambda _: self._next_round(),
@@ -366,7 +502,10 @@ class PathwiseWindow(arcade.Window):
             arcade.close_window()
             return
 
-        summary = " · ".join(f"R{i + 1}: {o}" for i, o in enumerate(self._outcomes))
+        summary = " · ".join(
+            f"R{i + 1}: {pre_game.round_outcome_label(o)}"
+            for i, o in enumerate(self._outcomes)
+        )
         subtitle = summary
         if game.session_base_seed is not None:
             subtitle += f"\nSession seed: {game.session_base_seed}"
@@ -374,9 +513,15 @@ class PathwiseWindow(arcade.Window):
         dashboard = game.save_session_log()
         print("Session complete:", {"rounds": self._outcomes, "dashboard": dashboard})
 
+        last_label = pre_game.round_outcome_label(self._outcomes[-1])
+        if game.session_num_rounds == 1:
+            title = f"Round complete: {last_label}"
+        else:
+            title = f"All {game.session_num_rounds} rounds complete"
+
         self.show_view(
             pre_game.MessageView(
-                title=f"All {game.session_num_rounds} rounds complete",
+                title=title,
                 subtitle=subtitle,
                 accent="Open logs_dashboard.html for per-round replays",
                 on_complete=lambda _: arcade.close_window(),

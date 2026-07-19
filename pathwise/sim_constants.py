@@ -1,4 +1,4 @@
-"""Simulation constants — re-exported from active GameTuning (see game_tuning.py)."""
+"""Simulation constants: re-exported from active GameTuning (see game_tuning.py)."""
 
 from __future__ import annotations
 
