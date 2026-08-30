@@ -42,6 +42,10 @@ DASHBOARD_VALIDITY_SUMMARY = (
     "Scores describe in-game Pathwise session behavior. "
     "They are not construct validity or criterion validity evidence."
 )
+DASHBOARD_EMPLOYMENT_BANNER = (
+    "This tool is not authorized for employment decisions until a fairness "
+    "review on real applicants exists."
+)
 
 
 def _scoring_for_dashboard(scoring: dict) -> dict:
@@ -202,6 +206,7 @@ def build_dashboard_html(
     replay_step_s = replay_step_for_session(session)
     replay_min_gap_s = MIN_PLAYBACK_GAP_S
     replay_max_gap_s = MAX_PLAYBACK_GAP_S
+    employment_banner = DASHBOARD_EMPLOYMENT_BANNER
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -529,12 +534,13 @@ def build_dashboard_html(
       <section class="card">
         <h2>Session profile</h2>
         <p class="validity-banner" id="validity-banner">Face-valid in-game behavior only. Not construct validity. Not criterion validity. Target similarity is not a job-performance prediction.</p>
+        <p class="validity-banner" id="employment-banner">{employment_banner}</p>
         <p class="archetype-primary" id="session-flavor"></p>
         <p class="subtitle" id="secondary-archetype"></p>
         <h3>Trait profile</h3>
         <div id="trait-bars"></div>
         <h3>Target similarity</h3>
-        <p class="role-fit-note">Weighted distance to designed role targets. Face-valid in-game behavior only; not construct validity or criterion validity.</p>
+        <p class="role-fit-note">Weighted distance to designed role targets. Face-valid in-game behavior only; not construct validity or criterion validity. This tool is not authorized for employment decisions until a fairness review on real applicants exists.</p>
         <table class="role-fit-table" id="role-fit-table"></table>
         <ul class="insights" id="insights"></ul>
       </section>

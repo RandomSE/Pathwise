@@ -32,6 +32,9 @@ class DecisionLogger:
         self._last_sample_time = 0.0
         self._net_progress_axis = None
         self._approach_start = {}
+        self._approach_pos = {}
+        self._curb_arrival = {}
+        self._approach_path_px = {}
         self._active_hesitation = None
         self._total_backtracks = 0
         self._total_hesitation_s = 0.0
@@ -188,10 +191,29 @@ class DecisionLogger:
             elif not inside and zone_id in self._active_zone_ids:
                 self._active_zone_ids.discard(zone_id)
 
-    def note_road_approach(self, road_index):
+    def note_road_approach(self, road_index, pos=None):
         if road_index not in self._approach_start:
             self._approach_start[road_index] = time.time()
+            self._approach_pos[road_index] = pos or self._last_pos
             self._record("approach_road", road_index=road_index)
+
+    def note_curb_arrival(self, road_index, pos=None):
+        if road_index in self._curb_arrival:
+            return
+        if road_index not in self._approach_start:
+            return
+        now = time.time()
+        here = pos or self._last_pos
+        start_pos = self._approach_pos.get(road_index) or self._last_pos
+        path_px = math.hypot(here[0] - start_pos[0], here[1] - start_pos[1])
+        self._curb_arrival[road_index] = now
+        self._approach_path_px[road_index] = path_px
+        self._record(
+            "arrive_curb",
+            road_index=road_index,
+            approach_travel_s=round(now - self._approach_start[road_index], 2),
+            approach_path_px=round(path_px, 1),
+        )
 
     def note_road_crossed(
         self,
@@ -201,11 +223,26 @@ class DecisionLogger:
         crossing_tier=None,
         time_bonus_s=None,
     ):
+        now = time.time()
         started = self._approach_start.pop(road_index, None)
-        commit_s = round(time.time() - started, 2) if started else None
+        curb_t = self._curb_arrival.pop(road_index, None)
+        start_pos = self._approach_pos.pop(road_index, None)
+        path_px = self._approach_path_px.pop(road_index, None)
+        commit_s = round(now - started, 2) if started else None
+        approach_travel_s = None
+        commit_latency_s = None
+        if started is not None and curb_t is not None:
+            approach_travel_s = round(curb_t - started, 2)
+            commit_latency_s = round(max(0.0, now - curb_t), 2)
+        if path_px is None and start_pos is not None:
+            here = self._last_pos
+            path_px = math.hypot(here[0] - start_pos[0], here[1] - start_pos[1])
         attempt = {
             "road_index": road_index,
             "commit_time_s": commit_s,
+            "commit_latency_s": commit_latency_s,
+            "approach_travel_s": approach_travel_s,
+            "approach_path_px": None if path_px is None else round(path_px, 1),
             "light_at_cross": light_state,
             "t": self._elapsed(),
         }

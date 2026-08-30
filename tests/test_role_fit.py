@@ -41,10 +41,45 @@ class TestCatalogPriors(unittest.TestCase):
         self.assertTrue(ROLE_CATALOG_VERSION)
         source = Path(__file__).resolve().parents[1] / "analytics" / "role_catalog.py"
         self.assertIn("unvalidated priors", source.read_text(encoding="utf-8").lower())
+        self.assertEqual(ROLE_CATALOG_VERSION, "2")
+        by_id = roles_by_id()
+        field = by_id["field_construction"]
+        auditor = by_id["compliance_auditor"]
+        dispatcher = by_id["logistics_dispatcher"]
+        warehouse = by_id["warehouse_operator"]
+        self.assertGreater(
+            field["targets"]["risk_propensity"], auditor["targets"]["risk_propensity"]
+        )
+        self.assertGreater(
+            field["targets"]["adaptive_planning"],
+            auditor["targets"]["adaptive_planning"],
+        )
+        self.assertGreater(
+            auditor["targets"]["rule_adherence"],
+            max(role["targets"]["rule_adherence"] for role in ROLE_CATALOG if role is not auditor),
+        )
+        self.assertLess(
+            auditor["targets"]["risk_propensity"],
+            min(role["targets"]["risk_propensity"] for role in ROLE_CATALOG if role is not auditor),
+        )
+        self.assertGreaterEqual(dispatcher["targets"]["decision_tempo"], 64)
+        self.assertGreaterEqual(dispatcher["targets"]["rule_adherence"], 64)
+        self.assertLess(dispatcher["targets"]["risk_propensity"], 40)
+        self.assertLess(
+            abs(warehouse["targets"]["decision_tempo"] - 50.0),
+            abs(dispatcher["targets"]["decision_tempo"] - 50.0),
+        )
         for role in ROLE_CATALOG:
             self.assertAlmostEqual(sum(role["weights"].values()), 1.0, places=5)
             self.assertEqual(set(role["weights"]), set(TRAIT_KEYS))
             self.assertEqual(set(role["targets"]), set(TRAIT_KEYS))
+            self.assertIn("rationale", role)
+            self.assertTrue(role["rationale"])
+            self.assertEqual(set(role["target_bands"]), set(TRAIT_KEYS))
+            for key, (low, high) in role["target_bands"].items():
+                self.assertLess(low, high)
+                self.assertGreaterEqual(role["targets"][key], low)
+                self.assertLessEqual(role["targets"][key], high)
 
 
 class TestCoverageFloor(unittest.TestCase):
@@ -69,13 +104,14 @@ class TestCoverageFloor(unittest.TestCase):
         sparse_traits["decision_tempo"] = 100.0
         sparse_rows = compute_role_fits(sparse_traits, sparse_flags)
 
+        field = roles_by_id()["field_construction"]["targets"]
         full_traits = _traits(
-            risk_propensity=68.0,
-            adaptive_planning=72.0,
-            composure=54.0,
-            rule_adherence=46.0,
-            decision_tempo=58.0,
-            deliberation_depth=42.0,
+            risk_propensity=field["risk_propensity"],
+            adaptive_planning=field["adaptive_planning"],
+            composure=field["composure"],
+            rule_adherence=field["rule_adherence"],
+            decision_tempo=field["decision_tempo"],
+            deliberation_depth=field["deliberation_depth"],
         )
         full_rows = compute_role_fits(full_traits, _ok_flags())
         combined = rank_role_fits(sparse_rows + full_rows)
@@ -125,25 +161,17 @@ class TestCoverageFloor(unittest.TestCase):
 
 class TestTwoSidedFieldConstruction(unittest.TestCase):
     def test_reckless_worse_than_target_risk(self):
+        field = roles_by_id()["field_construction"]["targets"]
         on_target = compute_role_fits(
-            _traits(
-                risk_propensity=70.0,
-                adaptive_planning=75.0,
-                composure=55.0,
-                rule_adherence=45.0,
-                decision_tempo=60.0,
-                deliberation_depth=40.0,
-            ),
+            _traits(**{key: float(field[key]) for key in TRAIT_KEYS}),
             _ok_flags(),
         )
         reckless = compute_role_fits(
             _traits(
-                risk_propensity=100.0,
-                adaptive_planning=75.0,
-                composure=55.0,
-                rule_adherence=45.0,
-                decision_tempo=60.0,
-                deliberation_depth=40.0,
+                **{
+                    key: 100.0 if key == "risk_propensity" else float(field[key])
+                    for key in TRAIT_KEYS
+                }
             ),
             _ok_flags(),
         )
@@ -208,7 +236,14 @@ class TestDashboardCopyGuard(unittest.TestCase):
             "map_layout": {"roads": [{"x": 0}]},
             "car_archetypes": [],
             "decision_sequence": [{"t": 1.0, "action": "cross_on_green"}],
-            "crossing_attempts": [{"commit_time_s": 0.8}],
+            "crossing_attempts": [
+                {
+                    "commit_time_s": 0.8,
+                    "commit_latency_s": 0.35,
+                    "approach_travel_s": 0.45,
+                    "approach_path_px": 40.0,
+                }
+            ],
             "summary": {
                 "total_hesitation_s": 0.2,
                 "hesitation_count": 0,
@@ -232,6 +267,7 @@ class TestDashboardCopyGuard(unittest.TestCase):
         self.assertIn("face-valid in-game behavior", lower)
         self.assertIn("target similarity", lower)
         self.assertIn("session summary flavor (not a hiring label)", lower)
+        self.assertIn("not authorized for employment decisions", lower)
         self.assertNotIn("job fit %", lower)
         self.assertNotIn("hire score", lower)
         self.assertNotIn("% fit", lower)

@@ -12,10 +12,12 @@ from analytics.trait_scoring import (
     LOGGER_SLOW_S,
     MAX_TEMPO_PATH_DELTA,
     MEDIUM_REPR_S,
+    MOTOR_TEMPO_KEY,
     QUICK_REPR_S,
     SLOW_REPR_S,
     TRAIT_KEYS,
     _between_round_stdev,
+    _finite_commit_times,
     _weighted_mean,
     tempo_from_commit_s,
 )
@@ -37,10 +39,34 @@ def _base_session(**overrides):
             {"t": 13.0, "action": "cross_on_green"},
         ],
         "crossing_attempts": [
-            {"commit_time_s": 0.7, "road_index": 0},
-            {"commit_time_s": 0.8, "road_index": 1},
-            {"commit_time_s": 0.6, "road_index": 2},
-            {"commit_time_s": 0.9, "road_index": 3},
+            {
+                "commit_time_s": 0.7,
+                "commit_latency_s": 0.35,
+                "approach_travel_s": 0.35,
+                "approach_path_px": 40.0,
+                "road_index": 0,
+            },
+            {
+                "commit_time_s": 0.8,
+                "commit_latency_s": 0.40,
+                "approach_travel_s": 0.40,
+                "approach_path_px": 42.0,
+                "road_index": 1,
+            },
+            {
+                "commit_time_s": 0.6,
+                "commit_latency_s": 0.30,
+                "approach_travel_s": 0.30,
+                "approach_path_px": 36.0,
+                "road_index": 2,
+            },
+            {
+                "commit_time_s": 0.9,
+                "commit_latency_s": 0.45,
+                "approach_travel_s": 0.45,
+                "approach_path_px": 48.0,
+                "road_index": 3,
+            },
         ],
         "summary": {
             "total_backtracks": 0,
@@ -81,7 +107,7 @@ class TestTempoTransform(unittest.TestCase):
     def test_dual_path_delta_within_named_cap(self):
         times = [QUICK_REPR_S, MEDIUM_REPR_S, SLOW_REPR_S]
         continuous = sum(tempo_from_commit_s(t) for t in times) / 3.0
-        fallback = score_session(
+        residual = score_session(
             {
                 "outcome": "success",
                 "duration_s": 20.0,
@@ -89,7 +115,14 @@ class TestTempoTransform(unittest.TestCase):
                 "risky_risk_events": 0,
                 "reasonable_risk_events": 0,
                 "decision_sequence": [],
-                "crossing_attempts": [],
+                "crossing_attempts": [
+                    {
+                        "commit_time_s": t + 2.0,
+                        "approach_travel_s": 2.0,
+                        "road_index": i,
+                    }
+                    for i, t in enumerate(times)
+                ],
                 "summary": {
                     "quick_commits": 1,
                     "slow_commits": 1,
@@ -100,10 +133,10 @@ class TestTempoTransform(unittest.TestCase):
             }
         )
         self.assertEqual(
-            fallback["signal_sources"]["decision_tempo"], "quick_slow_fallback"
+            residual["signal_sources"]["decision_tempo"], "commit_latency_residual"
         )
         self.assertLessEqual(
-            abs(continuous - fallback["traits"]["decision_tempo"]),
+            abs(continuous - residual["traits"]["decision_tempo"]),
             MAX_TEMPO_PATH_DELTA,
         )
 
@@ -128,8 +161,8 @@ class TestTempoTransform(unittest.TestCase):
         )
         a = score_session(with_times)
         b = score_session(bloated)
-        self.assertEqual(a["signal_sources"]["decision_tempo"], "commit_time_s")
-        self.assertEqual(b["signal_sources"]["decision_tempo"], "commit_time_s")
+        self.assertEqual(a["signal_sources"]["decision_tempo"], "commit_latency_s")
+        self.assertEqual(b["signal_sources"]["decision_tempo"], "commit_latency_s")
         self.assertEqual(a["traits"]["decision_tempo"], b["traits"]["decision_tempo"])
 
     def test_empty_tempo_is_insufficient_not_fifty(self):
@@ -219,6 +252,8 @@ class TestValidityLock(unittest.TestCase):
         self.assertIs(validity["convergent_validity"], False)
         self.assertIs(validity["criterion_validity"], False)
         self.assertIs(validity["predicts_job_performance"], False)
+        self.assertFalse(validity["authorized_for_employment_decisions"])
+        self.assertTrue(validity["register_version"])
         self.assertEqual(validity["population"], "in_game_pathwise_session")
         self.assertIn("this Pathwise session", validity["summary"])
         self.assertEqual(result["hiring_output"]["kind"], "role_target_similarity")
@@ -236,7 +271,7 @@ class TestValidityLock(unittest.TestCase):
             risky_risk_events=12,
             risk_events=12,
             decision_sequence=[{"t": 1.0, "action": "cross_on_red"}] * 8,
-            crossing_attempts=[{"commit_time_s": 0.5}],
+            crossing_attempts=[{"commit_time_s": 0.5, "commit_latency_s": 0.3}],
             summary={
                 "total_backtracks": 2,
                 "total_hesitation_s": 0.1,
@@ -269,7 +304,15 @@ class TestSessionAggregate(unittest.TestCase):
         fast = _base_session(duration_s=10.0)
         slow = _base_session(
             duration_s=30.0,
-            crossing_attempts=[{"commit_time_s": 5.0}] * 4,
+            crossing_attempts=[
+                {
+                    "commit_time_s": 5.0,
+                    "commit_latency_s": 4.2,
+                    "approach_travel_s": 0.8,
+                    "approach_path_px": 70.0,
+                }
+            ]
+            * 4,
             summary={
                 "total_backtracks": 0,
                 "total_hesitation_s": 0.2,
@@ -292,8 +335,9 @@ class TestSessionAggregate(unittest.TestCase):
         self.assertAlmostEqual(result["traits"]["decision_tempo"], expected, places=1)
         self.assertEqual(
             result["signal_sources"].get("composure_between_round_variance"),
-            "ok",
+            "insufficient_data",
         )
+        self.assertIn("reliability", result)
 
     def test_single_round_marks_between_round_variance_insufficient(self):
         result = score_session(_base_session())
@@ -326,14 +370,17 @@ class TestSessionAggregate(unittest.TestCase):
         self.assertEqual(zero_dur["trait_flags"]["decision_tempo"], FLAG_OK)
 
     def test_fallback_tempo_tag_on_multi_round_log(self):
-        fallback_round = {
+        residual_round = {
             "outcome": "success",
             "duration_s": 12.0,
             "crossings": 3,
             "risky_risk_events": 0,
             "reasonable_risk_events": 0,
             "decision_sequence": [{"t": 1.0, "action": "cross_on_green"}] * 3,
-            "crossing_attempts": [{"commit_time_s": None}, {"commit_time_s": "bad"}],
+            "crossing_attempts": [
+                {"commit_time_s": 3.2, "approach_travel_s": 1.0},
+                {"commit_time_s": 3.4, "approach_path_px": 90.0},
+            ],
             "summary": {
                 "total_backtracks": 0,
                 "total_hesitation_s": 0.2,
@@ -345,14 +392,14 @@ class TestSessionAggregate(unittest.TestCase):
         result = score_session_log(
             {
                 "rounds": [
-                    {"session": fallback_round},
-                    {"session": dict(fallback_round, duration_s=18.0)},
+                    {"session": residual_round},
+                    {"session": dict(residual_round, duration_s=18.0)},
                 ]
             }
         )
-        self.assertEqual(result["signal_sources"]["decision_tempo"], "quick_slow_fallback")
+        self.assertEqual(result["signal_sources"]["decision_tempo"], "commit_latency_residual")
 
-    def test_composure_recovery_blends_with_between_round_variance(self):
+    def test_composure_recovery_does_not_blend_between_round_variance(self):
         fast = _base_session(
             decision_sequence=[
                 {"t": 1.0, "action": "backtrack"},
@@ -362,7 +409,14 @@ class TestSessionAggregate(unittest.TestCase):
         )
         slow = _base_session(
             duration_s=30.0,
-            crossing_attempts=[{"commit_time_s": 5.0}] * 4,
+            crossing_attempts=[
+                {
+                    "commit_time_s": 5.0,
+                    "commit_latency_s": 4.0,
+                    "approach_travel_s": 1.0,
+                }
+            ]
+            * 4,
             decision_sequence=[
                 {"t": 1.0, "action": "backtrack"},
                 {"t": 7.5, "action": "commit"},
@@ -383,8 +437,12 @@ class TestSessionAggregate(unittest.TestCase):
         self.assertIsNotNone(result["traits"]["composure"])
         self.assertEqual(
             result["signal_sources"]["composure_between_round_variance"],
-            FLAG_OK,
+            FLAG_INSUFFICIENT,
         )
+        one = score_session(fast)["traits"]["composure"]
+        two = score_session(slow)["traits"]["composure"]
+        expected = (20.0 * one + 30.0 * two) / 50.0
+        self.assertAlmostEqual(result["traits"]["composure"], expected, places=1)
 
     def test_two_empty_rounds_mark_variance_insufficient(self):
         empty = {
@@ -404,10 +462,20 @@ class TestNamedHelpersAndRecoveryEdges(unittest.TestCase):
     def test_tempo_rejects_non_numeric(self):
         self.assertEqual(tempo_from_commit_s("nope"), 50.0)
         self.assertEqual(tempo_from_commit_s(None), 50.0)
+        self.assertEqual(MOTOR_TEMPO_KEY, "motor_tempo")
+        self.assertEqual(
+            _finite_commit_times(
+                {"crossing_attempts": [{"commit_time_s": 1.2}, {"commit_time_s": "x"}]}
+            ),
+            [1.2],
+        )
 
     def test_weighted_mean_and_stdev_empty_paths(self):
+        from analytics.trait_scoring import _composure_from_variance
+
         self.assertIsNone(_weighted_mean([(10.0, 0.0), (20.0, 0.0)]))
         self.assertAlmostEqual(_weighted_mean([(10.0, 1.0), (30.0, 1.0)]), 20.0)
+        self.assertGreater(_composure_from_variance(0.0), 90.0)
         self.assertIsNone(_between_round_stdev([{"risk_propensity": 10}], [{"risk_propensity": FLAG_OK}]))
         empty_flags = {key: FLAG_INSUFFICIENT for key in TRAIT_KEYS}
         empty_traits = {key: None for key in TRAIT_KEYS}

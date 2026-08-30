@@ -196,12 +196,19 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
             wait_zone = crosswalk.inflate(80, 80)
             if collide(wait_zone, m.player.rect) and not collide(road_rect, m.player.rect):
                 state["player_waiting"] = True
+                road_index = state.get("road_index")
+                if road_index is not None:
+                    m.decision_logger.note_curb_arrival(
+                        road_index, pos=m.player.rect.center
+                    )
         update_light_timers(m.road_states, elapsed)
 
         for road_index, road in enumerate(m.current_map.roads):
             approach_zone = road.rect.inflate(120, 120)
             if not road.crossed and collide(approach_zone, m.player.rect):
-                m.decision_logger.note_road_approach(road_index)
+                m.decision_logger.note_road_approach(
+                    road_index, pos=m.player.rect.center
+                )
 
     with m.perf_profiler.section("traffic_spawns"):
         spawn_steps = max(1, int(round(high_speed.frame_steps() * phys)))
