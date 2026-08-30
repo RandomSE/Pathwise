@@ -64,6 +64,103 @@ def _game():
     import main
     return main
 
+
+_MAX_WALL_DT_S = 0.25
+
+_CAR_UPDATE_BRANCH_KEYS = (
+    "branch_cruise",
+    "branch_far_skip",
+    "branch_far_cruise_tick",
+    "branch_near_skip",
+    "branch_near_cruise_tick",
+    "branch_full_update",
+)
+
+
+def _empty_car_update_branches() -> dict[str, int]:
+    return {key: 0 for key in _CAR_UPDATE_BRANCH_KEYS}
+
+
+def _cheap_offscreen_motion(car, m) -> None:
+    """Keep far/mid-ring cars moving on skip frames without full AI."""
+    car._spawn_age += 1
+    signed = car.current_speed * car.direction
+    if signed == 0:
+        return
+    next_rect = car.rect.copy()
+    if car.vertical:
+        next_rect.y += int(signed)
+    else:
+        next_rect.x += int(signed)
+    move_blocked = False
+    zones = m.intersection_zones
+    if zones:
+        margin = (
+            IX_QUERY_PAD
+            + max(car.rect.width, car.rect.height)
+            + abs(int(signed))
+            + 8
+        )
+        if car._near_intersection_bbox(zones, margin=margin):
+            oriented = _oriented_road_states_for_car(car)
+            states = _road_states_for_car(car, oriented)
+            if car._intersection_entry_blocked(
+                next_rect,
+                states,
+                zones,
+                [],
+                [],
+            ):
+                move_blocked = True
+            elif car._intersection_advance_blocked_on_red(next_rect, states, zones):
+                move_blocked = True
+            elif car._crosswalk_advance_blocked(next_rect, states, zones):
+                move_blocked = True
+    if move_blocked:
+        car.current_speed = 0.0
+        car.speed = 0.0
+    else:
+        car.rect = next_rect
+    car._sync_collision_shell()
+    _frame_car_spatial.relocate_car(car)
+
+
+def _cruise_car(car, m, lane_buckets, lane_scratch, player_body) -> None:
+    _lane_peers_for(car, lane_buckets, lane_scratch)
+    car.straight_cruise_update(
+        _road_states_for_car(car, _oriented_road_states_for_car(car)),
+        m.world_bounds,
+        lane_scratch,
+        m.round_frame,
+        m.current_map.roads,
+        m.intersection_zones,
+        player_body,
+    )
+    _frame_car_spatial.relocate_car(car)
+
+
+def _car_can_straight_cruise(car, in_intersection: bool, in_active_turn: bool, zones) -> bool:
+    return (
+        not in_intersection
+        and not in_active_turn
+        and car._turn_phase == "none"
+        and car.turn_signal == 0
+        and car.current_speed >= 0.4
+        and not car._approaching_or_in_intersection(zones)
+    )
+
+
+def _strided_offscreen_tick(
+    car, m, stride: int, lane_buckets, lane_scratch, player_body
+) -> bool:
+    """True when this frame ran cruise; False when it used cheap skip motion."""
+    if (m.round_frame + car.spawn_id) % max(1, int(stride)) != 0:
+        _cheap_offscreen_motion(car, m)
+        return False
+    _cruise_car(car, m, lane_buckets, lane_scratch, player_body)
+    return True
+
+
 def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     """Advance simulation one frame; returns draw kwargs when the round is still active."""
     m = _game()
@@ -77,7 +174,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         m.sim_elapsed = 0.0
         m._sim_clock_last = wall_now
         last = wall_now
-    wall_dt = max(0.0, wall_now - float(last))
+    wall_dt = min(max(0.0, wall_now - float(last)), _MAX_WALL_DT_S)
     m._sim_clock_last = wall_now
     phys = lag.begin_frame(wall_dt)
     m.sim_elapsed = float(getattr(m, "sim_elapsed", 0.0)) + wall_dt * high_speed.time_scale()
@@ -257,6 +354,19 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     move_scratch = _frame_nearby_scratch
     lane_scratch = _frame_lane_scratch
     with m.perf_profiler.section("cars_update"):
+        branches = _empty_car_update_branches()
+        m.car_update_branches = branches
+        far_stride = max(1, int(sim_tuning.OFFSCREEN_FAR_STRIDE))
+        near_stride = max(
+            1,
+            int(
+                getattr(
+                    sim_tuning,
+                    "OFFSCREEN_NEAR_STRIDE",
+                    sim_tuning.OFFSCREEN_UPDATE_STRIDE,
+                )
+            ),
+        )
         for car in car_list:
             if not car.alive():
                 continue
@@ -267,85 +377,37 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                 car._turn_phase in ("to_hub", "turning", "settling")
                 or car.turn_signal != 0
             )
-            if (
-                not in_intersection
-                and not in_active_turn
-                and car._turn_phase == "none"
-                and car.turn_signal == 0
-                and car.current_speed >= 0.4
-                and not car._approaching_or_in_intersection(m.intersection_zones)
-            ):
-                _lane_peers_for(car, lane_buckets, lane_scratch)
-                car.straight_cruise_update(
-                    _road_states_for_car(
-                        car, _oriented_road_states_for_car(car)
-                    ),
-                    m.world_bounds,
-                    lane_scratch,
-                    m.round_frame,
-                    m.current_map.roads,
-                    m.intersection_zones,
-                    player_body,
+            in_sim_view = collide(sim_view, car._collision_shell)
+            in_camera_view = collide(view_rect, car._collision_shell)
+            # Far offscreen: stride cruise only, never full Car.update.
+            # Turns still use full AI so offscreen turn state does not stall.
+            if not in_active_turn and not in_sim_view:
+                cruised = _strided_offscreen_tick(
+                    car, m, far_stride, lane_buckets, lane_scratch, player_body
                 )
-                _frame_car_spatial.relocate_car(car)
+                if cruised:
+                    branches["branch_far_cruise_tick"] += 1
+                else:
+                    branches["branch_far_skip"] += 1
                 continue
-            if (
-                not in_intersection
-                and not in_active_turn
-                and not collide(sim_view, car._collision_shell)
-            ):
-                stride = sim_tuning.OFFSCREEN_FAR_STRIDE
-                if (m.round_frame + car.spawn_id) % stride != 0:
-                    car._spawn_age += 1
-                    signed = car.current_speed * car.direction
-                    if signed != 0:
-                        next_rect = car.rect.copy()
-                        if car.vertical:
-                            next_rect.y += int(signed)
-                        else:
-                            next_rect.x += int(signed)
-                        oriented = _oriented_road_states_for_car(car)
-                        states = _road_states_for_car(car, oriented)
-                        move_blocked = False
-                        if m.intersection_zones:
-                            if car._intersection_entry_blocked(
-                                next_rect,
-                                states,
-                                m.intersection_zones,
-                                [],
-                                [],
-                            ):
-                                move_blocked = True
-                            elif car._intersection_advance_blocked_on_red(
-                                next_rect, states, m.intersection_zones
-                            ):
-                                move_blocked = True
-                            elif car._crosswalk_advance_blocked(
-                                next_rect, states, m.intersection_zones
-                            ):
-                                move_blocked = True
-                        if move_blocked:
-                            car.current_speed = 0.0
-                            car.speed = 0.0
-                        else:
-                            car.rect = next_rect
-                    car._sync_collision_shell()
-                    _frame_car_spatial.relocate_car(car)
-                    continue
-                # Periodic offscreen tick: cruise (signals + lane follow), not full AI.
-                _lane_peers_for(car, lane_buckets, lane_scratch)
-                car.straight_cruise_update(
-                    _road_states_for_car(
-                        car, _oriented_road_states_for_car(car)
-                    ),
-                    m.world_bounds,
-                    lane_scratch,
-                    m.round_frame,
-                    m.current_map.roads,
-                    m.intersection_zones,
-                    player_body,
+            can_cruise = _car_can_straight_cruise(
+                car, in_intersection, in_active_turn, m.intersection_zones
+            )
+            # Mid-ring (outside camera, inside sim pad): cheap cruise path.
+            # Fairness: near-but-offscreen cars update less often than in-view.
+            # Approaching / turning / in-ix cars still take full AI below.
+            if not in_camera_view and in_sim_view and can_cruise:
+                cruised = _strided_offscreen_tick(
+                    car, m, near_stride, lane_buckets, lane_scratch, player_body
                 )
-                _frame_car_spatial.relocate_car(car)
+                if cruised:
+                    branches["branch_near_cruise_tick"] += 1
+                else:
+                    branches["branch_near_skip"] += 1
+                continue
+            if can_cruise:
+                _cruise_car(car, m, lane_buckets, lane_scratch, player_body)
+                branches["branch_cruise"] += 1
                 continue
             _lane_peers_for(car, lane_buckets, lane_scratch)
             peer_pad = 72 if car._turn_phase == "none" and car.turn_signal == 0 else IX_QUERY_PAD
@@ -376,19 +438,19 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                 elapsed,
             )
             _frame_car_spatial.relocate_car(car)
+            branches["branch_full_update"] += 1
 
     with m.perf_profiler.section("car_shell_separation"):
         if before_shell_separation is not None:
             before_shell_separation(car_list)
         sep_stride = max(1, sim_tuning.SHELL_SEP_EVERY_N_FRAMES)
-        if (
-            m.round_frame % sep_stride == 0
-            or len(car_list) <= sim_tuning.SHELL_SEP_FLEET_THRESHOLD
-        ):
+        small_fleet = len(car_list) <= sim_tuning.SHELL_SEP_FLEET_THRESHOLD
+        if m.round_frame % sep_stride == 0 or small_fleet:
             _resolve_all_shell_overlaps(
                 car_list, _frame_car_spatial, _frame_nearby_scratch
             )
-            if _fleet_has_shell_overlap(
+            # Second overlap scan is O(fleet); keep it for small fleets only.
+            if small_fleet and _fleet_has_shell_overlap(
                 car_list, _frame_car_spatial, _frame_nearby_scratch
             ):
                 _resolve_all_shell_overlaps(
@@ -604,21 +666,32 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     crossing_total = (
         route_crossings if route_crossings is not None else len(m.current_map.roads)
     )
+    # Assessment chrome (route / risks / crossings / traffic / intensity) is
+    # recruiter-facing; candidates only need timer, sprint, and live signals.
+    show_assessment_hud = getattr(m, "session_audience", "candidate") == "recruiter"
     hud_lines = [
-        f"Round {m.current_round_index}/{m.session_num_rounds} · intensity {esc * 100:.0f}%",
         f"Time left: {time_left:05.1f}s",
-        f"Crossings: {m.crossings}/{crossing_total} · "
-        f"traffic {sum(1 for c in car_list if c.alive())} "
-        f"({len(draw_cars)} on screen)",
     ]
-    gen_meta = getattr(m.current_map, "generation_meta", None) or {}
-    spawn_edge = gen_meta.get("spawn_edge")
-    goal_edge = gen_meta.get("goal_edge")
-    if spawn_edge and goal_edge:
+    if show_assessment_hud:
         hud_lines.insert(
-            1,
-            f"Route: spawn {spawn_edge} → goal {goal_edge}",
+            0,
+            f"Round {m.current_round_index}/{m.session_num_rounds} · "
+            f"intensity {esc * 100:.0f}%",
         )
+        hud_lines.append(
+            f"Crossings: {m.crossings}/{crossing_total} · "
+            f"traffic {sum(1 for c in car_list if c.alive())} "
+            f"({len(draw_cars)} on screen)",
+        )
+        gen_meta = getattr(m.current_map, "generation_meta", None) or {}
+        spawn_edge = gen_meta.get("spawn_edge")
+        goal_edge = gen_meta.get("goal_edge")
+        if spawn_edge and goal_edge:
+            # Keep Route under Round/intensity and above Time left.
+            hud_lines.insert(
+                1,
+                f"Route: spawn {spawn_edge} → goal {goal_edge}",
+            )
     hud_lines.append(
         f"Sprint: {'ON' if m.player.sprint_enabled else 'OFF'} (Shift)"
     )
@@ -631,7 +704,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
             if m.legal_crossing_commit_active and not player_on_car_red:
                 car_light = "green (legal commit)"
             hud_lines.append(f"Crosswalk · cars: {car_light}")
-    if m.reasonable_risk_events + m.risky_risk_events > 0:
+    if show_assessment_hud and m.reasonable_risk_events + m.risky_risk_events > 0:
         hud_lines.append(
             f"Risks: {m.reasonable_risk_events} reasonable · {m.risky_risk_events} risky"
         )
@@ -673,14 +746,16 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
         hud_lines.append(f"Perf log: {m.perf_profiler.jsonl_path}")
     if hidden.suppress_hud():
         hud_lines = []
+    counters = _perf_counter_snapshot(
+        car_list=car_list,
+        replay_cars=draw_cars,
+        draw_sprites=draw_sprites,
+    )
+    counters.update(getattr(m, "car_update_branches", _empty_car_update_branches()))
     m.perf_profiler.finish_update(
         round_frame=m.round_frame,
         elapsed_s=elapsed,
-        counters=_perf_counter_snapshot(
-            car_list=car_list,
-            replay_cars=draw_cars,
-            draw_sprites=draw_sprites,
-        ),
+        counters=counters,
     )
     return {
         "camera_offset": camera_offset,

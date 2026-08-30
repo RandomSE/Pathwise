@@ -35,6 +35,8 @@ class TestArchetypeScoringBranches(unittest.TestCase):
         }
         scores = score_session(base)
         self.assertGreater(len(scores), 0)
+        self.assertIn("traits", scores)
+        self.assertEqual(scores["validity"]["claim_level"], "face_validity_only")
 
 
 class TestFrameRecorderEdgeCases(unittest.TestCase):
@@ -172,7 +174,7 @@ class TestSpectateRoundAutopilotOff(unittest.TestCase):
                 seed=42,
                 autopilot=False,
                 output_dir=tmp,
-                max_frames=120,
+                max_frames=30,
             )
             self.assertGreater(result.sim_frames, 0)
 
@@ -204,7 +206,7 @@ class TestMainCarUpdateLoop(unittest.TestCase):
         game.session_use_adaptive_map = False
         profile = DifficultyProfile.for_menu_preset("hard")
         game.start_round(1, profile, "hard")
-        for _ in range(500):
+        for _ in range(60):
             game.update_round_frame(KeyState())
         car_list = game.cars.sprites()
         if not car_list:

@@ -1,7 +1,8 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-from pathwise.pathwise_window import PathwiseWindow
+from pathwise.pathwise_window import PathwiseWindow, vsync_enabled
 
 
 class TestPathwiseWindowDraw(unittest.TestCase):
@@ -48,6 +49,26 @@ class TestFinishSessionOrder(unittest.TestCase):
             window._finish_session()
 
         self.assertEqual(call_order, ["save", "show"])
+
+
+class TestVsyncPolicy(unittest.TestCase):
+    def test_play_defaults_to_vsync_on(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PATHWISE_VSYNC", None)
+            self.assertTrue(vsync_enabled(smoke_mode=False))
+
+    def test_smoke_defaults_to_vsync_off(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PATHWISE_VSYNC", None)
+            self.assertFalse(vsync_enabled(smoke_mode=True))
+
+    def test_env_off_wins(self):
+        with patch.dict("os.environ", {"PATHWISE_VSYNC": "0"}):
+            self.assertFalse(vsync_enabled(smoke_mode=False))
+
+    def test_env_on_wins_in_smoke(self):
+        with patch.dict("os.environ", {"PATHWISE_VSYNC": "1"}):
+            self.assertTrue(vsync_enabled(smoke_mode=True))
 
 
 if __name__ == "__main__":

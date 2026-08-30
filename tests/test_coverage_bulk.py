@@ -178,6 +178,8 @@ class TestArchetypeAndDecisionLogger(unittest.TestCase):
         }
         scores = score_session(sess)
         self.assertTrue(scores)
+        self.assertIn("hiring_output", scores)
+        self.assertEqual(scores["hiring_output"]["kind"], "role_target_similarity")
 
     def test_decision_logger_risk_split(self):
         from analytics.decision_logger import DecisionLogger

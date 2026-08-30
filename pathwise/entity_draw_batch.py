@@ -12,8 +12,23 @@ class EntityDrawBatch:
     """Draw entities with a single SpriteList GPU batch per frame."""
 
     def __init__(self) -> None:
+        self._window_id: int | None = None
+        self._rebuild_pool()
+
+    def _rebuild_pool(self) -> None:
         self._sprites = arcade.SpriteList(use_spatial_hash=False)
         self._pool: list[arcade.Sprite] = []
+
+    def _bind_current_window(self) -> None:
+        """SpriteList atlases die with the Arcade window; rebuild on a new ctx."""
+        try:
+            window = arcade.get_window()
+        except Exception:
+            window = None
+        window_id = id(window) if window is not None else None
+        if window_id != self._window_id:
+            self._rebuild_pool()
+            self._window_id = window_id
 
     def _ensure_pool(self, count: int) -> None:
         while len(self._pool) < count:
@@ -35,6 +50,7 @@ class EntityDrawBatch:
         _ = layout
         if not entities:
             return
+        self._bind_current_window()
         cam_x, cam_y = camera_offset
         count = len(entities)
         self._ensure_pool(count)

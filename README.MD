@@ -33,11 +33,14 @@ Cross roads without hitting cars; reach the goal before time runs out. With **mo
 5. View Recruiter Analytics
 After each run, Pathwise writes `logs.json` (decision sequence, hesitation events, heatmap samples) and auto-generates `logs_dashboard.html`.
 **Car motion diagnostics:** abnormal traffic events (backward movement, 10s+ stalls) append to `car_diagnostics.jsonl`: share this file when reporting car AI bugs.
-Open the HTML file in a browser to see role-tailored archetype scores and a **frame-by-frame replay** (roads, cars, traffic lights, player) with a scrubber and jump-to-decision markers.
+Open the HTML file in a browser to see a **game-derived session profile** (independent in-game trait bars, role **target similarity**, and a cosmetic session-flavor badge) plus a **frame-by-frame replay** (roads, cars, traffic lights, player) with a scrubber and jump-to-decision markers.
+
+Scoring is three-layer and face-valid only: (1) continuous in-game trait dimensions, (2) cosmetic archetype labels for the game UI, (3) weighted distance to a versioned in-repo role catalog (`ROLE_CATALOG_VERSION`). Catalog targets are design priors, not criterion-fitted. Role similarity is omitted when measured catalog weight is below 0.50 coverage. Decision tempo uses one function (`tempo_from_commit_s`); logs tag `commit_time_s` vs `quick_slow_fallback`. These numbers describe Pathwise session behavior. They are not construct-valid or criterion-valid, and they do not predict on-the-job performance. Hiring views must read `traits` and `role_fits`, not `primary_archetype`.
+
 To rebuild the dashboard from an existing log: `python -m analytics.dashboard logs.json`
 
 6. Run Tests and Coverage
 Install dev dependencies: `pip install -r requirements-dev.txt`
 Run tests: `python -m pytest tests/ -q`
 Coverage gate (≥95% line coverage on `pathwise/`, `map_generation/`, `analytics/`, `main.py`): `python -m pytest tests/ --cov=pathwise --cov=map_generation --cov=analytics --cov=main --cov-report=term-missing --cov-config=.coveragerc`
-Measured baseline (2026-06-11): **91.7%**: the gate fails until `main.py` Car logic is extracted and more unit tests can target `pathwise.car` (see Follow-Up Queue).
+Measured baseline (2026-08-26): **95.0%** with `pathwise/car.py` and spectate/traffic-audit CLI modules omitted in `.coveragerc`.

@@ -59,7 +59,10 @@ class GameTuning:
     MAX_DRAW_RECORD_CARS: int = 28
     SIM_UPDATE_VIEW_PAD: int = 280
     OFFSCREEN_UPDATE_STRIDE: int = 3
-    OFFSCREEN_FAR_STRIDE: int = 4
+    # Mid-ring (outside camera, inside sim_view). Fairness: near-but-offscreen
+    # cars update less often than in-view; still cruise/cheap, not full AI.
+    OFFSCREEN_NEAR_STRIDE: int = 3
+    OFFSCREEN_FAR_STRIDE: int = 5
     CAR_SPAWN_RAMP_FRAMES: int = 90
     ROAD_EXIT_PAD: int = 28
     PLAYER_SPAWN_PAD: int = 280
@@ -83,7 +86,7 @@ class GameTuning:
     CAR_SOFT_FOLLOW_RANGE: int = 150
     CAR_SOFT_STOP_GAP: int = 14
     CAP_ALL_CARS_ITERATIONS: int = 4
-    SHELL_SEP_EVERY_N_FRAMES: int = 2
+    SHELL_SEP_EVERY_N_FRAMES: int = 3
     SHELL_SEP_PEER_PAD: int = 72
     SHELL_SEP_FLEET_THRESHOLD: int = 70
 
@@ -147,11 +150,18 @@ class GameTuning:
                 SIM_UPDATE_VIEW_PAD=240,
             )
         if profile is not None:
-            stride = max(
+            near_stride = max(
                 2,
-                min(5, int(round(tuning.OFFSCREEN_UPDATE_STRIDE * profile.stride_scale / 1.4))),
+                min(
+                    5,
+                    int(round(tuning.OFFSCREEN_NEAR_STRIDE * profile.stride_scale / 1.4)),
+                ),
             )
-            tuning = replace(tuning, OFFSCREEN_UPDATE_STRIDE=stride)
+            tuning = replace(
+                tuning,
+                OFFSCREEN_NEAR_STRIDE=near_stride,
+                OFFSCREEN_UPDATE_STRIDE=near_stride,
+            )
         return tuning
 
     def export_scalars(self) -> dict[str, object]:

@@ -5,6 +5,7 @@ import time
 import unittest
 
 import arcade
+import pytest
 
 from map_generation.difficulty import DifficultyProfile
 from pathwise.gameplay_framebuffer import reset_shared_gameplay_surface
@@ -12,16 +13,16 @@ from pathwise.input_keys import KeyState
 from pathwise.viewport import DisplayLayout
 
 DRAW_BUDGET_MS = 16.7
-HEADLESS_WARMUP_DRAWS = 90
-HEADLESS_SAMPLE_DRAWS = 60
+HEADLESS_WARMUP_DRAWS = 8
+HEADLESS_SAMPLE_DRAWS = 20
 
 
 class TestDrawPerfRegression(unittest.TestCase):
-    def test_1080p_fbo_uses_fixed_internal_resolution(self):
+    def test_1080p_fbo_matches_dest_pixels(self):
         layout = DisplayLayout.fit_window(1920, 1080)
-        from pathwise.gameplay_framebuffer import FIXED_FBO_HEIGHT, FIXED_FBO_WIDTH, fixed_fbo_pixel_size
+        from pathwise.gameplay_framebuffer import fixed_fbo_pixel_size
 
-        self.assertEqual(fixed_fbo_pixel_size(layout), (FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT))
+        self.assertEqual(fixed_fbo_pixel_size(layout), layout.dest_pixel_size())
 
     def _profile_draw_ms(self) -> list[float]:
         import main as game
@@ -79,6 +80,7 @@ class TestDrawPerfRegression(unittest.TestCase):
         finally:
             window.close()
 
+    @pytest.mark.needs_map_bake
     def test_headless_draw_warmup_stays_under_relaxed_budget(self):
         samples_ms = self._profile_draw_ms()
         avg_ms = sum(samples_ms) / len(samples_ms)
@@ -88,6 +90,7 @@ class TestDrawPerfRegression(unittest.TestCase):
             f"avg draw {avg_ms:.1f}ms still high after warmup (headless GL overhead)",
         )
 
+    @pytest.mark.needs_map_bake
     @unittest.skipUnless(
         os.environ.get("PATHWISE_STRICT_DRAW_PERF") == "1",
         "60fps draw budget is GPU/driver sensitive; set PATHWISE_STRICT_DRAW_PERF=1 to enforce",

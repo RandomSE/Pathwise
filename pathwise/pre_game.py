@@ -684,6 +684,7 @@ class RecruiterConfigView(_MenuView):
                 decoded.modifiers,
             )
         self._copy_feedback_until = 0.0
+        self._generate_error = ""
         self._rng = rng or random.Random()
         self._on_back = on_back
         self._on_start = on_start
@@ -746,6 +747,14 @@ class RecruiterConfigView(_MenuView):
         self.back_rect = layout.back_rect
 
     def _generate_seed(self) -> None:
+        from pathwise.recruiter_accounts import RecruiterRecord, can_generate_codes
+
+        record = getattr(self.window, "_recruiter_record", None)
+        if not isinstance(record, RecruiterRecord) or not can_generate_codes(record):
+            self._generate_error = "This account cannot generate seeds."
+            self._layout()
+            return
+        self._generate_error = ""
         map_seed = self._rng.randint(0, MAP_SEED_MOD_V9 - 1)
         self.generated_seed_text = encode_recruiter_seed(
             map_seed,
@@ -1002,6 +1011,16 @@ class RecruiterConfigView(_MenuView):
             anchor_x="center",
             anchor_y="center",
         ).draw()
+        if getattr(self, "_generate_error", ""):
+            arcade.Text(
+                self._generate_error,
+                cx,
+                _arcade_y(self.window, layout.generate_error_top),
+                MENU_ERROR,
+                14,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
         if self.generated_seed_text:
             self._draw_seed_field(self.seed_display_rect, self.generated_seed_text, editing=False)
         else:

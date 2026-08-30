@@ -29,9 +29,93 @@ class TestCarExtended(unittest.TestCase):
         try:
             a = Car(100, 100, 3.0, vertical=False, spawn_id=1)
             b = Car(108, 100, 0.0, vertical=False, spawn_id=2)
+            a.current_speed = 1.0
+            b.current_speed = 1.0
             a._sync_collision_shell(force=True)
             b._sync_collision_shell(force=True)
+            before = (a.rect.topleft, b.rect.topleft)
             _resolve_all_shell_overlaps([a, b])
+            self.assertNotEqual((a.rect.topleft, b.rect.topleft), before)
+        finally:
+            sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
+
+    def _overlapping_pair(self, x, y, spawn_a, spawn_b, speed=1.0):
+        a = Car(x, y, 3.0, vertical=False, spawn_id=spawn_a)
+        b = Car(x + 8, y, 0.0, vertical=False, spawn_id=spawn_b)
+        a.current_speed = speed
+        b.current_speed = speed
+        a._sync_collision_shell(force=True)
+        b._sync_collision_shell(force=True)
+        return a, b
+
+    def test_spatial_shell_sep_separates_nearby_and_ignores_far(self):
+        prev = sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE
+        sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = True
+        try:
+            a, b = self._overlapping_pair(100, 100, 1, 2)
+            far_a, far_b = self._overlapping_pair(4000, 4000, 10, 11)
+            cars = [a, b, far_a, far_b]
+            spatial = CarSpatialIndex()
+            spatial.rebuild(cars)
+            seen: dict[int, list[int]] = {}
+            orig = Car._resolve_shell_penetration
+
+            def spy(self, peers, **kwargs):
+                seen[self.spawn_id] = [p.spawn_id for p in peers]
+                return orig(self, peers, **kwargs)
+
+            with patch.object(Car, "_resolve_shell_penetration", spy):
+                _resolve_all_shell_overlaps(cars, spatial, [])
+            self.assertIn(2, seen[1])
+            self.assertNotIn(10, seen[1])
+            self.assertNotIn(11, seen[1])
+            self.assertIn(11, seen[10])
+            self.assertNotIn(1, seen[10])
+        finally:
+            sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
+
+    def test_spatial_shell_sep_still_separates_nearby_overlap(self):
+        prev = sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE
+        sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = True
+        try:
+            a, b = self._overlapping_pair(120, 140, 3, 4)
+            spatial = CarSpatialIndex()
+            spatial.rebuild([a, b])
+            before = (a.rect.topleft, b.rect.topleft)
+            _resolve_all_shell_overlaps([a, b], spatial, [])
+            self.assertNotEqual((a.rect.topleft, b.rect.topleft), before)
+        finally:
+            sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
+
+    def test_stopped_stack_separates_with_spatial_peers(self):
+        prev = sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE
+        sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = True
+        try:
+            a, b = self._overlapping_pair(200, 200, 5, 6, speed=0.0)
+            spatial = CarSpatialIndex()
+            spatial.rebuild([a, b])
+            before = (a.rect.topleft, b.rect.topleft)
+            _resolve_all_shell_overlaps([a, b], spatial, [])
+            self.assertNotEqual((a.rect.topleft, b.rect.topleft), before)
+        finally:
+            sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
+
+    def test_dense_pack_separates_with_spatial_peers(self):
+        prev = sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE
+        sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = True
+        try:
+            pack = []
+            for i in range(4):
+                car = Car(300 + i * 4, 300, 2.0, vertical=False, spawn_id=20 + i)
+                car.current_speed = 0.8
+                car._sync_collision_shell(force=True)
+                pack.append(car)
+            spatial = CarSpatialIndex()
+            spatial.rebuild(pack)
+            before = [c.rect.topleft for c in pack]
+            _resolve_all_shell_overlaps(pack, spatial, [])
+            after = [c.rect.topleft for c in pack]
+            self.assertNotEqual(after, before)
         finally:
             sim_constants.ENABLE_CAR_CAR_SOFT_AVOIDANCE = prev
 

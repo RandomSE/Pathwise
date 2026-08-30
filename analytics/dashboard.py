@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 
-from analytics.archetype_scoring import score_session
+from analytics.archetype_scoring import score_session, score_session_log
 from analytics.replay_playback import (
     MAX_PLAYBACK_GAP_S,
     MIN_PLAYBACK_GAP_S,
@@ -36,6 +36,30 @@ def session_is_highway(session: dict | None) -> bool:
         return True
     generation = layout.get("generation") or session.get("generation_meta") or {}
     return generation.get("mode") == "highway"
+
+
+DASHBOARD_VALIDITY_SUMMARY = (
+    "Scores describe in-game Pathwise session behavior. "
+    "They are not construct validity or criterion validity evidence."
+)
+
+
+def _scoring_for_dashboard(scoring: dict) -> dict:
+    """Keep payload contract in logs; HTML must not embed banned validity phrasing."""
+    payload = json.loads(json.dumps(scoring))
+
+    def _scrub(node):
+        if isinstance(node, dict):
+            if node.get("claim_level") == "face_validity_only" and "summary" in node:
+                node["summary"] = DASHBOARD_VALIDITY_SUMMARY
+            for value in node.values():
+                _scrub(value)
+        elif isinstance(node, list):
+            for item in node:
+                _scrub(item)
+
+    _scrub(payload)
+    return payload
 
 
 def replay_defaults_for_session(
@@ -127,7 +151,14 @@ def build_dashboard_html(
 
     last = rounds_ui[-1]
     session = last["session"]
-    archetypes = payload.get("archetypes") or last["archetypes"]
+    session_scoring = payload.get("archetypes")
+    if not isinstance(session_scoring, dict) or "traits" not in session_scoring:
+        session_scoring = score_session_log(payload)
+    session_scoring = _scoring_for_dashboard(session_scoring)
+    for round_view in rounds_ui:
+        scored = round_view.get("archetypes")
+        if isinstance(scored, dict):
+            round_view["archetypes"] = _scoring_for_dashboard(scored)
 
     if output_path is None:
         base = os.path.splitext(os.path.basename(session_path))[0]
@@ -143,7 +174,8 @@ def build_dashboard_html(
             "rounds": rounds_ui,
             "num_rounds": len(rounds_ui),
             "session": session,
-            "archetypes": archetypes,
+            "archetypes": session_scoring,
+            "session_scoring": session_scoring,
             "duration": last["duration"],
             "map_layout": last["map_layout"],
             "frames": last["frames"],
@@ -226,9 +258,36 @@ def build_dashboard_html(
     .stat .value {{ font-size: 1.4rem; font-weight: 600; }}
     .stat .label {{ color: var(--muted); font-size: 0.8rem; }}
     .archetype-primary {{
-      font-size: 1.35rem;
+      font-size: 1.05rem;
       font-weight: 600;
       color: var(--accent);
+    }}
+    .validity-banner {{
+      display: block;
+      margin: 0 0 1rem;
+      padding: 0.7rem 0.85rem;
+      border: 1px solid #5a4630;
+      border-radius: 8px;
+      background: #2a2218;
+      color: #e6d3b8;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }}
+    .role-fit-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      margin: 0.75rem 0 1rem;
+    }}
+    .role-fit-table th, .role-fit-table td {{
+      text-align: left;
+      padding: 0.35rem 0.4rem;
+      border-bottom: 1px solid #2a3548;
+    }}
+    .role-fit-note {{
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin: 0 0 0.75rem;
     }}
   .bar-row {{ margin-bottom: 0.65rem; }}
     .bar-label {{ display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.2rem; }}
@@ -462,16 +521,21 @@ def build_dashboard_html(
 <body>
   <header>
     <h1>Pathwise Recruiter Dashboard</h1>
-    <p class="subtitle">Behavioral archetypes and a frame-by-frame replay of the candidate run (cars, lights, decisions).</p>
+    <p class="subtitle">Game-derived session profile and a frame-by-frame replay of the candidate run (cars, lights, decisions).</p>
   </header>
   <main>
     <div class="stat-row" id="stats"></div>
     <div class="grid grid-2">
       <section class="card">
-        <h2>Role-Tailored Scoring</h2>
-        <p class="archetype-primary" id="primary-archetype"></p>
+        <h2>Session profile</h2>
+        <p class="validity-banner" id="validity-banner">Face-valid in-game behavior only. Not construct validity. Not criterion validity. Target similarity is not a job-performance prediction.</p>
+        <p class="archetype-primary" id="session-flavor"></p>
         <p class="subtitle" id="secondary-archetype"></p>
-        <div id="archetype-bars"></div>
+        <h3>Trait profile</h3>
+        <div id="trait-bars"></div>
+        <h3>Target similarity</h3>
+        <p class="role-fit-note">Weighted distance to designed role targets. Face-valid in-game behavior only; not construct validity or criterion validity.</p>
+        <table class="role-fit-table" id="role-fit-table"></table>
         <ul class="insights" id="insights"></ul>
       </section>
       <section class="card">
@@ -1550,7 +1614,7 @@ def build_dashboard_html(
 
     function renderRoundPanels() {{
       const s = DATA.session;
-      const a = DATA.archetypes;
+      const a = DATA.archetypes || DATA.session_scoring || {{}};
       const sum = s.summary || {{}};
 
       const statRows = [];
@@ -1574,21 +1638,45 @@ def build_dashboard_html(
         `<div class="stat"><div class="value" style="color:${{color}}">${{value}}</div><div class="label">${{label}}</div></div>`
       ).join("");
 
-      document.getElementById("primary-archetype").textContent =
-        a.primary_label + " (" + a.primary_score + "% fit)";
-      document.getElementById("secondary-archetype").textContent =
-        a.secondary_label
-          ? "Secondary: " + a.secondary_label + " (" + a.secondary_score + "%)"
-          : "";
+      const flavor = document.getElementById("session-flavor");
+      if (flavor) {{
+        const label = (a.archetype && a.archetype.primary_label) || a.primary_label || "Session flavor";
+        flavor.textContent = label + " - session summary flavor (not a hiring label)";
+      }}
+      const secondary = document.getElementById("secondary-archetype");
+      if (secondary) {{
+        const secondLabel = (a.archetype && a.archetype.secondary_label) || a.secondary_label;
+        secondary.textContent = secondLabel ? ("Also near: " + secondLabel) : "";
+      }}
 
-      const bars = document.getElementById("archetype-bars");
-      bars.innerHTML = Object.entries(a.scores)
-        .sort((x, y) => y[1] - x[1])
-        .map(([key, score]) => `
+      const traitBars = document.getElementById("trait-bars");
+      const traitLabels = a.trait_labels || {{}};
+      const traitFlags = a.trait_flags || {{}};
+      const traits = a.traits || {{}};
+      if (traitBars) {{
+        traitBars.innerHTML = Object.keys(traitLabels).map((key) => {{
+          const flag = traitFlags[key];
+          const raw = traits[key];
+          const shown = flag === "ok" && raw != null ? raw + "" : "insufficient data";
+          const width = flag === "ok" && raw != null ? raw : 0;
+          return `
           <div class="bar-row">
-            <div class="bar-label"><span>${{a.labels[key]}}</span><span>${{score}}%</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:${{score}}%"></div></div>
-          </div>`).join("");
+            <div class="bar-label"><span>${{traitLabels[key]}}</span><span>${{shown}}</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${{width}}%"></div></div>
+          </div>`;
+        }}).join("");
+      }}
+
+      const table = document.getElementById("role-fit-table");
+      if (table) {{
+        const rows = a.role_fits || [];
+        const body = rows.map((row) => {{
+          const fitCell = row.fit == null ? "insufficient coverage" : row.fit;
+          const cov = row.coverage == null ? "" : row.coverage;
+          return `<tr><td>${{row.label || row.role_id}}</td><td>${{fitCell}}</td><td>${{cov}}</td></tr>`;
+        }}).join("");
+        table.innerHTML = "<thead><tr><th>Role target</th><th>Target similarity</th><th>Coverage</th></tr></thead><tbody>" + body + "</tbody>";
+      }}
 
       document.getElementById("insights").innerHTML =
         (a.insights || []).map(i => `<li>${{i}}</li>`).join("");

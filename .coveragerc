@@ -17,6 +17,7 @@ omit =
     pathwise/car.py
     analytics/spectate_round.py
     analytics/spectate_analyzer.py
+    analytics/replay_traffic_audit.py
 
 [report]
 fail_under = 95

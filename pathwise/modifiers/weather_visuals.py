@@ -7,7 +7,12 @@ import random
 import arcade
 
 from pathwise.geom import Rect
-from pathwise.map_visuals import ROAD_ASPHALT, BakedMapLayer, MapTile, redraw_crosswalks_and_housing_pil
+from pathwise.map_visuals import (
+    ROAD_ASPHALT,
+    BakedMapLayer,
+    _tile_baked_image,
+    redraw_crosswalks_and_housing_pil,
+)
 
 RAIN_PARTICLE_CAP = 48
 RAIN_UPDATE_STRIDE = 2
@@ -154,23 +159,9 @@ def bake_rainy_road_overlay(
         base_img,
         hash=f"rain_bake_{session_base_seed}_{round_index}_{baked.world_bounds.width}",
     )
-    tiles: list[MapTile] = []
-    tile_size = 512
-    w, h = base_img.width, base_img.height
-    for top_px in range(0, h, tile_size):
-        for left_px in range(0, w, tile_size):
-            tile_w = min(tile_size, w - left_px)
-            tile_h = min(tile_size, h - top_px)
-            crop = base_img.crop((left_px, top_px, left_px + tile_w, top_px + tile_h))
-            world_rect = Rect(
-                baked.world_bounds.left + left_px,
-                baked.world_bounds.top + top_px,
-                tile_w,
-                tile_h,
-            )
-            tile_texture = arcade.Texture(
-                crop,
-                hash=f"rain_tile_{session_base_seed}_{left_px}_{top_px}",
-            )
-            tiles.append(MapTile(world_rect=world_rect, texture=tile_texture))
-    return BakedMapLayer(texture=texture, world_bounds=baked.world_bounds.copy(), tiles=tuple(tiles))
+    tiles = _tile_baked_image(
+        base_img,
+        baked.world_bounds,
+        f"rain_{session_base_seed}_{round_index}",
+    )
+    return BakedMapLayer(texture=texture, world_bounds=baked.world_bounds.copy(), tiles=tiles)

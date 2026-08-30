@@ -22,6 +22,20 @@ class TestGameTuning(unittest.TestCase):
         easy = GameTuning.for_preset("easy", profile)
         self.assertGreater(hard.OFFSCREEN_FAR_STRIDE, easy.OFFSCREEN_FAR_STRIDE)
 
+    def test_normal_uses_coarser_far_stride_than_easy(self):
+        profile = DifficultyProfile.for_menu_preset("normal")
+        normal = GameTuning.for_preset("normal", profile)
+        easy = GameTuning.for_preset("easy", profile)
+        self.assertGreater(normal.OFFSCREEN_FAR_STRIDE, easy.OFFSCREEN_FAR_STRIDE)
+        self.assertGreaterEqual(normal.SHELL_SEP_EVERY_N_FRAMES, 3)
+
+    def test_near_stride_is_live_and_not_coarser_than_far(self):
+        profile = DifficultyProfile.for_menu_preset("hard")
+        hard = GameTuning.for_preset("hard", profile)
+        self.assertGreaterEqual(hard.OFFSCREEN_NEAR_STRIDE, 2)
+        self.assertLessEqual(hard.OFFSCREEN_NEAR_STRIDE, hard.OFFSCREEN_FAR_STRIDE)
+        self.assertEqual(hard.OFFSCREEN_NEAR_STRIDE, hard.OFFSCREEN_UPDATE_STRIDE)
+
     def test_install_for_round_updates_module(self):
         profile = DifficultyProfile.for_menu_preset("hard")
         install_for_round("hard", profile)
