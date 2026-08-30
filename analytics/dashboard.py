@@ -1687,10 +1687,15 @@ def build_dashboard_html(
       document.getElementById("insights").innerHTML =
         (a.insights || []).map(i => `<li>${{i}}</li>`).join("");
 
+      const tempoCounts = (a.signal_sources || {{}}).decision_tempo_live_counts || {{}};
       document.getElementById("decision-summary").innerHTML = `
         <p><strong>${{sum.decision_count || 0}}</strong> logged decisions ·
         <strong>${{sum.quick_commits || 0}}</strong> quick commits ·
-        <strong>${{sum.slow_commits || 0}}</strong> deliberate commits</p>`;
+        <strong>${{sum.slow_commits || 0}}</strong> deliberate commits</p>
+        <p>Tempo sources: <strong>${{tempoCounts.n_commit_latency ?? 0}}</strong> curb latency ·
+        <strong>${{tempoCounts.n_residual ?? 0}}</strong> residual ·
+        <strong>${{tempoCounts.n_insufficient ?? 0}}</strong> insufficient
+        (counts only; not construct validity)</p>`;
 
       const seq = s.decision_sequence || [];
       const decisions = seq.filter(d => !isRiskAction(d.action, d.risk));

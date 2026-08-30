@@ -186,6 +186,70 @@ class TestTempoTransform(unittest.TestCase):
         self.assertEqual(result["trait_flags"]["decision_tempo"], "insufficient_data")
         self.assertIsNone(result["traits"]["decision_tempo"])
 
+    def test_decision_tempo_live_counts_on_scored_payload(self):
+        ok = score_session(_base_session())
+        counts = ok["signal_sources"]["decision_tempo_live_counts"]
+        self.assertEqual(counts["n_commit_latency"], 4)
+        self.assertEqual(counts["n_residual"], 0)
+        self.assertEqual(counts["n_insufficient"], 0)
+
+        residual = score_session(
+            {
+                "outcome": "success",
+                "duration_s": 14.0,
+                "crossings": 2,
+                "decision_sequence": [{"t": 1.0, "action": "cross_on_green"}] * 2,
+                "crossing_attempts": [
+                    {"commit_time_s": 3.0, "approach_path_px": 90.0, "road_index": 0},
+                    {"commit_time_s": 3.2, "approach_travel_s": 1.0, "road_index": 1},
+                ],
+                "summary": {
+                    "quick_commits": 0,
+                    "slow_commits": 0,
+                    "total_hesitation_s": 0.1,
+                    "hesitation_count": 0,
+                    "total_backtracks": 0,
+                },
+            }
+        )
+        residual_counts = residual["signal_sources"]["decision_tempo_live_counts"]
+        self.assertEqual(residual_counts["n_commit_latency"], 0)
+        self.assertEqual(residual_counts["n_residual"], 2)
+        self.assertEqual(residual_counts["n_insufficient"], 0)
+
+        empty = score_session(
+            {
+                "outcome": "unknown",
+                "duration_s": 8.0,
+                "crossings": 0,
+                "decision_sequence": [],
+                "crossing_attempts": [],
+                "summary": {},
+            }
+        )
+        empty_counts = empty["signal_sources"]["decision_tempo_live_counts"]
+        self.assertEqual(empty_counts["n_commit_latency"], 0)
+        self.assertEqual(empty_counts["n_residual"], 0)
+        self.assertGreaterEqual(empty_counts["n_insufficient"], 1)
+
+        mixed_log = score_session_log(
+            {
+                "rounds": [
+                    {"session": _base_session()},
+                    {
+                        "session": {
+                            "duration_s": 10.0,
+                            "crossing_attempts": [{"commit_time_s": 2.0}],
+                            "summary": {},
+                        }
+                    },
+                ]
+            }
+        )
+        mixed = mixed_log["signal_sources"]["decision_tempo_live_counts"]
+        self.assertEqual(mixed["n_commit_latency"], 4)
+        self.assertEqual(mixed["n_insufficient"], 1)
+
 
 class TestExclusivity(unittest.TestCase):
     def test_hesitation_does_not_move_risk_or_rule(self):

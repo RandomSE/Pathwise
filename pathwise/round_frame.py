@@ -66,6 +66,30 @@ def _game():
 
 
 _MAX_WALL_DT_S = 0.25
+# Inflate amount so the curb band is about one pedestrian-size thick.
+_CURB_ARRIVAL_INFLATE_PX = 56
+
+
+def _note_road_approach_and_curb(m) -> None:
+    """Record approach, then curb arrival, using the same road_index as commit.
+
+    Curb arrival is the player standing next to an uncrossed road, not on it.
+    Spawn-on-road does not invent a latency. Crosswalk wait zones may also
+    note arrival after this pass.
+    """
+    pos = m.player.rect.center
+    for road_index, road in enumerate(m.current_map.roads):
+        if road.crossed:
+            continue
+        approach_zone = road.rect.inflate(120, 120)
+        if not collide(approach_zone, m.player.rect):
+            continue
+        m.decision_logger.note_road_approach(road_index, pos=pos)
+        curb_band = road.rect.inflate(
+            _CURB_ARRIVAL_INFLATE_PX, _CURB_ARRIVAL_INFLATE_PX
+        )
+        if collide(curb_band, m.player.rect) and not collide(road.rect, m.player.rect):
+            m.decision_logger.note_curb_arrival(road_index, pos=pos)
 
 _CAR_UPDATE_BRANCH_KEYS = (
     "branch_cruise",
@@ -189,6 +213,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     previous_pos = m.player.rect.topleft
 
     with m.perf_profiler.section("lights_and_crossings"):
+        _note_road_approach_and_curb(m)
         for state in m.road_states:
             state["player_waiting"] = False
             road_rect = state["road_rect"]
@@ -202,13 +227,6 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
                         road_index, pos=m.player.rect.center
                     )
         update_light_timers(m.road_states, elapsed)
-
-        for road_index, road in enumerate(m.current_map.roads):
-            approach_zone = road.rect.inflate(120, 120)
-            if not road.crossed and collide(approach_zone, m.player.rect):
-                m.decision_logger.note_road_approach(
-                    road_index, pos=m.player.rect.center
-                )
 
     with m.perf_profiler.section("traffic_spawns"):
         spawn_steps = max(1, int(round(high_speed.frame_steps() * phys)))

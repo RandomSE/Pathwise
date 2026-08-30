@@ -200,6 +200,23 @@ class TestRoundFrame(unittest.TestCase):
         self.assertGreater(len(cruise_calls), 0)
         self.assertLess(len(cruise_calls), frames)
 
+    def test_note_approach_and_curb_skips_crossed_and_records_adjacent(self):
+        from pathwise.round_frame import _note_road_approach_and_curb
+
+        profile = DifficultyProfile.for_menu_preset("normal")
+        self.game.start_round(1, profile, "normal")
+        road = self.game.current_map.roads[0]
+        road.crossed = True
+        _note_road_approach_and_curb(self.game)
+        self.assertNotIn(0, self.game.decision_logger._approach_start)
+
+        road.crossed = False
+        self.game.player.rect.center = (road.rect.centerx, road.rect.top - 20)
+        self.game.player_prev_center = self.game.player.rect.center
+        _note_road_approach_and_curb(self.game)
+        self.assertIn(0, self.game.decision_logger._approach_start)
+        self.assertIn(0, self.game.decision_logger._curb_arrival)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,9 @@ class TestBuildDashboardHtml(unittest.TestCase):
         html = Path(out).read_text(encoding="utf-8")
         self.assertIn("<html", html.lower())
         self.assertIn("Pathwise", html)
+        self.assertIn("decision_tempo_live_counts", html)
+        self.assertIn("not authorized for employment decisions", html)
+        self.assertIn("not construct validity", html.lower())
 
     def test_multi_round_payload(self):
         self._write(

@@ -200,6 +200,32 @@ def score_risk_propensity(session: dict) -> tuple[float | None, str]:
     return round(_clamp(score), 1), FLAG_OK
 
 
+def _tempo_source_counts(sessions: list[dict]) -> dict[str, int]:
+    """Count how each crossing attempt supplied decision tempo. Diagnostic only."""
+    n_commit = 0
+    n_residual = 0
+    n_insufficient = 0
+    for session in sessions:
+        attempts = session.get("crossing_attempts") or []
+        if not attempts:
+            n_insufficient += 1
+            continue
+        for attempt in attempts:
+            parsed = _latency_from_attempt(attempt)
+            if parsed is None:
+                n_insufficient += 1
+                continue
+            if parsed[1] == "commit_latency_s":
+                n_commit += 1
+            else:
+                n_residual += 1
+    return {
+        "n_commit_latency": n_commit,
+        "n_residual": n_residual,
+        "n_insufficient": n_insufficient,
+    }
+
+
 def score_decision_tempo(session: dict) -> tuple[float | None, str, str | None]:
     latencies = []
     sources = []
@@ -377,6 +403,7 @@ def _score_round_traits(session: dict) -> tuple[dict, dict, dict]:
     sources["motor_tempo_flag"] = motor_flag
     if motor_src:
         sources["motor_tempo_source"] = motor_src
+    sources["decision_tempo_live_counts"] = _tempo_source_counts([session])
     sources["composure_between_round_variance"] = FLAG_INSUFFICIENT
     return traits, flags, sources
 
@@ -576,6 +603,7 @@ def score_session_log(payload: dict | None) -> dict:
         sources["decision_tempo"] = "commit_latency_s"
     elif "commit_latency_residual" in tempo_tags:
         sources["decision_tempo"] = "commit_latency_residual"
+    sources["decision_tempo_live_counts"] = _tempo_source_counts(sessions)
     sources["composure_between_round_variance"] = FLAG_INSUFFICIENT
     motor_pairs = []
     motor_src = None
