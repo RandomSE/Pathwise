@@ -1,25 +1,38 @@
 """Versioned in-repo role targets.
 
-Targets and weights are design priors, not criterion-fitted.
-They are unvalidated priors for face-valid in-game target similarity only.
+Targets are directional band midpoints (unvalidated priors), not
+criterion-fitted job profiles. They are not a claim of job fit.
 """
 
 from __future__ import annotations
 
-ROLE_CATALOG_VERSION = "1"
+ROLE_CATALOG_VERSION = "2"
 
 # Starter roles. Adding a fifth role must not require touching trait math.
-# Targets and weights are unvalidated priors, not empirically fitted criteria.
+# Targets are unvalidated priors: band midpoints, not empirically fitted criteria.
 ROLE_CATALOG = (
     {
         "role_id": "field_construction",
         "label": "Field construction",
+        "rationale": (
+            "Higher in-game risk exposure and adaptive replans than the "
+            "compliance auditor prior. This is a task-profile contrast, not a "
+            "claim that construction workers are reckless."
+        ),
+        "target_bands": {
+            "risk_propensity": (56, 72),
+            "adaptive_planning": (58, 74),
+            "composure": (46, 62),
+            "rule_adherence": (38, 52),
+            "decision_tempo": (48, 62),
+            "deliberation_depth": (32, 48),
+        },
         "targets": {
-            "risk_propensity": 70,
-            "adaptive_planning": 75,
-            "composure": 55,
+            "risk_propensity": 64,
+            "adaptive_planning": 66,
+            "composure": 54,
             "rule_adherence": 45,
-            "decision_tempo": 60,
+            "decision_tempo": 55,
             "deliberation_depth": 40,
         },
         "weights": {
@@ -35,12 +48,24 @@ ROLE_CATALOG = (
     {
         "role_id": "compliance_auditor",
         "label": "Compliance auditor",
+        "rationale": (
+            "Highest in-game rule_adherence and lowest risk_propensity among "
+            "the four priors. Unvalidated design contrast only."
+        ),
+        "target_bands": {
+            "rule_adherence": (74, 90),
+            "composure": (64, 78),
+            "risk_propensity": (16, 32),
+            "decision_tempo": (32, 48),
+            "deliberation_depth": (58, 74),
+            "adaptive_planning": (42, 58),
+        },
         "targets": {
-            "rule_adherence": 85,
-            "composure": 80,
-            "risk_propensity": 25,
+            "rule_adherence": 82,
+            "composure": 71,
+            "risk_propensity": 24,
             "decision_tempo": 40,
-            "deliberation_depth": 70,
+            "deliberation_depth": 66,
             "adaptive_planning": 50,
         },
         "weights": {
@@ -56,12 +81,24 @@ ROLE_CATALOG = (
     {
         "role_id": "logistics_dispatcher",
         "label": "Logistics dispatcher",
+        "rationale": (
+            "High in-game decision_tempo with high rule_adherence (speed with "
+            "procedure). Risk stays low-to-mid; this is not a high-risk prior."
+        ),
+        "target_bands": {
+            "rule_adherence": (66, 82),
+            "decision_tempo": (64, 80),
+            "composure": (56, 70),
+            "adaptive_planning": (50, 64),
+            "risk_propensity": (22, 38),
+            "deliberation_depth": (32, 48),
+        },
         "targets": {
-            "rule_adherence": 75,
-            "decision_tempo": 75,
-            "composure": 70,
-            "adaptive_planning": 60,
-            "risk_propensity": 35,
+            "rule_adherence": 74,
+            "decision_tempo": 72,
+            "composure": 63,
+            "adaptive_planning": 57,
+            "risk_propensity": 30,
             "deliberation_depth": 40,
         },
         "weights": {
@@ -77,21 +114,33 @@ ROLE_CATALOG = (
     {
         "role_id": "warehouse_operator",
         "label": "Warehouse operator",
+        "rationale": (
+            "Nearer the middle of each in-game band. Not a five-point offset "
+            "of the dispatcher prior."
+        ),
+        "target_bands": {
+            "decision_tempo": (44, 60),
+            "composure": (44, 60),
+            "rule_adherence": (46, 62),
+            "adaptive_planning": (44, 60),
+            "risk_propensity": (38, 54),
+            "deliberation_depth": (40, 56),
+        },
         "targets": {
-            "decision_tempo": 70,
-            "composure": 65,
-            "rule_adherence": 60,
-            "adaptive_planning": 55,
-            "risk_propensity": 40,
-            "deliberation_depth": 45,
+            "decision_tempo": 52,
+            "composure": 52,
+            "rule_adherence": 54,
+            "adaptive_planning": 52,
+            "risk_propensity": 46,
+            "deliberation_depth": 48,
         },
         "weights": {
-            "decision_tempo": 0.22,
-            "composure": 0.20,
-            "rule_adherence": 0.20,
-            "adaptive_planning": 0.14,
-            "risk_propensity": 0.12,
-            "deliberation_depth": 0.12,
+            "decision_tempo": 0.18,
+            "composure": 0.18,
+            "rule_adherence": 0.18,
+            "adaptive_planning": 0.16,
+            "risk_propensity": 0.16,
+            "deliberation_depth": 0.14,
         },
         "polarity": {},
     },

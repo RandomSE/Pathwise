@@ -9,6 +9,7 @@ from __future__ import annotations
 import statistics
 
 from analytics.session_risks import normalize_risk_counts
+from analytics.validity_register import validity_payload
 
 TRAIT_KEYS = (
     "risk_propensity",
@@ -43,23 +44,13 @@ SLOW_REPR_S = 5.5
 TEMPO_FAST_ANCHOR_S = 0.4
 TEMPO_SLOW_ANCHOR_S = 8.0
 MAX_TEMPO_PATH_DELTA = 8.0
+TYPICAL_WALK_PX_S = 90.0
+MOTOR_TEMPO_KEY = "motor_tempo"
 
 FLAG_OK = "ok"
 FLAG_INSUFFICIENT = "insufficient_data"
 
-VALIDITY = {
-    "claim_level": "face_validity_only",
-    "construct_validity": False,
-    "convergent_validity": False,
-    "criterion_validity": False,
-    "predicts_job_performance": False,
-    "population": "in_game_pathwise_session",
-    "summary": (
-        "Scores describe behavior in this Pathwise session. They have not been "
-        "shown to correlate with validated trait scales or to predict on-the-job "
-        "performance."
-    ),
-}
+VALIDITY = validity_payload()
 
 TRAIT_LABELS = {
     "risk_propensity": "In-game risk propensity",
@@ -76,8 +67,8 @@ TRAIT_DESCRIPTIONS = {
                 "Not a risk-taking construct from psychometrics."
             ),
     "decision_tempo": (
-        "In-game commit speed (100 = fast commit, 0 = slow/deliberate). "
-        "Not a personality construct."
+        "In-game go/no-go speed after curb arrival (100 = fast commit_latency_s, "
+        "0 = slow). Not raw approach-to-cross time. Not a personality construct."
     ),
     "deliberation_depth": (
         "Game-derived pause time and pause count at crossings. Freezing is not tempo."
@@ -91,8 +82,9 @@ TRAIT_DESCRIPTIONS = {
                 "Not a planning construct from psychometrics."
             ),
     "composure": (
-        "Game-derived recovery speed after backtrack or risk marks, plus "
-        "between-round variance of the other five scores at session level."
+        "Game-derived recovery speed after backtrack or risk marks in this "
+        "round. Between-round variance of other traits is reliability, not "
+        "composure."
     ),
 }
 
@@ -135,19 +127,52 @@ def _count_actions(decisions: list, action: str) -> int:
     return sum(1 for item in decisions if item.get("action") == action)
 
 
+def _finite_number(raw) -> float | None:
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
 def _finite_commit_times(session: dict) -> list[float]:
     times = []
     for attempt in session.get("crossing_attempts") or []:
-        raw = attempt.get("commit_time_s")
-        if raw is None:
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if value == value:  # not NaN
+        value = _finite_number(attempt.get("commit_time_s"))
+        if value is not None:
             times.append(value)
     return times
+
+
+def _latency_from_attempt(attempt: dict) -> tuple[float, str] | None:
+    latency = _finite_number(attempt.get("commit_latency_s"))
+    if latency is not None:
+        return latency, "commit_latency_s"
+    commit = _finite_number(attempt.get("commit_time_s"))
+    if commit is None:
+        return None
+    travel = _finite_number(attempt.get("approach_travel_s"))
+    if travel is not None:
+        return max(0.0, commit - travel), "commit_latency_residual"
+    path_px = _finite_number(attempt.get("approach_path_px"))
+    if path_px is not None:
+        expected_motor = path_px / TYPICAL_WALK_PX_S
+        return max(0.0, commit - expected_motor), "commit_latency_residual"
+    return None
+
+
+def _motor_seconds_from_attempt(attempt: dict) -> float | None:
+    travel = _finite_number(attempt.get("approach_travel_s"))
+    if travel is not None:
+        return travel
+    path_px = _finite_number(attempt.get("approach_path_px"))
+    if path_px is not None:
+        return path_px / TYPICAL_WALK_PX_S
+    return None
 
 
 def _event_t(item: dict):
@@ -176,27 +201,41 @@ def score_risk_propensity(session: dict) -> tuple[float | None, str]:
 
 
 def score_decision_tempo(session: dict) -> tuple[float | None, str, str | None]:
-    times = _finite_commit_times(session)
-    if times:
-        mean_s = sum(times) / len(times)
-        return round(_clamp(tempo_from_commit_s(mean_s)), 1), FLAG_OK, "commit_time_s"
-    summary = _summary(session)
-    quick = int(summary.get("quick_commits") or 0)
-    slow = int(summary.get("slow_commits") or 0)
-    crossings = session.get("crossings")
-    if crossings is None:
-        medium = 0
-    else:
-        medium = max(0, int(crossings) - quick - slow)
-    total = quick + slow + medium
-    if total <= 0:
+    latencies = []
+    sources = []
+    for attempt in session.get("crossing_attempts") or []:
+        parsed = _latency_from_attempt(attempt)
+        if parsed is None:
+            continue
+        value, source = parsed
+        latencies.append(value)
+        sources.append(source)
+    if latencies:
+        mean_s = sum(latencies) / len(latencies)
+        source = (
+            "commit_latency_s"
+            if "commit_latency_s" in sources
+            else "commit_latency_residual"
+        )
+        return round(_clamp(tempo_from_commit_s(mean_s)), 1), FLAG_OK, source
+    return None, FLAG_INSUFFICIENT, None
+
+
+def score_motor_tempo(session: dict) -> tuple[float | None, str, str | None]:
+    travels = []
+    used_path = False
+    for attempt in session.get("crossing_attempts") or []:
+        travel = _motor_seconds_from_attempt(attempt)
+        if travel is None:
+            continue
+        if attempt.get("approach_travel_s") is None and attempt.get("approach_path_px") is not None:
+            used_path = True
+        travels.append(travel)
+    if not travels:
         return None, FLAG_INSUFFICIENT, None
-    weighted = (
-        quick * tempo_from_commit_s(QUICK_REPR_S)
-        + medium * tempo_from_commit_s(MEDIUM_REPR_S)
-        + slow * tempo_from_commit_s(SLOW_REPR_S)
-    ) / total
-    return round(_clamp(weighted), 1), FLAG_OK, "quick_slow_fallback"
+    mean_s = sum(travels) / len(travels)
+    source = "approach_path_px" if used_path else "approach_travel_s"
+    return round(_clamp(tempo_from_commit_s(mean_s)), 1), FLAG_OK, source
 
 
 def score_deliberation_depth(session: dict) -> tuple[float | None, str]:
@@ -333,6 +372,11 @@ def _score_round_traits(session: dict) -> tuple[dict, dict, dict]:
         session
     )
     traits["composure"], flags["composure"] = score_composure(session)
+    motor, motor_flag, motor_src = score_motor_tempo(session)
+    sources["motor_tempo"] = motor
+    sources["motor_tempo_flag"] = motor_flag
+    if motor_src:
+        sources["motor_tempo_source"] = motor_src
     sources["composure_between_round_variance"] = FLAG_INSUFFICIENT
     return traits, flags, sources
 
@@ -349,10 +393,12 @@ def _build_insights(traits: dict, flags: dict, role_fits: list, sources: dict) -
                 f"(game-derived behavioral profile)."
             )
     tempo_src = sources.get("decision_tempo")
-    if tempo_src == "commit_time_s":
-        insights.append("Decision tempo used crossing_attempts commit_time_s.")
-    elif tempo_src == "quick_slow_fallback":
-        insights.append("Decision tempo used the quick/slow fallback through tempo_from_commit_s.")
+    if tempo_src == "commit_latency_s":
+        insights.append("Decision tempo used crossing_attempts commit_latency_s after curb arrival.")
+    elif tempo_src == "commit_latency_residual":
+        insights.append(
+            "Decision tempo used a motor-adjusted commit_latency residual, not raw approach time."
+        )
     ranked = [row for row in role_fits if row.get("fit") is not None]
     ranked.sort(key=lambda row: -float(row["fit"]))
     if len(ranked) >= 2:
@@ -384,13 +430,30 @@ def assemble_payload(traits: dict, flags: dict, sources: dict) -> dict:
     descriptions = {
         key: ARCHETYPE_CENTROIDS[key]["label"] for key in ARCHETYPE_CENTROIDS
     }
+    reliability = sources.pop("_reliability", None)
+    contrasts = sources.pop("_within_person_contrasts", None)
+    validity = validity_payload(
+        internal_reliability=None if reliability is None else {
+            "kind": reliability.get("kind"),
+            "claim": reliability.get("claim"),
+            "n_rounds": reliability.get("n_rounds"),
+        }
+    )
+    diagnostics = {
+        "motor_tempo": sources.get("motor_tempo"),
+        "motor_tempo_flag": sources.get("motor_tempo_flag"),
+        "motor_tempo_source": sources.get("motor_tempo_source"),
+    }
     payload = {
-        "validity": dict(VALIDITY),
+        "validity": validity,
         "traits": traits,
         "trait_flags": flags,
         "trait_labels": dict(TRAIT_LABELS),
         "trait_descriptions": dict(TRAIT_DESCRIPTIONS),
         "signal_sources": sources,
+        "diagnostics": diagnostics,
+        "reliability": reliability,
+        "within_person_contrasts": contrasts,
         "role_fits": role_fits,
         "archetype": {
             "primary_key": cosmetic["primary_key"],
@@ -417,6 +480,7 @@ def assemble_payload(traits: dict, flags: dict, sources: dict) -> dict:
         "traits": payload["traits"],
         "role_fits": payload["role_fits"],
         "validity": payload["validity"],
+        "reliability": payload["reliability"],
     }
     return payload
 
@@ -424,6 +488,12 @@ def assemble_payload(traits: dict, flags: dict, sources: dict) -> dict:
 def score_session(session: dict | None) -> dict:
     session = session or {}
     traits, flags, sources = _score_round_traits(session)
+    from analytics.reliability import session_reliability
+
+    sources["_reliability"] = session_reliability([(traits, flags)])
+    sources["_within_person_contrasts"] = _within_person_contrasts(
+        [session], [(traits, flags, sources)]
+    )
     return assemble_payload(traits, flags, sources)
 
 
@@ -500,25 +570,80 @@ def score_session_log(payload: dict | None) -> dict:
         else:
             traits[key] = round(_clamp(_weighted_mean(pairs)), 1)
             flags[key] = FLAG_OK
-    stdev = _between_round_stdev(
-        [item[0] for item in per_round],
-        [item[1] for item in per_round],
-    )
     sources = {}
     tempo_tags = [item[2].get("decision_tempo") for item in per_round]
-    if "commit_time_s" in tempo_tags:
-        sources["decision_tempo"] = "commit_time_s"
-    elif "quick_slow_fallback" in tempo_tags:
-        sources["decision_tempo"] = "quick_slow_fallback"
-    if stdev is None:
-        sources["composure_between_round_variance"] = FLAG_INSUFFICIENT
+    if "commit_latency_s" in tempo_tags:
+        sources["decision_tempo"] = "commit_latency_s"
+    elif "commit_latency_residual" in tempo_tags:
+        sources["decision_tempo"] = "commit_latency_residual"
+    sources["composure_between_round_variance"] = FLAG_INSUFFICIENT
+    motor_pairs = []
+    motor_src = None
+    for (round_traits, round_flags, round_src), weight in zip(per_round, durations):
+        motor = round_src.get("motor_tempo")
+        if round_src.get("motor_tempo_flag") == FLAG_OK and motor is not None:
+            motor_pairs.append((float(motor), weight))
+            motor_src = round_src.get("motor_tempo_source") or motor_src
+    if motor_pairs:
+        sources["motor_tempo"] = round(_clamp(_weighted_mean(motor_pairs)), 1)
+        sources["motor_tempo_flag"] = FLAG_OK
+        if motor_src:
+            sources["motor_tempo_source"] = motor_src
     else:
-        sources["composure_between_round_variance"] = FLAG_OK
-        variance_score = _composure_from_variance(stdev)
-        recovery = traits.get("composure")
-        if flags.get("composure") == FLAG_OK and recovery is not None:
-            traits["composure"] = round(_clamp((recovery + variance_score) / 2.0), 1)
-        else:
-            traits["composure"] = round(variance_score, 1)
-            flags["composure"] = FLAG_OK
+        sources["motor_tempo"] = None
+        sources["motor_tempo_flag"] = FLAG_INSUFFICIENT
+    from analytics.reliability import session_reliability
+
+    sources["_reliability"] = session_reliability(
+        [(item[0], item[1]) for item in per_round]
+    )
+    sources["_within_person_contrasts"] = _within_person_contrasts(sessions, per_round)
     return assemble_payload(traits, flags, sources)
+
+
+def _within_person_contrasts(sessions: list[dict], per_round: list) -> dict:
+    """Trait deltas vs that person's no-modifier baseline rounds when present."""
+    pressure_ids = {"time_pressure", "highway", "lawless", "lag", "old"}
+    baseline_vals = {key: [] for key in TRAIT_KEYS}
+    pressure_vals = {key: [] for key in TRAIT_KEYS}
+    baseline_n = 0
+    pressure_n = 0
+    recorded = []
+    for session, (traits, flags, _src) in zip(sessions, per_round):
+        mods = [str(item) for item in (session.get("modifiers") or [])]
+        recorded.append(mods)
+        bucket = pressure_vals if pressure_ids.intersection(mods) else baseline_vals
+        if pressure_ids.intersection(mods):
+            pressure_n += 1
+        else:
+            baseline_n += 1
+        for key in TRAIT_KEYS:
+            if flags.get(key) == FLAG_OK and traits.get(key) is not None:
+                bucket[key].append(float(traits[key]))
+    if baseline_n <= 0 or pressure_n <= 0:
+        return {
+            "status": FLAG_INSUFFICIENT,
+            "note": (
+                "Need both baseline and modifier rounds to score pressure/chaos "
+                "sensitivity as a within-person delta."
+            ),
+            "modifiers_by_round": recorded,
+            "deltas": {},
+        }
+    deltas = {}
+    for key in TRAIT_KEYS:
+        if baseline_vals[key] and pressure_vals[key]:
+            deltas[key] = round(
+                (sum(pressure_vals[key]) / len(pressure_vals[key]))
+                - (sum(baseline_vals[key]) / len(baseline_vals[key])),
+                2,
+            )
+    return {
+        "status": FLAG_OK,
+        "note": (
+            "Experimental-factor deltas vs this person's baseline rounds. "
+            "Modifiers are not demographic proxies."
+        ),
+        "modifiers_by_round": recorded,
+        "deltas": deltas,
+    }

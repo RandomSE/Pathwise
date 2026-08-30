@@ -187,10 +187,19 @@ class TestArchetypeAndDecisionLogger(unittest.TestCase):
         logger = DecisionLogger((0, 0), (200, 200), "map_test", 4)
         logger.note_risk("near_miss", road_index=1)
         logger.note_road_approach(0)
+        logger.note_curb_arrival(0, pos=(40, 0))
         logger.note_road_crossed(0, "green")
         payload = logger.finalize("success", 5.0, 1, 0, 1, "none")
         self.assertIn("decision_sequence", payload)
         self.assertTrue(payload["decision_sequence"])
+        attempt = payload["crossing_attempts"][-1]
+        self.assertIn("commit_latency_s", attempt)
+        self.assertIn("approach_travel_s", attempt)
+        self.assertIn("approach_path_px", attempt)
+        actions = [item["action"] for item in payload["decision_sequence"]]
+        self.assertIn("arrive_curb", actions)
+        logger.note_curb_arrival(3, pos=(1, 1))
+        logger.note_curb_arrival(0, pos=(2, 2))
 
 
 class TestPerfProfilerAndFrameRecorder(unittest.TestCase):

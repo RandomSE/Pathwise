@@ -32,7 +32,15 @@ class TestCosmeticLabels(unittest.TestCase):
             "risky_risk_events": 0,
             "reasonable_risk_events": 0,
             "decision_sequence": [{"t": 1.0, "action": "cross_on_green"}] * 3,
-            "crossing_attempts": [{"commit_time_s": 0.7}] * 3,
+            "crossing_attempts": [
+                {
+                    "commit_time_s": 0.7,
+                    "commit_latency_s": 0.35,
+                    "approach_travel_s": 0.35,
+                    "approach_path_px": 40.0,
+                }
+            ]
+            * 3,
             "summary": {
                 "total_backtracks": 0,
                 "total_hesitation_s": 0.2,
