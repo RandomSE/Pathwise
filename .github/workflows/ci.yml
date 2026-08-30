@@ -52,9 +52,6 @@ jobs:
           --cov=pathwise --cov=map_generation --cov=analytics --cov=main
           --cov-report=term-missing --cov-config=.coveragerc
 
-      - name: Regression suite and coverage gate (Windows)
+      - name: Regression suite (Windows)
         if: runner.os == 'Windows'
-        run: >
-          python -m pytest tests/
-          --cov=pathwise --cov=map_generation --cov=analytics --cov=main
-          --cov-report=term-missing --cov-config=.coveragerc
+        run: python -m pytest tests/ -q

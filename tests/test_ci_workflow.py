@@ -38,3 +38,25 @@ class TestCiWorkflow(unittest.TestCase):
             self.text,
             "PYGLET_HEADLESS loads EGL; Windows hosted runners do not ship EGL",
         )
+
+    def test_windows_job_skips_coverage_gate(self):
+        win = self.text.split("if: runner.os == 'Windows'", 1)[1]
+        self.assertNotIn(
+            "--cov-config=.coveragerc",
+            win,
+            "Windows hosted runners lack OpenGL 2.0; coverage gate stays on Linux",
+        )
+        self.assertNotIn("--cov=", win)
+
+    def test_windows_ci_gl2_skip_list_covers_failed_draw_tests(self):
+        from tests.conftest import WINDOWS_CI_SKIP_GL2
+
+        required = {
+            "test_draw_perf.py::TestDrawPerfRegression::test_headless_draw_warmup_stays_under_relaxed_budget",
+            "test_draw_viewport.py::TestGameplayDrawSurface::test_identity_layout_sets_sim_projection",
+            "test_draw_viewport.py::TestGameplayDrawSurface::test_scaled_layout_uses_fixed_fbo",
+            "test_game_entry.py::TestGameEntry::test_launch_draw_path_with_baked_map_tiles",
+            "test_graphics_perf.py::TestGameplaySurface::test_blit_builds_geometry_on_first_frame",
+            "test_weather_draw_smoke.py::TestWeatherDrawSmoke::test_draw_weather_overlay_does_not_raise",
+        }
+        self.assertTrue(required.issubset(WINDOWS_CI_SKIP_GL2))
