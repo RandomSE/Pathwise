@@ -35,7 +35,12 @@ class TestDrawPerfRegression(unittest.TestCase):
         game.app_running = True
 
         profile = DifficultyProfile.for_menu_preset("normal")
+        from pathwise.game_draw import reset_overlay_text_pools
+
+        reset_overlay_text_pools()
         window = arcade.Window(1920, 1080, visible=False)
+        arcade.set_window(window)
+        self.assertIs(arcade.get_window(), window)
         try:
             reset_shared_gameplay_surface()
             game.start_round(1, profile, "normal")

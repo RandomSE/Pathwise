@@ -27,6 +27,12 @@ _hud_texts: list[arcade.Text] = []
 _traffic_timer_texts: list[arcade.Text] = []
 
 
+def reset_overlay_text_pools() -> None:
+    """Drop cached HUD/timer Text objects after a window close."""
+    _hud_texts.clear()
+    _traffic_timer_texts.clear()
+
+
 @dataclass(frozen=True)
 class TrafficTimerLabel:
     """Screen-space timer text drawn after the FBO blit."""

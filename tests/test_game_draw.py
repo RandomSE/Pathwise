@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from pathwise.geom import Rect
-from pathwise.game_draw import draw_traffic_light_overlays
+from pathwise.game_draw import (
+    draw_traffic_light_overlays,
+    reset_overlay_text_pools,
+    _hud_texts,
+    _traffic_timer_texts,
+)
 
 
 def _road_state(direction: str) -> dict:
@@ -17,6 +22,15 @@ def _road_state(direction: str) -> dict:
         "seconds_to_change": 12.5,
         "next_light": "yellow",
     }
+
+
+class TestOverlayTextPools(unittest.TestCase):
+    def test_reset_overlay_text_pools_clears_cached_labels(self):
+        _hud_texts.append(object())
+        _traffic_timer_texts.append(object())
+        reset_overlay_text_pools()
+        self.assertEqual(_hud_texts, [])
+        self.assertEqual(_traffic_timer_texts, [])
 
 
 class TestTrafficLightOverlays(unittest.TestCase):
