@@ -292,6 +292,16 @@ class TestPipelineParsing(unittest.TestCase):
 
 
 class TestBackwardCompatIsolation(unittest.TestCase):
+    def test_schema_sql_is_shipped_next_to_module(self):
+        schema = ROOT / "pathwise" / "recruiter_schema.sql"
+        self.assertTrue(
+            schema.is_file(),
+            "apply_recruiter_schema reads pathwise/recruiter_schema.sql; it must be in git",
+        )
+        text = schema.read_text(encoding="utf-8")
+        self.assertIn("CREATE TABLE IF NOT EXISTS recruiters", text)
+        self.assertIn("CREATE TABLE IF NOT EXISTS recruiter_sessions", text)
+
     def test_accounts_module_does_not_import_pre_game_or_seed_codec(self):
         src = (ROOT / "pathwise" / "recruiter_accounts.py").read_text(encoding="utf-8")
         tree = ast.parse(src)

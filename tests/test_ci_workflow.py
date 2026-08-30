@@ -31,3 +31,10 @@ class TestCiWorkflow(unittest.TestCase):
 
     def test_matrix_does_not_fail_fast(self):
         self.assertIn("fail-fast: false", self.text)
+
+    def test_windows_job_does_not_force_pyglet_headless(self):
+        self.assertNotIn(
+            "PYGLET_HEADLESS",
+            self.text,
+            "PYGLET_HEADLESS loads EGL; Windows hosted runners do not ship EGL",
+        )
