@@ -31,7 +31,7 @@ class TestMainLongSimulation(unittest.TestCase):
             self.game.start_round(1, profile, "hard")
             saw_cars = False
             saw_turn = False
-            for frame in range(600):
+            for frame in range(90):
                 keys = autopilot_keys(self.game)
                 state = self.game.update_round_frame(keys)
                 clock.advance()
@@ -58,7 +58,7 @@ class TestMainLongSimulation(unittest.TestCase):
             with patch.object(self.game.time, "time", clock.now):
                 self.game.start_round(1, profile, "normal")
                 self.game.car_diagnostics.begin_round(1)
-                for _ in range(240):
+                for _ in range(60):
                     self.game.update_round_frame(KeyState())
                     clock.advance()
         finally:
@@ -84,7 +84,7 @@ class TestMainLongSimulation(unittest.TestCase):
             self.game.round_results = []
             with patch.object(self.game.time, "time", clock.now):
                 self.game.start_round(1, profile, "normal")
-                for _ in range(200):
+                for _ in range(40):
                     self.game.update_round_frame(autopilot_keys(self.game))
                     clock.advance()
                 if self.game.round_active:

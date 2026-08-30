@@ -6,7 +6,7 @@ import json
 import os
 import time
 
-from analytics.archetype_scoring import score_session
+from analytics.archetype_scoring import score_session, score_session_log
 from analytics.car_diagnostics import car_diagnostics
 from analytics.map_snapshot import serialize_map_layout
 from analytics.traffic_lights import cycle_durations
@@ -247,13 +247,20 @@ def start_round(round_index: int, difficulty_profile: DifficultyProfile, preset_
             time_limit_s=m.ROUND_TIME_LIMIT,
         )
 
-    m.current_map.bake(
-        city_blocks=getattr(m.current_map, "city_blocks", None),
-        decorations=getattr(m.current_map, "decorations", None),
-        world_bounds=m.world_bounds,
-        map_id=str(getattr(m.current_map, "map_id", map_seed)),
-        road_states=m.road_states,
+    skip_bake = os.environ.get("PATHWISE_SKIP_MAP_BAKE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
+    if not skip_bake:
+        m.current_map.bake(
+            city_blocks=getattr(m.current_map, "city_blocks", None),
+            decorations=getattr(m.current_map, "decorations", None),
+            world_bounds=m.world_bounds,
+            map_id=str(getattr(m.current_map, "map_id", map_seed)),
+            road_states=m.road_states,
+        )
     if modifiers.has("rainy_roads") and m.current_map.baked_layer is not None:
         m.current_map.baked_layer = bake_rainy_road_overlay(
             m.current_map.baked_layer,
@@ -422,6 +429,12 @@ def save_session_log():
         return None
     finalize_round_result()
     last = m.round_results[-1]
+    aggregate = score_session_log(
+        {
+            "rounds": m.round_results,
+            "session": last.get("session") or {},
+        }
+    )
     log = {
         "time": last["duration_s"],
         "crossings": last["crossings"],
@@ -432,7 +445,10 @@ def save_session_log():
         "min_crossings": len(last["session"].get("map_layout", {}).get("roads", [])) or 0,
         "avg_time_per_crossing": last["duration_s"] / max(1, last["crossings"]),
         "session": last["session"],
-        "archetypes": last["archetypes"],
+        "archetypes": aggregate,
+        "validity": aggregate["validity"],
+        "hiring_output": aggregate["hiring_output"],
+        "traits": aggregate["traits"],
         "num_rounds": m.session_num_rounds,
         "session_seed": m.session_base_seed,
         "seed_source": m.session_seed_source,

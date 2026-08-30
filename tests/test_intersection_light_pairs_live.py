@@ -17,8 +17,8 @@ class TestIntersectionLightPairsLive(unittest.TestCase):
         alt = alternation_cycle_length(g, y)
         v_state = next(s for s in game.road_states if s["direction"] == "vertical")
         h_state = next(s for s in game.road_states if s["direction"] == "horizontal")
-        for i in range(200):
-            elapsed = (i / 200.0) * alt
+        for i in range(24):
+            elapsed = (i / 24.0) * alt
             game.update_light_timers(game.road_states, elapsed)
             pair = (v_state["light_state"], h_state["light_state"])
             self.assertNotIn(

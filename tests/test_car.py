@@ -74,6 +74,18 @@ class TestCarModule(unittest.TestCase):
         self.assertIsNotNone(car.spawn_id)
         self.assertIsNotNone(car2.spawn_id)
 
+    def test_approaching_gate_true_near_entry_false_when_far(self):
+        from pathwise.sim_constants import IX_QUERY_PAD
+
+        zone = Rect(400, 100, 80, 80)
+        car = Car(0, 120, 3.0, vertical=False, spawn_id=8)
+        car.direction = 1
+        car.rect.centery = zone.centery
+        car.rect.right = zone.left - 10
+        self.assertTrue(car._approaching_or_in_intersection([zone]))
+        car.rect.right = zone.left - IX_QUERY_PAD - car.rect.width - 20
+        self.assertFalse(car._approaching_or_in_intersection([zone]))
+
 
 if __name__ == "__main__":
     unittest.main()

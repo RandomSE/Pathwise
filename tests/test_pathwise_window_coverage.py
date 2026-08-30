@@ -30,7 +30,7 @@ class TestGamePlayView(unittest.TestCase):
 
     def test_key_mapping(self):
         view = self._view()
-        view.on_show_view()
+        # Do not call on_show_view: it prewarms GPU and may run a live sim frame.
         view.on_key_press(arcade.key.LEFT, 0)
         view.on_key_release(arcade.key.W, 0)
         self.assertTrue(view.keys.pressed(KEY_LEFT))
@@ -102,6 +102,9 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         window._outcomes = []
         window._seed_text = ""
         window._recruiter_generated_text = ""
+        window._recruiter_record = None
+        window._recruiter_session_token = None
+        window._recruiter_execute = None
         window.show_view = MagicMock()
         window.closed = False
         window.set_update_rate = MagicMock()
@@ -284,22 +287,44 @@ class TestPathwiseWindowFlow(unittest.TestCase):
             super_run.assert_called_once()
 
     def test_candidate_to_recruiter_and_back(self):
+        from pathwise.recruiter_accounts import RecruiterRecord
+        from pathwise.recruiter_auth_views import RecruiterLoginView
+
         window = self._window()
         window._show_candidate_home()
         candidate = window.show_view.call_args.args[0]
         self.assertIsInstance(candidate, pre_game.CandidateHomeView)
         candidate._on_configure("seed-from-candidate")
+        login = window.show_view.call_args.args[0]
+        self.assertIsInstance(login, RecruiterLoginView)
+        self.assertEqual(window._seed_text, "seed-from-candidate")
+        self.assertFalse(window.recruiter_session_active())
+        record = RecruiterRecord(
+            id="d" * 32,
+            email="ok@example.com",
+            billing_date=None,
+            active=1,
+            trial_active=0,
+            billing_exempt=1,
+            tier="basic",
+            company=None,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        window._on_recruiter_authenticated(record, "token-1")
         recruiter = window.show_view.call_args.args[0]
         self.assertIsInstance(recruiter, pre_game.RecruiterConfigView)
-        # Opening recruiter from candidate starts blank; candidate seed stays in window state.
-        self.assertEqual(recruiter.generated_seed_text, "")
-        self.assertEqual(window._seed_text, "seed-from-candidate")
+        self.assertTrue(window.recruiter_session_active())
+        self.assertTrue(window.recruiter_can_generate_codes())
         recruiter._on_back("generated-99")
         self.assertEqual(window._seed_text, "generated-99")
-        window.show_view.assert_called()
         returned = window.show_view.call_args.args[0]
         self.assertIsInstance(returned, pre_game.CandidateHomeView)
         self.assertEqual(returned.seed_text, "generated-99")
+        candidate2 = returned
+        candidate2._on_configure("again")
+        skipped = window.show_view.call_args.args[0]
+        self.assertIsInstance(skipped, pre_game.RecruiterConfigView)
 
     @patch("main.car_diagnostics")
     @patch("main.perf_profiler")

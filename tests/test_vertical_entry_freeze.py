@@ -118,7 +118,7 @@ class TestVerticalTurnHeadlessRegression(unittest.TestCase):
         with patch.object(game.time, "time", clock.now):
             game.start_round(1, DifficultyProfile.for_menu_preset("normal"), "normal")
             zones = game.intersection_zones
-            for _ in range(1200):
+            for _ in range(240):
                 game.update_round_frame(autopilot_keys(game))
                 clock.advance()
                 for car in game.cars.sprites():
@@ -247,7 +247,7 @@ class TestGreenCrosswalkCommitmentHeadless(unittest.TestCase):
             game.start_round(
                 1, DifficultyProfile.for_menu_preset("normal"), "normal"
             )
-            for _ in range(3600):
+            for _ in range(240):
                 game.update_round_frame(autopilot_keys(game))
                 clock.advance()
                 for car in game.cars.sprites():

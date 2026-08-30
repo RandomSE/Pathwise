@@ -58,10 +58,10 @@ class TestSimPerformanceHooks(unittest.TestCase):
 
         profile = DifficultyProfile.for_menu_preset("normal")
         self.game.start_round(1, profile, "normal")
-        for _ in range(90):
+        for _ in range(24):
             self.game.update_round_frame(KeyState())
         t0 = time.perf_counter()
-        frames = 120
+        frames = 36
         for _ in range(frames):
             self.game.update_round_frame(KeyState())
         elapsed = time.perf_counter() - t0

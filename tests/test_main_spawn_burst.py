@@ -1,7 +1,6 @@
 """Spawn pipeline and collision-path coverage for main.py."""
 
 import unittest
-import unittest.mock
 
 from map_generation.difficulty import DifficultyProfile
 from pathwise.geom import Rect
@@ -121,23 +120,20 @@ class TestMainSpawnBurst(unittest.TestCase):
         self.assertTrue(car._player_in_travel_lane(body) or not car._player_in_travel_lane(body))
 
     def test_timeout_and_perf_hud(self):
-        from analytics.spectate_round import SyntheticClock
-
         profile = DifficultyProfile.for_menu_preset("normal")
-        clock = SyntheticClock(t=7_000_000.0, dt=1 / 60)
         prev_perf = self.game.ENABLE_PERF_PROFILE
         self.game.ENABLE_PERF_PROFILE = True
         try:
-            with unittest.mock.patch.object(self.game.time, "time", clock.now):
-                self.game.perf_profiler.begin_session(
-                    session_seed=1, seed_source="t", num_rounds=1, preset="normal"
-                )
-                self.game.start_round(1, profile, "normal")
-                self.game.perf_profiler.begin_round(1)
-                self.game.start_time = clock.now() - self.game.ROUND_TIME_LIMIT - 1
-                state = self.game.update_round_frame(KeyState())
-                self.assertIsNone(state)
-                self.assertFalse(self.game.round_active)
+            self.game.perf_profiler.begin_session(
+                session_seed=1, seed_source="t", num_rounds=1, preset="normal"
+            )
+            self.game.start_round(1, profile, "normal")
+            self.game.perf_profiler.begin_round(1)
+            # Round timer is sim_elapsed (round_frame.time), not main.time.
+            self.game.sim_elapsed = self.game.ROUND_TIME_LIMIT + 1.0
+            state = self.game.update_round_frame(KeyState())
+            self.assertIsNone(state)
+            self.assertFalse(self.game.round_active)
         finally:
             self.game.ENABLE_PERF_PROFILE = prev_perf
 

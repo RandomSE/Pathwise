@@ -52,6 +52,18 @@ class TestEntityDrawBatch(unittest.TestCase):
         draw.assert_called_once()
         self.assertEqual(len(batch._sprites), 1)
 
+    @patch.object(arcade.SpriteList, "draw")
+    def test_draw_entities_rebuilds_when_window_changes(self, draw):
+        batch = EntityDrawBatch()
+        entity = _FakeEntity(100, 100, self.texture)
+        with patch("arcade.get_window", return_value=object()):
+            batch.draw_entities([entity], (0, 0), 600)
+        first_list = batch._sprites
+        with patch("arcade.get_window", return_value=object()):
+            batch.draw_entities([entity], (0, 0), 600)
+        self.assertIsNot(batch._sprites, first_list)
+        self.assertEqual(draw.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 """Supersampled render surface, entity batching, display-matched FBO policy."""
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -11,7 +12,9 @@ from pathwise.gameplay_framebuffer import (
     fixed_fbo_pixel_size,
     fixed_fbo_render_multiplier,
     fixed_sprite_bake_multiplier,
+    present_uses_nearest,
     render_supersample,
+    upscale_filter_mode,
 )
 from pathwise.render_budget import shared_render_budget
 from pathwise.viewport import DisplayLayout
@@ -23,11 +26,19 @@ class TestDisplayMatchedFboPolicy(unittest.TestCase):
         self.assertEqual(fixed_fbo_pixel_size(layout), (800, 600))
         self.assertEqual(fixed_fbo_render_multiplier(layout), 1.0)
 
-    def test_1080p_fbo_uses_fixed_internal_resolution(self):
+    def test_720p_keeps_dest_native_one_to_one_present(self):
+        """Small windows already 1:1 blit; do not drop them to 1x sim then upscale."""
+        layout = DisplayLayout.fit_window(1280, 720)
+        dw, dh = layout.dest_pixel_size()
+        self.assertEqual(fixed_fbo_pixel_size(layout), (dw, dh))
+
+    def test_1080p_fbo_matches_dest_for_one_to_one_present(self):
+        """2x sim FBO (1200px) LINEAR-blit to 1080p at 0.9 makes bands race down the screen."""
         layout = DisplayLayout.fit_window(1920, 1080)
         fw, fh = fixed_fbo_pixel_size(layout)
-        self.assertEqual((fw, fh), (FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT))
-        self.assertAlmostEqual(fixed_fbo_render_multiplier(layout), 1.5, places=1)
+        self.assertEqual((fw, fh), layout.dest_pixel_size())
+        self.assertNotEqual((fw, fh), (FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT))
+        self.assertAlmostEqual(fixed_fbo_render_multiplier(layout), 1.8, places=1)
 
     def test_sprite_bake_locked_for_1080p(self):
         layout = DisplayLayout.fit_window(1920, 1080)
@@ -49,15 +60,44 @@ class TestDisplayMatchedFboPolicy(unittest.TestCase):
             layout_scaled = DisplayLayout.fit_window(1920, 1080)
             self.assertEqual(render_supersample(layout_scaled), 3)
 
+    def test_upscale_filter_defaults_to_auto(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PATHWISE_UPSCALE_FILTER", None)
+            self.assertEqual(upscale_filter_mode(), "auto")
+
+    def test_upscale_filter_smooth_opt_in(self):
+        with patch.dict("os.environ", {"PATHWISE_UPSCALE_FILTER": "smooth"}):
+            self.assertEqual(upscale_filter_mode(), "smooth")
+            layout = DisplayLayout.fit_window(1280, 720)
+            self.assertFalse(present_uses_nearest(layout))
+
+    def test_upscale_filter_sharp_forces_nearest(self):
+        with patch.dict("os.environ", {"PATHWISE_UPSCALE_FILTER": "sharp"}):
+            self.assertEqual(upscale_filter_mode(), "sharp")
+            layout = DisplayLayout.fit_window(1920, 1080)
+            self.assertTrue(present_uses_nearest(layout))
+
+    def test_1080p_auto_present_is_nearest_at_one_to_one(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PATHWISE_UPSCALE_FILTER", None)
+            layout = DisplayLayout.fit_window(1920, 1080)
+            fw, fh = fixed_fbo_pixel_size(layout)
+            dw, dh = layout.dest_pixel_size()
+            self.assertEqual((fw, fh), (dw, dh))
+            self.assertTrue(present_uses_nearest(layout))
+
+    def test_720p_auto_present_stays_nearest_at_one_to_one(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PATHWISE_UPSCALE_FILTER", None)
+            layout = DisplayLayout.fit_window(1280, 720)
+            self.assertTrue(present_uses_nearest(layout))
+
 
 class TestGameplaySurface(unittest.TestCase):
-    def test_fbo_size_fixed_at_1080p(self):
+    def test_fbo_size_matches_dest_at_1080p(self):
         layout = DisplayLayout.fit_window(1920, 1080)
         surface = GameplaySurface()
-        self.assertEqual(
-            surface.fbo_pixel_size(layout),
-            (FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT),
-        )
+        self.assertEqual(surface.fbo_pixel_size(layout), layout.dest_pixel_size())
 
     def test_blit_builds_geometry_on_first_frame(self):
         import arcade

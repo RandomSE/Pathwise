@@ -39,7 +39,7 @@ class TestGameplayDrawSurface(unittest.TestCase):
             saved_projection = window.projection
             layout = DisplayLayout.fit_window(1920, 1080)
             fbo_w, fbo_h = GameplaySurface().fbo_pixel_size(layout)
-            self.assertEqual((fbo_w, fbo_h), (1600, 900))
+            self.assertEqual((fbo_w, fbo_h), layout.dest_pixel_size())
             with patch("arcade.draw_lbwh_rectangle_filled"):
                 with gameplay_draw_surface(layout):
                     self.assertEqual(window.viewport[2], fbo_w)

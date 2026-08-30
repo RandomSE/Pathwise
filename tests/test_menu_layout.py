@@ -5,6 +5,8 @@ import unittest
 from pathwise.menu_layout import (
     layout_candidate,
     layout_recruiter,
+    layout_recruiter_auth,
+    layout_recruiter_register,
     layout_vertical_spans,
     layouts_do_not_overlap,
 )
@@ -23,6 +25,14 @@ class TestMenuLayout(unittest.TestCase):
         recruiter_stale = layout_recruiter(width, height, num_rounds=3, show_stale_hint=True)
         self.assertTrue(
             layouts_do_not_overlap(layout_vertical_spans(recruiter_stale), window_height=height)
+        )
+        login = layout_recruiter_auth(width, height)
+        self.assertTrue(
+            layouts_do_not_overlap(layout_vertical_spans(login), window_height=height)
+        )
+        register = layout_recruiter_register(width, height)
+        self.assertTrue(
+            layouts_do_not_overlap(layout_vertical_spans(register), window_height=height)
         )
 
     def test_windowed_resolution(self):

@@ -43,9 +43,13 @@ class TestNormalizeRiskCounts(unittest.TestCase):
         split = dict(legacy)
         split["risky_risk_events"] = 1
         split["reasonable_risk_events"] = 1
-        legacy_score = score_session(legacy)["scores"]["rule_follower"]
-        split_score = score_session(split)["scores"]["rule_follower"]
-        self.assertNotEqual(legacy_score, split_score)
+        legacy_risk = score_session(legacy)["traits"]["risk_propensity"]
+        split_risk = score_session(split)["traits"]["risk_propensity"]
+        self.assertNotEqual(legacy_risk, split_risk)
+        self.assertEqual(
+            score_session(legacy)["traits"]["rule_adherence"],
+            score_session(split)["traits"]["rule_adherence"],
+        )
 
 
 class TestFinalizeRiskBackfill(unittest.TestCase):

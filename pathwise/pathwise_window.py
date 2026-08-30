@@ -17,6 +17,16 @@ from .session_seed import resolve_candidate_play_seed
 WIDTH = commonUtils.WIDTH
 HEIGHT = commonUtils.HEIGHT
 
+
+def vsync_enabled(*, smoke_mode: bool = False) -> bool:
+    """Play defaults to vsync on. Tear bands otherwise race down the screen."""
+    raw = os.environ.get("PATHWISE_VSYNC", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return not smoke_mode
+
 SIM_ORIGIN = "top_left_y_down"
 
 _ARCADE_KEY_MAP = {
@@ -192,18 +202,14 @@ class PathwiseWindow(arcade.Window):
         fullscreen: bool = True,
     ) -> None:
         use_fullscreen = fullscreen and auto_close_seconds is None
-        vsync = os.environ.get("PATHWISE_VSYNC", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        smoke_mode = auto_close_seconds is not None
         super().__init__(
             WIDTH,
             HEIGHT,
             "Pathwise MVP",
             update_rate=1 / 60,
             draw_rate=1 / 60,
-            vsync=vsync,
+            vsync=vsync_enabled(smoke_mode=smoke_mode),
             fullscreen=use_fullscreen,
         )
         self._auto_close_seconds = auto_close_seconds
@@ -219,6 +225,9 @@ class PathwiseWindow(arcade.Window):
         self._outcomes: list[str] = []
         self._seed_text = ""
         self._recruiter_generated_text = ""
+        self._recruiter_record = None
+        self._recruiter_session_token = None
+        self._recruiter_execute = None
 
     def run(self) -> None:
         if self._smoke_mode:
@@ -246,12 +255,59 @@ class PathwiseWindow(arcade.Window):
             )
         )
 
-    def _on_modifiers_back(self) -> None:
-        if getattr(self, "_modifiers_from_recruiter", False):
-            self._modifiers_from_recruiter = False
+    def recruiter_session_active(self) -> bool:
+        record = getattr(self, "_recruiter_record", None)
+        token = getattr(self, "_recruiter_session_token", None)
+        return record is not None and bool(token)
+
+    def recruiter_can_generate_codes(self) -> bool:
+        from pathwise.recruiter_accounts import RecruiterRecord, can_generate_codes
+
+        record = self._recruiter_record
+        if not isinstance(record, RecruiterRecord):
+            return False
+        return can_generate_codes(record)
+
+    def _show_recruiter_login(self) -> None:
+        from pathwise.recruiter_auth_views import RecruiterLoginView
+
+        self.show_view(
+            RecruiterLoginView(
+                on_success=self._on_recruiter_authenticated,
+                on_register=self._show_recruiter_register,
+                on_back=self._show_candidate_home,
+                execute=self._recruiter_execute,
+            )
+        )
+
+    def _show_recruiter_register(self) -> None:
+        from pathwise.recruiter_auth_views import RecruiterRegisterView
+
+        self.show_view(
+            RecruiterRegisterView(
+                on_success=self._on_recruiter_authenticated,
+                on_back=self._show_recruiter_login,
+                execute=self._recruiter_execute,
+            )
+        )
+
+    def _on_recruiter_authenticated(self, record, token: str) -> None:
+        self._recruiter_record = record
+        self._recruiter_session_token = token
+        self._show_recruiter_config(generated_seed_text=self._recruiter_generated_text)
+
+    def _return_to_recruiter_flow(self) -> None:
+        if self.recruiter_session_active():
             self._show_recruiter_config(
                 generated_seed_text=self._recruiter_generated_text,
             )
+            return
+        self._show_recruiter_login()
+
+    def _on_modifiers_back(self) -> None:
+        if getattr(self, "_modifiers_from_recruiter", False):
+            self._modifiers_from_recruiter = False
+            self._return_to_recruiter_flow()
             return
         self._show_candidate_home()
 
@@ -266,7 +322,10 @@ class PathwiseWindow(arcade.Window):
 
     def _on_open_recruiter(self, seed_text: str) -> None:
         self._seed_text = seed_text
-        self._show_recruiter_config(generated_seed_text="")
+        if self.recruiter_session_active():
+            self._show_recruiter_config(generated_seed_text="")
+            return
+        self._show_recruiter_login()
 
     def _show_modifiers_detail_from_recruiter(self, config: pre_game.SessionConfig) -> None:
         view = self.current_view
@@ -318,9 +377,7 @@ class PathwiseWindow(arcade.Window):
     def _on_disclaimer_back(self) -> None:
         self._pending_config = None
         if self._disclaimer_return_to == "recruiter":
-            self._show_recruiter_config(
-                generated_seed_text=self._recruiter_generated_text,
-            )
+            self._return_to_recruiter_flow()
             return
         self._show_candidate_home()
 

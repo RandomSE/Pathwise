@@ -5,7 +5,14 @@ import arcade
 from PIL import Image
 
 from pathwise.geom import Rect
-from pathwise.map_visuals import MAP_TILE_SIZE, BakedMapLayer, MapTile, _tile_baked_image, draw_baked_map
+from pathwise.map_visuals import (
+    MAP_TILE_BLEED,
+    MAP_TILE_SIZE,
+    BakedMapLayer,
+    MapTile,
+    _tile_baked_image,
+    draw_baked_map,
+)
 
 
 class TestMapTiles(unittest.TestCase):
@@ -27,7 +34,22 @@ class TestMapTiles(unittest.TestCase):
             self.assertLessEqual(tile.world_rect.bottom, world_bounds.bottom)
 
         covered = sum(t.world_rect.width * t.world_rect.height for t in tiles)
-        self.assertEqual(covered, world_bounds.width * world_bounds.height)
+        self.assertGreaterEqual(covered, world_bounds.width * world_bounds.height)
+
+    def test_adjacent_tiles_overlap_to_hide_filter_seams(self):
+        """Bleed covers LINEAR/NEAREST edge cracks that crawl when the camera moves."""
+        world_bounds = Rect(0, 0, MAP_TILE_SIZE + 80, MAP_TILE_SIZE + 40)
+        img = Image.new("RGBA", (world_bounds.width, world_bounds.height), (8, 16, 24, 255))
+        tiles = _tile_baked_image(img, world_bounds, "bleed_map")
+        self.assertGreaterEqual(MAP_TILE_BLEED, 1)
+        self.assertGreaterEqual(len(tiles), 4)
+        left = min(tiles, key=lambda t: (t.world_rect.left, t.world_rect.top))
+        right = min(
+            (t for t in tiles if t.world_rect.left > left.world_rect.left),
+            key=lambda t: t.world_rect.left,
+        )
+        overlap = left.world_rect.right - right.world_rect.left
+        self.assertGreaterEqual(overlap, MAP_TILE_BLEED)
 
     def test_tile_size_constant_is_reasonable(self):
         self.assertGreaterEqual(MAP_TILE_SIZE, 256)

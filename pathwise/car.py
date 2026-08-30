@@ -190,6 +190,19 @@ def _separation_peers(
     return alive
 
 
+def _ordered_separation_peers(
+    car,
+    alive: list,
+    spatial: "CarSpatialIndex | None",
+    scratch: list,
+) -> list:
+    """Nearby peers in spawn_id order. Copies spatial scratch before the next query."""
+    peers = _separation_peers(car, alive, spatial, scratch)
+    if spatial is None:
+        return peers
+    return sorted(peers, key=lambda c: c.spawn_id)
+
+
 def _fleet_has_shell_overlap(
     cars: list,
     spatial: "CarSpatialIndex | None",
@@ -214,11 +227,14 @@ def _resolve_all_shell_overlaps(
     """One deterministic separation pass after all cars move."""
     if not ENABLE_CAR_CAR_SOFT_AVOIDANCE:
         return
+    if scratch is None:
+        scratch = []
     alive = sorted((c for c in car_list if c.alive()), key=lambda c: c.spawn_id)
     sep_passes = 1 if len(alive) > _tune.SHELL_SEP_FLEET_THRESHOLD else _tune.SHELL_PENETRATION_PASSES
     for car in alive:
+        peers = _ordered_separation_peers(car, alive, spatial, scratch)
         car._resolve_shell_penetration(
-            alive,
+            peers,
             max_nudge=SHELL_PENETRATION_MAX_NUDGE,
             passes=sep_passes,
         )
@@ -226,12 +242,13 @@ def _resolve_all_shell_overlaps(
         if car.current_speed >= 0.25:
             continue
         car._sync_collision_shell()
-        for other in alive:
+        peers = _ordered_separation_peers(car, alive, spatial, scratch)
+        for other in peers:
             if other is car or other.current_speed >= 0.25:
                 continue
             if collide(car._collision_shell, other._collision_shell):
                 car._resolve_shell_penetration(
-                    alive,
+                    peers,
                     max_nudge=max(SHELL_PENETRATION_MAX_NUDGE, 12),
                     passes=2,
                 )
@@ -547,6 +564,9 @@ class Car(Entity):
         if self._rect_in_intersection(self.rect, intersection_zones):
             return True
         lead = IX_QUERY_PAD + extra
+        margin = lead + max(self.rect.width, self.rect.height)
+        if not self._near_intersection_bbox(intersection_zones, margin=margin):
+            return False
         for zone in intersection_zones:
             d = self._distance_to_intersection_entry(zone)
             if d is not None and 0 <= d < lead:

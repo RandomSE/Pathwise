@@ -93,8 +93,38 @@ class RecruiterLayout:
     seed_display_rect: Rect
     copy_rect: Rect
     copy_feedback_top: int
+    generate_error_top: int
     generate_rect: Rect
     start_rect: Rect
+    back_rect: Rect
+
+
+@dataclass(frozen=True)
+class RecruiterAuthLayout:
+    title_top: int
+    subtitle_top: int
+    error_label_top: int
+    email_label_top: int
+    email_field_rect: Rect
+    password_label_top: int
+    password_field_rect: Rect
+    login_rect: Rect
+    register_rect: Rect
+    back_rect: Rect
+
+
+@dataclass(frozen=True)
+class RecruiterRegisterLayout:
+    title_top: int
+    subtitle_top: int
+    error_label_top: int
+    email_label_top: int
+    email_field_rect: Rect
+    password_label_top: int
+    password_field_rect: Rect
+    confirm_label_top: int
+    confirm_field_rect: Rect
+    create_rect: Rect
     back_rect: Rect
 
 
@@ -150,6 +180,7 @@ def layout_recruiter(
     stale_h = _scaled(18, height) if show_stale_hint else 0
     generated_label_h = _scaled(16, height)
     seed_h = _scaled(34, height)
+    error_h = _scaled(16, height)
     action_h = _scaled(34, height)
     start_h = _scaled(38, height)
     back_h = _scaled(30, height)
@@ -165,7 +196,7 @@ def layout_recruiter(
         modifiers_label_h,
     ]
     heights.extend([toggle_h] * max(1, len(modifier_ids)))
-    heights.extend([stale_h, generated_label_h, seed_h, action_h, start_h, back_h])
+    heights.extend([stale_h, generated_label_h, seed_h, error_h, action_h, start_h, back_h])
     heights = [h for h in heights if h > 0]
     top_margin = subtitle_top + int(28 * _compact_scale(height))
     max_stack = height - top_margin - MENU_FOOTER_HEIGHT - 8
@@ -223,6 +254,8 @@ def layout_recruiter(
     seed_top = tops[index]
     fitted_seed_h = heights[index]
     index += 1
+    generate_error_top = tops[index] + heights[index] // 2
+    index += 1
     generate_top = tops[index]
     fitted_action_h = heights[index]
     index += 1
@@ -267,13 +300,102 @@ def layout_recruiter(
         seed_display_rect=Rect(cx - 210, seed_top, 268, fitted_seed_h),
         copy_rect=Rect(cx + 70, seed_top, 80, fitted_seed_h),
         copy_feedback_top=seed_top - 6,
+        generate_error_top=generate_error_top,
         generate_rect=Rect(cx - 120, generate_top, 240, fitted_action_h),
         start_rect=Rect(cx - 120, start_top, 240, fitted_start_h),
         back_rect=Rect(cx - 120, back_top, 240, fitted_back_h),
     )
 
 
-def layout_vertical_spans(layout: CandidateLayout | RecruiterLayout) -> list[tuple[int, int]]:
+def _auth_field_width(width: int) -> int:
+    return min(420, max(280, width // 2 + 40))
+
+
+def layout_recruiter_auth(width: int, height: int) -> RecruiterAuthLayout:
+    cx = width // 2
+    gap = _gap(height)
+    scale = _compact_scale(height)
+    title_top = max(32, int(height * 0.065))
+    subtitle_top = title_top + max(36, _scaled(52, height))
+    error_h = _scaled(22, height)
+    label_h = _scaled(18, height)
+    field_h = _scaled(40, height)
+    login_h = _scaled(44, height)
+    register_h = _scaled(38, height)
+    back_h = _scaled(32, height)
+    heights = [error_h, label_h, field_h, label_h, field_h, login_h, register_h, back_h]
+    top_margin = subtitle_top + int(24 * scale)
+    max_stack = height - top_margin - MENU_FOOTER_HEIGHT - 8
+    pack_gap = gap if sum(heights) + gap * (len(heights) - 1) <= max_stack else max(6, gap - 2)
+    heights = _fit_stack_heights(heights, max_height=max_stack, gap=pack_gap)
+    stack_h = sum(heights) + pack_gap * (len(heights) - 1)
+    start = max(_centered_start(height, stack_h, top_margin=top_margin), top_margin)
+    tops = _stack_tops(start, heights, pack_gap)
+    field_w = _auth_field_width(width)
+    left = cx - field_w // 2
+    return RecruiterAuthLayout(
+        title_top=title_top,
+        subtitle_top=subtitle_top,
+        error_label_top=tops[0] + heights[0] // 2,
+        email_label_top=tops[1] + heights[1] // 2,
+        email_field_rect=Rect(left, tops[2], field_w, heights[2]),
+        password_label_top=tops[3] + heights[3] // 2,
+        password_field_rect=Rect(left, tops[4], field_w, heights[4]),
+        login_rect=Rect(cx - 120, tops[5], 240, heights[5]),
+        register_rect=Rect(cx - 120, tops[6], 240, heights[6]),
+        back_rect=Rect(cx - 120, tops[7], 240, heights[7]),
+    )
+
+
+def layout_recruiter_register(width: int, height: int) -> RecruiterRegisterLayout:
+    cx = width // 2
+    gap = _gap(height)
+    scale = _compact_scale(height)
+    title_top = max(28, int(height * 0.05))
+    subtitle_top = title_top + max(34, _scaled(52, height))
+    error_h = _scaled(20, height)
+    label_h = _scaled(16, height)
+    field_h = _scaled(36, height)
+    create_h = _scaled(42, height)
+    back_h = _scaled(30, height)
+    heights = [
+        error_h,
+        label_h,
+        field_h,
+        label_h,
+        field_h,
+        label_h,
+        field_h,
+        create_h,
+        back_h,
+    ]
+    top_margin = subtitle_top + int(20 * scale)
+    max_stack = height - top_margin - MENU_FOOTER_HEIGHT - 8
+    pack_gap = gap if sum(heights) + gap * (len(heights) - 1) <= max_stack else max(6, gap - 2)
+    heights = _fit_stack_heights(heights, max_height=max_stack, gap=pack_gap)
+    stack_h = sum(heights) + pack_gap * (len(heights) - 1)
+    start = max(_centered_start(height, stack_h, top_margin=top_margin), top_margin)
+    tops = _stack_tops(start, heights, pack_gap)
+    field_w = _auth_field_width(width)
+    left = cx - field_w // 2
+    return RecruiterRegisterLayout(
+        title_top=title_top,
+        subtitle_top=subtitle_top,
+        error_label_top=tops[0] + heights[0] // 2,
+        email_label_top=tops[1] + heights[1] // 2,
+        email_field_rect=Rect(left, tops[2], field_w, heights[2]),
+        password_label_top=tops[3] + heights[3] // 2,
+        password_field_rect=Rect(left, tops[4], field_w, heights[4]),
+        confirm_label_top=tops[5] + heights[5] // 2,
+        confirm_field_rect=Rect(left, tops[6], field_w, heights[6]),
+        create_rect=Rect(cx - 120, tops[7], 240, heights[7]),
+        back_rect=Rect(cx - 120, tops[8], 240, heights[8]),
+    )
+
+
+def layout_vertical_spans(
+    layout: CandidateLayout | RecruiterLayout | RecruiterAuthLayout | RecruiterRegisterLayout,
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     if isinstance(layout, CandidateLayout):
         spans.extend(
@@ -285,6 +407,41 @@ def layout_vertical_spans(layout: CandidateLayout | RecruiterLayout) -> list[tup
                 (layout.seed_field_rect.top, layout.seed_field_rect.bottom),
                 (layout.play_rect.top, layout.play_rect.bottom),
                 (layout.configure_rect.top, layout.configure_rect.bottom),
+            ]
+        )
+        return spans
+
+    if isinstance(layout, RecruiterAuthLayout):
+        spans.extend(
+            [
+                (layout.title_top - 20, layout.title_top + 20),
+                (layout.subtitle_top - 14, layout.subtitle_top + 14),
+                (layout.error_label_top - 11, layout.error_label_top + 11),
+                (layout.email_label_top - 9, layout.email_label_top + 9),
+                (layout.email_field_rect.top, layout.email_field_rect.bottom),
+                (layout.password_label_top - 9, layout.password_label_top + 9),
+                (layout.password_field_rect.top, layout.password_field_rect.bottom),
+                (layout.login_rect.top, layout.login_rect.bottom),
+                (layout.register_rect.top, layout.register_rect.bottom),
+                (layout.back_rect.top, layout.back_rect.bottom),
+            ]
+        )
+        return spans
+
+    if isinstance(layout, RecruiterRegisterLayout):
+        spans.extend(
+            [
+                (layout.title_top - 18, layout.title_top + 18),
+                (layout.subtitle_top - 12, layout.subtitle_top + 12),
+                (layout.error_label_top - 10, layout.error_label_top + 10),
+                (layout.email_label_top - 8, layout.email_label_top + 8),
+                (layout.email_field_rect.top, layout.email_field_rect.bottom),
+                (layout.password_label_top - 8, layout.password_label_top + 8),
+                (layout.password_field_rect.top, layout.password_field_rect.bottom),
+                (layout.confirm_label_top - 8, layout.confirm_label_top + 8),
+                (layout.confirm_field_rect.top, layout.confirm_field_rect.bottom),
+                (layout.create_rect.top, layout.create_rect.bottom),
+                (layout.back_rect.top, layout.back_rect.bottom),
             ]
         )
         return spans
@@ -306,6 +463,7 @@ def layout_vertical_spans(layout: CandidateLayout | RecruiterLayout) -> list[tup
     spans.extend(
         [
             (layout.seed_display_rect.top, layout.seed_display_rect.bottom),
+            (layout.generate_error_top - 8, layout.generate_error_top + 8),
             (layout.generate_rect.top, layout.generate_rect.bottom),
             (layout.start_rect.top, layout.start_rect.bottom),
             (layout.back_rect.top, layout.back_rect.bottom),

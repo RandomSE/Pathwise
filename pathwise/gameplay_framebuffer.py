@@ -14,9 +14,10 @@ from .viewport import DisplayLayout
 
 _BLIT_UVS = array.array("f", [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1])
 
-# Fixed internal resolution: sharper than 720p, ~31% fewer pixels than native 1080p.
+# Legacy 1600x900 cap kept so tests can assert HD is no longer that size.
 FIXED_FBO_WIDTH = 1600
 FIXED_FBO_HEIGHT = 900
+_MAX_INTEGER_SIM_SCALE = 3
 _MAX_ENV_RENDER_SCALE = 3.0
 
 
@@ -31,23 +32,47 @@ def _env_render_scale_override() -> float | None:
 
 
 def upscale_filter_mode() -> str:
-    return os.environ.get("PATHWISE_UPSCALE_FILTER", "smooth").strip().lower()
+    raw = os.environ.get("PATHWISE_UPSCALE_FILTER", "auto").strip().lower()
+    if raw in ("smooth", "linear"):
+        return "smooth"
+    if raw in ("sharp", "nearest"):
+        return "sharp"
+    return "auto"
+
+
+def integer_sim_render_scale(layout: DisplayLayout) -> int:
+    """Integer sim-to-FBO scale used by PATHWISE_RENDER_SCALE."""
+    override = _env_render_scale_override()
+    if override is not None:
+        return max(1, min(_MAX_INTEGER_SIM_SCALE, int(round(override))))
+    dw, dh = layout.dest_pixel_size()
+    sx = dw / max(1, layout.sim_width)
+    sy = dh / max(1, layout.sim_height)
+    return max(1, min(_MAX_INTEGER_SIM_SCALE, int(round(min(sx, sy)))))
 
 
 def fixed_fbo_pixel_size(layout: DisplayLayout) -> tuple[int, int]:
-    """Fixed high-res FBO for GPU viewport; native 1:1 only on small windows."""
+    """Dest-native FBO so present is 1:1. A 0.9 LINEAR blit of 2x sim races bands down the screen."""
     if not layout.uses_gpu_viewport:
         return layout.sim_width, layout.sim_height
-    override = _env_render_scale_override()
-    if override is not None:
-        return (
-            max(1, int(round(layout.sim_width * override))),
-            max(1, int(round(layout.sim_height * override))),
-        )
+    if _env_render_scale_override() is not None:
+        k = integer_sim_render_scale(layout)
+        return layout.sim_width * k, layout.sim_height * k
+    return layout.dest_pixel_size()
+
+
+def present_uses_nearest(layout: DisplayLayout) -> bool:
+    """NEAREST only when present is 1:1 or an integer multiple; else LINEAR."""
+    mode = upscale_filter_mode()
+    if mode == "sharp":
+        return True
+    if mode == "smooth":
+        return False
+    fw, fh = fixed_fbo_pixel_size(layout)
     dw, dh = layout.dest_pixel_size()
-    if dw <= FIXED_FBO_WIDTH and dh <= FIXED_FBO_HEIGHT:
-        return dw, dh
-    return FIXED_FBO_WIDTH, FIXED_FBO_HEIGHT
+    if (fw, fh) == (dw, dh):
+        return True
+    return dw % fw == 0 and dh % fh == 0 and fw > 0 and fh > 0
 
 
 def fixed_fbo_render_multiplier(layout: DisplayLayout) -> float:
@@ -85,8 +110,12 @@ def render_supersample(layout: DisplayLayout) -> int:
     return max(1, int(round(fixed_fbo_render_multiplier(layout))))
 
 
-def _texture_filter(ctx):
-    if upscale_filter_mode() == "sharp":
+def _texture_filter(ctx, layout: DisplayLayout | None = None):
+    if layout is not None:
+        nearest = present_uses_nearest(layout)
+    else:
+        nearest = upscale_filter_mode() == "sharp"
+    if nearest:
         return ctx.NEAREST, ctx.NEAREST
     return ctx.LINEAR, ctx.LINEAR
 
@@ -119,12 +148,13 @@ class GameplaySurface:
     def fbo_pixel_size(self, layout: DisplayLayout) -> tuple[int, int]:
         return fixed_fbo_pixel_size(layout)
 
-    def _ensure_fbo(self, ctx, width: int, height: int) -> None:
+    def _ensure_fbo(self, ctx, width: int, height: int, layout: DisplayLayout | None = None) -> None:
         if (width, height) == self._fbo_size and self._fbo is not None:
+            self._tex.filter = _texture_filter(ctx, layout)
             return
         self._fbo_size = (width, height)
         self._tex = ctx.texture((width, height))
-        self._tex.filter = _texture_filter(ctx)
+        self._tex.filter = _texture_filter(ctx, layout)
         self._fbo = ctx.framebuffer(color_attachments=[self._tex])
         self._blit_geo = None
         self._blit_key = None
@@ -164,6 +194,7 @@ class GameplaySurface:
         self._ensure_blit_geometry(ctx, left, bottom, width, height, ww, wh)
         if self._blit_geo is None:
             return
+        self._tex.filter = _texture_filter(ctx, layout)
         window.use()
         window.viewport = (0, 0, ww, wh)
         self._tex.use(0)
@@ -176,7 +207,7 @@ class GameplaySurface:
         """Render sim scene into FBO; caller composites after the block."""
         ctx = window.ctx
         fw, fh = self.fbo_pixel_size(layout)
-        self._ensure_fbo(ctx, fw, fh)
+        self._ensure_fbo(ctx, fw, fh, layout)
         saved_viewport = window.viewport
         saved_projection = window.projection
         with self._fbo.activate():

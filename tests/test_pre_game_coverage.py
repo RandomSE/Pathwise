@@ -204,8 +204,22 @@ class TestRecruiterConfigView(ArcadeMenuTestCase):
         back_cb.assert_called_once_with(encoded)
 
     def test_generate_seed(self):
+        from pathwise.recruiter_accounts import RecruiterRecord
+
         view = RecruiterConfigView(rng=__import__("random").Random(0))
         view.on_show_view()
+        view.window._recruiter_record = RecruiterRecord(
+            id="c" * 32,
+            email="ok@example.com",
+            billing_date=None,
+            active=1,
+            trial_active=0,
+            billing_exempt=1,
+            tier="basic",
+            company=None,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
         view.selected_preset = "hard"
         view.num_rounds = 2
         view.on_mouse_press(

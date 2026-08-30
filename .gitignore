@@ -35,6 +35,11 @@ spectate_dashboard.html
 tmp_spectate/
 tmp_spectate*/
 
+# Local secrets (copy .env.example to .env)
+.env
+.env.local
+!.env.example
+
 # Local debug scratch: never commit
 tmp/
 

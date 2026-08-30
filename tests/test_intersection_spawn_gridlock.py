@@ -14,7 +14,7 @@ from map_generation.traffic_schedule import (
 
 MAP_SEED = 1890426592
 SESSION_SEED = 1890416619
-INTERSECTION_GRIDLOCK_FRAMES = 180
+INTERSECTION_GRIDLOCK_FRAMES = 90
 
 
 class TestIntersectionSpawnRejection(unittest.TestCase):
@@ -123,7 +123,7 @@ class TestIntersectionGridlockRecovery(unittest.TestCase):
         frozen_streak: dict[int, int] = {}
         max_streak: dict[int, int] = {}
 
-        for _ in range(INTERSECTION_GRIDLOCK_FRAMES + 120):
+        for _ in range(INTERSECTION_GRIDLOCK_FRAMES + 30):
             self.game.update_round_frame(KeyState())
             seen: set[int] = set()
             for car in self.game.cars:

@@ -34,6 +34,7 @@ GRASS_ALT = (186, 202, 168)
 
 
 MAP_TILE_SIZE = 512
+MAP_TILE_BLEED = 1
 
 
 @dataclass(frozen=True)
@@ -453,26 +454,35 @@ def bake_static_map(
 
 
 def _tile_baked_image(img: Image.Image, world_bounds: Rect, map_id: str) -> tuple[MapTile, ...]:
-    """Split the baked map into fixed-size tiles for viewport-culled drawing."""
+    """Split the baked map into fixed-size tiles for viewport-culled drawing.
+
+    Adjacent tiles overlap by MAP_TILE_BLEED so GPU filtering cannot open
+    1px cracks that crawl when the camera moves.
+    """
     tile_size = MAP_TILE_SIZE
+    bleed = MAP_TILE_BLEED
     w, h = img.width, img.height
     tiles: list[MapTile] = []
     for top_px in range(0, h, tile_size):
         for left_px in range(0, w, tile_size):
-            tile_w = min(tile_size, w - left_px)
-            tile_h = min(tile_size, h - top_px)
+            crop_left = max(0, left_px - bleed)
+            crop_top = max(0, top_px - bleed)
+            crop_right = min(w, left_px + tile_size + bleed)
+            crop_bottom = min(h, top_px + tile_size + bleed)
+            tile_w = crop_right - crop_left
+            tile_h = crop_bottom - crop_top
             if tile_w <= 0 or tile_h <= 0:
                 continue
-            crop = img.crop((left_px, top_px, left_px + tile_w, top_px + tile_h))
+            crop = img.crop((crop_left, crop_top, crop_right, crop_bottom))
             world_rect = Rect(
-                world_bounds.left + left_px,
-                world_bounds.top + top_px,
+                world_bounds.left + crop_left,
+                world_bounds.top + crop_top,
                 tile_w,
                 tile_h,
             )
             tile_texture = arcade.Texture(
                 crop,
-                hash=f"map_tile_{map_id}_{left_px}_{top_px}_{tile_w}x{tile_h}",
+                hash=f"map_tile_{map_id}_{crop_left}_{crop_top}_{tile_w}x{tile_h}",
             )
             tiles.append(MapTile(world_rect=world_rect, texture=tile_texture))
     return tuple(tiles)

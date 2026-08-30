@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from pathwise.input_keys import KeyState
 from map_generation.difficulty import DifficultyProfile
 
@@ -86,6 +88,7 @@ class TestGameEntry(unittest.TestCase):
             light_green_duration=self.game.LIGHT_GREEN_DURATION,
         )
 
+    @pytest.mark.needs_map_bake
     @patch("pathwise.game_draw.shared_traffic_light_batch")
     def test_launch_draw_path_with_baked_map_tiles(self, traffic_batch):
         """Integration: start round and draw one frame (catches missing imports at draw time)."""
