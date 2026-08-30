@@ -139,9 +139,11 @@ class TestReliabilityEdges(unittest.TestCase):
             self.assertEqual(row["flag"], FLAG_INSUFFICIENT)
 
     def test_fairness_single_group_and_bad_values(self):
-        from analytics.fairness import adverse_impact_ratio, fairness_report
+        from analytics.fairness import adverse_impact_ratio, fairness_report, _as_float
 
         self.assertIsNone(adverse_impact_ratio("x", 1.0))
+        self.assertIsNone(_as_float("nope"))
+        self.assertIsNone(_as_float(float("nan")))
         report = fairness_report(
             [{"group": "a", "decision_tempo": 10}, {"group": "a", "decision_tempo": None}],
             group_key="group",
@@ -150,3 +152,77 @@ class TestReliabilityEdges(unittest.TestCase):
         )
         self.assertEqual(report["status"], "computed")
         self.assertIsNone(report["adverse_impact_ratio"]["decision_tempo"])
+        two = fairness_report(
+            [
+                {"group": "a", "decision_tempo": "bad"},
+                {"group": "b", "decision_tempo": 80.0},
+            ],
+            group_key="group",
+            score_keys=("decision_tempo",),
+            selection_cutoffs={"decision_tempo": 50},
+            higher_is_selected={"decision_tempo": True},
+        )
+        self.assertIsNone(two["adverse_impact_ratio"]["decision_tempo"])
+        self.assertIsNone(two["group_mean_differences"]["decision_tempo"])
+
+    def test_reliability_private_edges_and_score_fn(self):
+        from analytics.reliability import (
+            _column_variance,
+            _pearson,
+            cronbach_alpha,
+            icc1,
+            reliability_report,
+            split_half_spearman_brown,
+        )
+        from analytics.trait_scoring import score_session
+
+        self.assertEqual(_column_variance([[1.0]], 0), 0.0)
+        self.assertIsNone(cronbach_alpha([[1.0, 2.0], [3.0]]))
+        self.assertIsNone(_pearson([1.0], [1.0, 2.0]))
+        self.assertIsNone(_pearson([1.0, 1.0], [2.0, 3.0]))
+        self.assertIsNone(split_half_spearman_brown([]))
+        self.assertIsNone(split_half_spearman_brown([[1.0], [2.0]]))
+        self.assertIsNone(split_half_spearman_brown([[1.0, 1.0], [1.0, 1.0]]))
+        self.assertIsNone(icc1([[5.0, 5.0], [5.0, 5.0]]))
+        sparse = reliability_report(
+            [simulate_session_log("low_risk", seed=1, n_rounds=1) for _ in range(2)]
+        )
+        self.assertEqual(sparse["traits"]["risk_propensity"]["flag"], FLAG_INSUFFICIENT)
+        used_fn = reliability_report(
+            [simulate_session_log("low_risk", seed=3, n_rounds=2)],
+            score_fn=score_session,
+        )
+        self.assertEqual(used_fn["n_persons"], 1)
+
+    def test_scoring_helpers_and_single_role_insight(self):
+        from analytics.trait_scoring import (
+            _finite_number,
+            _latency_from_attempt,
+            _motor_seconds_from_attempt,
+            score_motor_tempo,
+            score_session,
+        )
+
+        self.assertIsNone(_finite_number(float("nan")))
+        self.assertIsNone(_latency_from_attempt({"commit_time_s": None}))
+        self.assertIsNone(_latency_from_attempt({"commit_time_s": 2.0}))
+        self.assertEqual(_motor_seconds_from_attempt({"approach_travel_s": 1.5}), 1.5)
+        self.assertGreater(_motor_seconds_from_attempt({"approach_path_px": 180.0}), 1.0)
+        self.assertIsNone(_motor_seconds_from_attempt({}))
+        motor = score_motor_tempo(
+            {"crossing_attempts": [{"approach_path_px": 90.0}, {"approach_travel_s": None}]}
+        )
+        self.assertEqual(motor[1], FLAG_OK)
+        empty_motor = score_motor_tempo({"crossing_attempts": [{}]})
+        self.assertEqual(empty_motor[1], FLAG_INSUFFICIENT)
+        from analytics.trait_scoring import _build_insights
+
+        one_role = _build_insights(
+            {"risk_propensity": 80.0},
+            {"risk_propensity": FLAG_OK},
+            [{"role_id": "only", "fit": 70.0}],
+            {},
+        )
+        self.assertTrue(any("Nearest designed target" in line for line in one_role))
+        none_ok = _build_insights({}, {}, [], {})
+        self.assertTrue(any("Game-derived session profile" in line for line in none_ok))

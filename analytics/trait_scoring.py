@@ -225,12 +225,10 @@ def score_motor_tempo(session: dict) -> tuple[float | None, str, str | None]:
     travels = []
     used_path = False
     for attempt in session.get("crossing_attempts") or []:
-        travel = _finite_number(attempt.get("approach_travel_s"))
+        travel = _motor_seconds_from_attempt(attempt)
         if travel is None:
-            path_px = _finite_number(attempt.get("approach_path_px"))
-            if path_px is None:
-                continue
-            travel = path_px / TYPICAL_WALK_PX_S
+            continue
+        if attempt.get("approach_travel_s") is None and attempt.get("approach_path_px") is not None:
             used_path = True
         travels.append(travel)
     if not travels:
