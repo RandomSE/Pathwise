@@ -43,6 +43,12 @@ def pytest_configure(config):
 
 def _reset_game_globals() -> None:
     try:
+        from pathwise.game_draw import reset_overlay_text_pools
+
+        reset_overlay_text_pools()
+    except Exception:
+        pass
+    try:
         import main as game
     except Exception:
         return
