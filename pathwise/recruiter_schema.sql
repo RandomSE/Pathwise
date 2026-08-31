@@ -25,3 +25,9 @@ CREATE TABLE IF NOT EXISTS recruiter_sessions (
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recruiter_seeds (
+    seed_code TEXT PRIMARY KEY,
+    recruiter_id TEXT NOT NULL REFERENCES recruiters(id),
+    created_at TEXT NOT NULL
+);

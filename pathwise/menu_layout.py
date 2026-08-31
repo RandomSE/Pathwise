@@ -68,6 +68,8 @@ class CandidateLayout:
     seed_label_top: int
     seed_field_rect: Rect
     paste_rect: Rect
+    name_label_top: int
+    name_field_rect: Rect
     play_rect: Rect
     configure_rect: Rect
 
@@ -128,7 +130,12 @@ class RecruiterRegisterLayout:
     back_rect: Rect
 
 
-def layout_candidate(width: int, height: int) -> CandidateLayout:
+def layout_candidate(
+    width: int,
+    height: int,
+    *,
+    show_name: bool = True,
+) -> CandidateLayout:
     cx = width // 2
     gap = _gap(height)
     scale = _compact_scale(height)
@@ -137,24 +144,48 @@ def layout_candidate(width: int, height: int) -> CandidateLayout:
     error_h = _scaled(22, height)
     label_h = _scaled(20, height)
     seed_h = _scaled(44, height)
+    name_h = _scaled(40, height)
     play_h = _scaled(48, height)
     configure_h = _scaled(40, height)
-    stack_h = error_h + gap + label_h + gap + seed_h + gap + play_h + gap + configure_h
     top_margin = subtitle_top + int(24 * scale)
+    bottom_margin = MENU_FOOTER_HEIGHT + 8
+    max_height = max(80, height - top_margin - bottom_margin)
+    blocks: list[int] = [error_h, label_h, seed_h]
+    if show_name:
+        blocks.extend([label_h, name_h])
+    blocks.extend([play_h, configure_h])
+    block_heights = _fit_stack_heights(blocks, max_height=max_height, gap=gap)
+    stack_h = sum(block_heights) + gap * max(0, len(block_heights) - 1)
     start = max(_centered_start(height, stack_h, top_margin=top_margin), top_margin)
-    block_heights = [error_h, label_h, seed_h, play_h, configure_h]
     tops = _stack_tops(start, block_heights, gap)
     seed_top = tops[2]
-    play_top = tops[3]
+    if show_name:
+        name_label_top = tops[3] + block_heights[3] // 2
+        name_top = tops[4]
+        name_h_fit = block_heights[4]
+        play_top = tops[5]
+        configure_top = tops[6]
+        play_h_fit = block_heights[5]
+        configure_h_fit = block_heights[6]
+    else:
+        name_label_top = 0
+        name_top = 0
+        name_h_fit = 0
+        play_top = tops[3]
+        configure_top = tops[4]
+        play_h_fit = block_heights[3]
+        configure_h_fit = block_heights[4]
     return CandidateLayout(
         title_top=title_top,
         subtitle_top=subtitle_top,
-        error_label_top=tops[0] + error_h // 2,
-        seed_label_top=tops[1] + label_h // 2,
-        seed_field_rect=Rect(cx - 210, seed_top, 268, seed_h),
-        paste_rect=Rect(cx + 70, seed_top, 80, seed_h),
-        play_rect=Rect(cx - 120, play_top, 240, play_h),
-        configure_rect=Rect(cx - 120, tops[4], 240, configure_h),
+        error_label_top=tops[0] + block_heights[0] // 2,
+        seed_label_top=tops[1] + block_heights[1] // 2,
+        seed_field_rect=Rect(cx - 210, seed_top, 268, block_heights[2]),
+        paste_rect=Rect(cx + 70, seed_top, 80, block_heights[2]),
+        name_label_top=name_label_top,
+        name_field_rect=Rect(cx - 210, name_top, 420 if show_name else 0, name_h_fit),
+        play_rect=Rect(cx - 120, play_top, 240, play_h_fit),
+        configure_rect=Rect(cx - 120, configure_top, 240, configure_h_fit),
     )
 
 
@@ -405,6 +436,17 @@ def layout_vertical_spans(
                 (layout.error_label_top - 11, layout.error_label_top + 11),
                 (layout.seed_label_top - 11, layout.seed_label_top + 11),
                 (layout.seed_field_rect.top, layout.seed_field_rect.bottom),
+            ]
+        )
+        if layout.name_field_rect.height > 0:
+            spans.extend(
+                [
+                    (layout.name_label_top - 11, layout.name_label_top + 11),
+                    (layout.name_field_rect.top, layout.name_field_rect.bottom),
+                ]
+            )
+        spans.extend(
+            [
                 (layout.play_rect.top, layout.play_rect.bottom),
                 (layout.configure_rect.top, layout.configure_rect.bottom),
             ]

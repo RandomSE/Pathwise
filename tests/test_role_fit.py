@@ -222,7 +222,7 @@ class TestTwoSidedFieldConstruction(unittest.TestCase):
 
 
 class TestDashboardCopyGuard(unittest.TestCase):
-    def test_banner_present_and_banned_phrases_absent(self):
+    def test_validity_banners_absent_and_banned_phrases_absent(self):
         session = {
             "duration_s": 12.5,
             "outcome": "success",
@@ -264,10 +264,10 @@ class TestDashboardCopyGuard(unittest.TestCase):
             out = build_dashboard_html(log_path, output_path=Path(tmp) / "out.html")
             html = Path(out).read_text(encoding="utf-8")
         lower = html.lower()
-        self.assertIn("face-valid in-game behavior", lower)
         self.assertIn("target similarity", lower)
         self.assertIn("session summary flavor (not a hiring label)", lower)
-        self.assertIn("not authorized for employment decisions", lower)
+        self.assertNotIn("face-valid in-game behavior", lower)
+        self.assertNotIn("not authorized for employment decisions", lower)
         self.assertNotIn("job fit %", lower)
         self.assertNotIn("hire score", lower)
         self.assertNotIn("% fit", lower)

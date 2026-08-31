@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 import arcade
 
@@ -16,6 +18,7 @@ from .session_seed import resolve_candidate_play_seed
 
 WIDTH = commonUtils.WIDTH
 HEIGHT = commonUtils.HEIGHT
+logger = logging.getLogger(__name__)
 
 
 def vsync_enabled(*, smoke_mode: bool = False) -> bool:
@@ -228,6 +231,8 @@ class PathwiseWindow(arcade.Window):
         self._recruiter_record = None
         self._recruiter_session_token = None
         self._recruiter_execute = None
+        self._notify_recruiter = None
+        self._notify_send = None
 
     def run(self) -> None:
         if self._smoke_mode:
@@ -424,6 +429,11 @@ class PathwiseWindow(arcade.Window):
             round_index=1,
         )
         game.session_audience = config.audience
+        game.session_candidate_label = config.candidate_label
+        game.session_recruiter_seed_code = config.recruiter_seed_code
+        game.session_started_at_utc = datetime.now(timezone.utc).replace(
+            microsecond=0
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         game.base_preset_id = config.preset
         self._base_profile = DifficultyProfile.for_menu_preset(config.preset)
         game.round_results = []
@@ -569,6 +579,10 @@ class PathwiseWindow(arcade.Window):
 
         dashboard = game.save_session_log()
         print("Session complete:", {"rounds": self._outcomes, "dashboard": dashboard})
+        try:
+            self._notify_after_save(dashboard)
+        except Exception:
+            logger.warning("Recruiter notify failed after session save")
 
         last_label = pre_game.round_outcome_label(self._outcomes[-1])
         if game.session_num_rounds == 1:
@@ -584,6 +598,43 @@ class PathwiseWindow(arcade.Window):
                 on_complete=lambda _: arcade.close_window(),
             )
         )
+
+    def _notify_after_save(self, dashboard) -> None:
+        import main as game
+        from pathwise.recruiter_accounts import RecruiterRecord
+        from pathwise.recruiter_notify import notify_recruiter_of_seed_use
+
+        config = getattr(self, "_config", None)
+        code = None
+        label = None
+        if config is not None:
+            code = getattr(config, "recruiter_seed_code", None)
+            label = getattr(config, "candidate_label", None)
+        if not code:
+            code = getattr(game, "session_recruiter_seed_code", None)
+        if not label:
+            label = getattr(game, "session_candidate_label", None)
+        used_at = getattr(game, "session_started_at_utc", None) or ""
+        completed = datetime.now(timezone.utc).replace(microsecond=0).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        record = getattr(self, "_recruiter_record", None)
+        player_id = record.id if isinstance(record, RecruiterRecord) else None
+        kwargs = {
+            "recruiter_seed_code": code,
+            "candidate_label": label,
+            "used_at_utc": used_at,
+            "completed_at_utc": completed,
+            "dashboard_path": dashboard,
+            "player_recruiter_id": player_id,
+            "execute": getattr(self, "_recruiter_execute", None),
+            "send": getattr(self, "_notify_send", None),
+        }
+        notify_fn = getattr(self, "_notify_recruiter", None)
+        if notify_fn is not None:
+            notify_fn(**kwargs)
+            return
+        notify_recruiter_of_seed_use(**kwargs)
 
 
 def run(*, auto_close_seconds: float | None = None) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import tempfile
@@ -17,7 +16,44 @@ from pathwise.turso_http import (
     load_dotenv,
     ping,
     pipeline_url,
+    reset_http_connections,
 )
+
+
+def _https_patch(response_body: bytes, *, status: int = 200, captured: dict | None = None):
+    conns: list[object] = []
+
+    class FakeResp:
+        def __init__(self):
+            self.status = status
+
+        def read(self):
+            return response_body
+
+    class FakeHTTPS:
+        def __init__(self, host, port=443, timeout=20):
+            conns.append(self)
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def request(self, method, path, body=None, headers=None):
+            hdrs = headers or {}
+            if captured is not None:
+                captured["url"] = f"https://{self.host}{path}"
+                captured["auth"] = hdrs.get("Authorization")
+                if body:
+                    raw = body.decode() if isinstance(body, bytes) else body
+                    captured["body"] = json.loads(raw)
+
+        def getresponse(self):
+            return FakeResp()
+
+        def close(self):
+            return None
+
+    reset_http_connections()
+    return patch("pathwise.turso_http.http.client.HTTPSConnection", FakeHTTPS), conns
 
 
 class TestPipelineUrl(unittest.TestCase):
@@ -85,6 +121,12 @@ class TestLoadDotenv(unittest.TestCase):
 
 
 class TestExecuteSql(unittest.TestCase):
+    def setUp(self):
+        reset_http_connections()
+
+    def tearDown(self):
+        reset_http_connections()
+
     def test_posts_pipeline_and_returns_json(self):
         payload = {
             "results": [
@@ -101,14 +143,8 @@ class TestExecuteSql(unittest.TestCase):
             ]
         }
         captured = {}
-
-        def fake_urlopen(req, timeout=0):
-            captured["url"] = req.full_url
-            captured["auth"] = req.headers.get("Authorization")
-            captured["body"] = json.loads(req.data.decode())
-            return io.BytesIO(json.dumps(payload).encode())
-
-        with patch("pathwise.turso_http.urllib.request.urlopen", fake_urlopen):
+        https_patch, _conns = _https_patch(json.dumps(payload).encode(), captured=captured)
+        with https_patch:
             out = execute_sql(
                 "SELECT 1 AS ok",
                 database_url="libsql://host.turso.io",
@@ -130,12 +166,8 @@ class TestExecuteSql(unittest.TestCase):
 
     def test_empty_args_are_posted_without_changing_sql(self):
         captured = {}
-
-        def fake_urlopen(req, timeout=0):
-            captured["body"] = json.loads(req.data.decode())
-            return io.BytesIO(b'{"results":[]}')
-
-        with patch("pathwise.turso_http.urllib.request.urlopen", fake_urlopen):
+        https_patch, _conns = _https_patch(b'{"results":[]}', captured=captured)
+        with https_patch:
             execute_sql(
                 "SELECT 1 AS ok",
                 (),
@@ -151,12 +183,8 @@ class TestExecuteSql(unittest.TestCase):
         captured = {}
         sql = "SELECT * FROM recruiters WHERE email = ?"
         injected = "o'reilly@example.com; DROP TABLE recruiters;--"
-
-        def fake_urlopen(req, timeout=0):
-            captured["body"] = json.loads(req.data.decode())
-            return io.BytesIO(b'{"results":[]}')
-
-        with patch("pathwise.turso_http.urllib.request.urlopen", fake_urlopen):
+        https_patch, _conns = _https_patch(b'{"results":[]}', captured=captured)
+        with https_patch:
             execute_sql(
                 sql,
                 [injected],
@@ -171,12 +199,8 @@ class TestExecuteSql(unittest.TestCase):
 
     def test_null_and_integer_args_use_hrana_types(self):
         captured = {}
-
-        def fake_urlopen(req, timeout=0):
-            captured["body"] = json.loads(req.data.decode())
-            return io.BytesIO(b'{"results":[]}')
-
-        with patch("pathwise.turso_http.urllib.request.urlopen", fake_urlopen):
+        https_patch, _conns = _https_patch(b'{"results":[]}', captured=captured)
+        with https_patch:
             execute_sql(
                 "INSERT INTO recruiters (email, active, company, flag) VALUES (?, ?, ?, ?)",
                 ["a@b.co", 1, None, True],
@@ -209,24 +233,29 @@ class TestExecuteSql(unittest.TestCase):
                 execute_sql("SELECT 1", database_url="", auth_token="tok")
 
     def test_http_error_becomes_turso_http_error(self):
-        from urllib.error import HTTPError
-
-        def boom(req, timeout=0):
-            raise HTTPError(
-                req.full_url,
-                401,
-                "Unauthorized",
-                {},
-                io.BytesIO(b'{"error":"nope"}'),
-            )
-
-        with patch("pathwise.turso_http.urllib.request.urlopen", boom):
+        https_patch, _conns = _https_patch(b'{"error":"nope"}', status=401)
+        with https_patch:
             with self.assertRaises(TursoHttpError):
                 execute_sql(
                     "SELECT 1",
                     database_url="https://host.turso.io",
                     auth_token="bad",
                 )
+
+    def test_second_execute_reuses_https_connection(self):
+        https_patch, conns = _https_patch(b'{"results":[]}')
+        with https_patch:
+            execute_sql(
+                "SELECT 1",
+                database_url="https://host.turso.io",
+                auth_token="tok",
+            )
+            execute_sql(
+                "SELECT 2",
+                database_url="https://host.turso.io",
+                auth_token="tok",
+            )
+        self.assertEqual(len(conns), 1)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from pathwise import sprites
 from pathwise.entity_group import Entity
 from pathwise.geom import Rect
 from pathwise.input_keys import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP
-from pathwise.sim_constants import PEDESTRIAN_SIZE, PEDESTRIAN_SPEED, SPRINT_SPEED_MULT
+from pathwise.sim_constants import PEDESTRIAN_SIZE, PEDESTRIAN_SPEED
 
 
 class Pedestrian(Entity):
@@ -56,16 +56,14 @@ class Pedestrian(Entity):
 
     def _move_speed(self) -> float:
         from pathwise.modifiers import high_speed, lag, old
+        from pathwise.sprint import effective_pedestrian_speed
 
-        if self.sprint_enabled:
-            base = PEDESTRIAN_SPEED * SPRINT_SPEED_MULT
-        else:
-            base = PEDESTRIAN_SPEED
-        return (
-            base
-            * high_speed.time_scale()
-            * lag.physics_scale()
-            * old.player_speed_mult()
+        return effective_pedestrian_speed(
+            PEDESTRIAN_SPEED,
+            self.sprint_enabled,
+            time_scale=high_speed.time_scale(),
+            physics_scale=lag.physics_scale(),
+            player_speed_mult=old.player_speed_mult(),
         )
 
     def update(self, keys, *, elapsed: float = 0.0):

@@ -70,6 +70,19 @@ _MAX_WALL_DT_S = 0.25
 _CURB_ARRIVAL_INFLATE_PX = 56
 
 
+def constrain_player_to_world(rect, previous_topleft, world_bounds) -> None:
+    """Keep the player inside the world. Clamp instead of dropping the whole step.
+
+    A full revert made High-speed sprint (4px) slower than walk (2px) whenever
+    the extra pixels nicked the bound.
+    """
+    if contains_rect(world_bounds, rect):
+        return
+    rect.clamp_ip(world_bounds)
+    if not contains_rect(world_bounds, rect):
+        rect.topleft = previous_topleft
+
+
 def _note_road_approach_and_curb(m) -> None:
     """Record approach, then curb arrival, using the same road_index as commit.
 
@@ -248,8 +261,7 @@ def update_round_frame(keys: KeyState, *, before_shell_separation=None):
     with m.perf_profiler.section("player_update"):
         move_prev_center = m.player_prev_center
         m.player.update(keys, elapsed=elapsed)
-        if not contains_rect(m.world_bounds, m.player.rect):
-            m.player.rect.topleft = previous_pos
+        constrain_player_to_world(m.player.rect, previous_pos, m.world_bounds)
 
         curr_center = (m.player.rect.centerx, m.player.rect.centery)
         player_moved_this_frame = move_prev_center != curr_center

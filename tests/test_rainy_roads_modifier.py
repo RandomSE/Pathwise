@@ -105,6 +105,15 @@ class TestRainSlip(unittest.TestCase):
         second = tracker._slip_roll_for_bucket(0)
         self.assertEqual(first, second)
 
+    def test_slip_impulse_uses_facing_not_move_speed(self):
+        px = rainy_roads.SLIP_IMPULSE_PX
+        walk = rainy_roads.slip_impulse_delta(2.0, 0.0)
+        sprint_2x = rainy_roads.slip_impulse_delta(4.0, 0.0)
+        self.assertEqual(walk, (px, 0))
+        self.assertEqual(sprint_2x, (px, 0))
+        down = rainy_roads.slip_impulse_delta(0.0, 4.0)
+        self.assertEqual(down, (0, px))
+
 
 if __name__ == "__main__":
     unittest.main()

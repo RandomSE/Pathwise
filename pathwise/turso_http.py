@@ -7,13 +7,14 @@ dashboard change.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
-import urllib.error
-import urllib.request
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 class TursoConfigError(ValueError):
@@ -22,6 +23,10 @@ class TursoConfigError(ValueError):
 
 class TursoHttpError(RuntimeError):
     """Remote pipeline rejected the request."""
+
+
+_pool_lock = threading.Lock()
+_connections: dict[tuple[str, int], http.client.HTTPSConnection] = {}
 
 
 def pipeline_url(database_url: str) -> str:
@@ -35,6 +40,70 @@ def pipeline_url(database_url: str) -> str:
     if raw.endswith("/v2/pipeline"):
         return raw
     return raw + "/v2/pipeline"
+
+
+def reset_http_connections() -> None:
+    """Close pooled HTTPS connections. Tests call this between cases."""
+    with _pool_lock:
+        conns = list(_connections.values())
+        _connections.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _drop_connection(host: str, port: int) -> None:
+    with _pool_lock:
+        conn = _connections.pop((host, port), None)
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _get_connection(host: str, port: int, timeout: float) -> http.client.HTTPSConnection:
+    key = (host, port)
+    with _pool_lock:
+        conn = _connections.get(key)
+        if conn is None:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+            _connections[key] = conn
+        return conn
+
+
+def _http_post(url: str, body: bytes, headers: dict[str, str], timeout: float) -> bytes:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not host:
+        raise TursoHttpError("invalid Turso URL")
+    port = parsed.port or 443
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    last_exc: BaseException | None = None
+    for attempt in range(2):
+        conn = _get_connection(host, port, timeout)
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            response = conn.getresponse()
+            data = response.read()
+            if response.status >= 400:
+                detail = data.decode("utf-8", errors="replace")[:400]
+                raise TursoHttpError(f"Turso HTTP {response.status}: {detail}")
+            return data
+        except TursoHttpError:
+            raise
+        except (http.client.HTTPException, OSError) as exc:
+            last_exc = exc
+            _drop_connection(host, port)
+            if attempt == 0:
+                continue
+            raise TursoHttpError(str(exc) or "network error") from exc
+    raise TursoHttpError(str(last_exc) or "network error")
 
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
@@ -117,21 +186,17 @@ def execute_sql(
             ]
         }
     ).encode()
-    request = urllib.request.Request(
-        pipeline_url(url),
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            return json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:400]
-        raise TursoHttpError(f"Turso HTTP {exc.code}: {detail}") from exc
+        raw = _http_post(pipeline_url(url), body, headers, timeout_s)
+        return json.loads(raw.decode())
+    except TursoHttpError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise TursoHttpError("Turso returned invalid JSON") from exc
 
 
 def ping(
