@@ -39,23 +39,19 @@ def session_is_highway(session: dict | None) -> bool:
 
 
 DASHBOARD_VALIDITY_SUMMARY = (
-    "Scores describe in-game Pathwise session behavior. "
-    "They are not construct validity or criterion validity evidence."
-)
-DASHBOARD_EMPLOYMENT_BANNER = (
-    "This tool is not authorized for employment decisions until a fairness "
-    "review on real applicants exists."
+    "Scores describe in-game Pathwise session behavior."
 )
 
 
 def _scoring_for_dashboard(scoring: dict) -> dict:
-    """Keep payload contract in logs; HTML must not embed banned validity phrasing."""
+    """Keep payload contract in logs; HTML must not embed dashboard warning copy."""
     payload = json.loads(json.dumps(scoring))
 
     def _scrub(node):
         if isinstance(node, dict):
             if node.get("claim_level") == "face_validity_only" and "summary" in node:
                 node["summary"] = DASHBOARD_VALIDITY_SUMMARY
+            node.pop("employment_banner", None)
             for value in node.values():
                 _scrub(value)
         elif isinstance(node, list):
@@ -206,7 +202,6 @@ def build_dashboard_html(
     replay_step_s = replay_step_for_session(session)
     replay_min_gap_s = MIN_PLAYBACK_GAP_S
     replay_max_gap_s = MAX_PLAYBACK_GAP_S
-    employment_banner = DASHBOARD_EMPLOYMENT_BANNER
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -266,17 +261,6 @@ def build_dashboard_html(
       font-size: 1.05rem;
       font-weight: 600;
       color: var(--accent);
-    }}
-    .validity-banner {{
-      display: block;
-      margin: 0 0 1rem;
-      padding: 0.7rem 0.85rem;
-      border: 1px solid #5a4630;
-      border-radius: 8px;
-      background: #2a2218;
-      color: #e6d3b8;
-      font-size: 0.85rem;
-      line-height: 1.4;
     }}
     .role-fit-table {{
       width: 100%;
@@ -533,14 +517,12 @@ def build_dashboard_html(
     <div class="grid grid-2">
       <section class="card">
         <h2>Session profile</h2>
-        <p class="validity-banner" id="validity-banner">Face-valid in-game behavior only. Not construct validity. Not criterion validity. Target similarity is not a job-performance prediction.</p>
-        <p class="validity-banner" id="employment-banner">{employment_banner}</p>
         <p class="archetype-primary" id="session-flavor"></p>
         <p class="subtitle" id="secondary-archetype"></p>
         <h3>Trait profile</h3>
         <div id="trait-bars"></div>
         <h3>Target similarity</h3>
-        <p class="role-fit-note">Weighted distance to designed role targets. Face-valid in-game behavior only; not construct validity or criterion validity. This tool is not authorized for employment decisions until a fairness review on real applicants exists.</p>
+        <p class="role-fit-note">Weighted distance to designed role targets.</p>
         <table class="role-fit-table" id="role-fit-table"></table>
         <ul class="insights" id="insights"></ul>
       </section>
@@ -1694,8 +1676,7 @@ def build_dashboard_html(
         <strong>${{sum.slow_commits || 0}}</strong> deliberate commits</p>
         <p>Tempo sources: <strong>${{tempoCounts.n_commit_latency ?? 0}}</strong> curb latency ·
         <strong>${{tempoCounts.n_residual ?? 0}}</strong> residual ·
-        <strong>${{tempoCounts.n_insufficient ?? 0}}</strong> insufficient
-        (counts only; not construct validity)</p>`;
+        <strong>${{tempoCounts.n_insufficient ?? 0}}</strong> insufficient</p>`;
 
       const seq = s.decision_sequence || [];
       const decisions = seq.filter(d => !isRiskAction(d.action, d.risk));

@@ -65,6 +65,10 @@ DIFFICULTY_PRESETS = [
 ]
 
 INVALID_SEED_MESSAGE = "That is an invalid seed"
+NAME_REQUIRED_MESSAGE = "Enter your name to play a set seed."
+NAME_PLACEHOLDER = "your name"
+MAX_NAME_LENGTH = 80
+GENERATE_SEED_REGISTER_ATTEMPTS = 8
 STALE_SEED_MESSAGE = "Settings changed; regenerate seed"
 COPY_FEEDBACK_SECONDS = 1.5
 COPY_FEEDBACK_MESSAGE = "Copied!"
@@ -95,6 +99,8 @@ class SessionConfig:
     modifiers: frozenset[str] = frozenset()
     # "candidate" conceals HUD / other modifiers under Hidden; "recruiter" sees all.
     audience: str = "candidate"
+    candidate_label: str | None = None
+    recruiter_seed_code: str | None = None
 
 
 def _parse_seed_text(text: str) -> int | None:
@@ -107,12 +113,34 @@ def candidate_play_button_label(seed_state: SeedInputState) -> str:
     return "Play random seed"
 
 
-def candidate_play_disabled(seed_state: SeedInputState) -> bool:
-    return seed_state == "invalid"
+def candidate_name_field_visible(seed_text: str) -> bool:
+    """Name is only asked once the seed field has content (typed or pasted)."""
+    return classify_seed_input(seed_text) != "empty"
 
 
-def build_candidate_session_config(seed_text: str) -> SessionConfig:
-    decoded = decode_recruiter_seed(seed_text)
+def candidate_play_disabled(
+    seed_state: SeedInputState,
+    *,
+    name_text: str = "",
+    recruiter_logged_in: bool = False,
+) -> bool:
+    if seed_state == "invalid":
+        return True
+    if seed_state == "valid" and not recruiter_logged_in and not str(name_text).strip():
+        return True
+    return False
+
+
+def build_candidate_session_config(
+    seed_text: str,
+    *,
+    candidate_label: str | None = None,
+) -> SessionConfig:
+    cleaned = "".join(str(seed_text).split())
+    decoded = decode_recruiter_seed(cleaned)
+    label = str(candidate_label).strip() if candidate_label is not None else None
+    if label == "":
+        label = None
     if decoded is not None:
         return SessionConfig(
             preset=decoded.preset,
@@ -120,10 +148,19 @@ def build_candidate_session_config(seed_text: str) -> SessionConfig:
             seed=decoded.map_seed,
             modifiers=decoded.modifiers,
             audience="candidate",
+            candidate_label=label,
+            recruiter_seed_code=cleaned,
         )
     state = classify_seed_input(seed_text)
     seed = parse_seed_value(seed_text) if state == "valid" else None
-    return SessionConfig(preset="normal", num_rounds=1, seed=seed, audience="candidate")
+    return SessionConfig(
+        preset="normal",
+        num_rounds=1,
+        seed=seed,
+        audience="candidate",
+        candidate_label=label,
+        recruiter_seed_code=None,
+    )
 
 
 def build_recruiter_session_config(
@@ -131,16 +168,22 @@ def build_recruiter_session_config(
     *,
     preset: str,
     num_rounds: int,
+    candidate_label: str | None = None,
 ) -> SessionConfig:
     decoded = decode_recruiter_seed(generated_seed_text)
     if decoded is None:
         raise ValueError("generate a recruiter seed before starting a session")
+    label = str(candidate_label).strip() if candidate_label is not None else None
+    if label == "":
+        label = None
     return SessionConfig(
         preset=decoded.preset,
         num_rounds=decoded.num_rounds,
         seed=decoded.map_seed,
         modifiers=decoded.modifiers,
         audience="recruiter",
+        candidate_label=label,
+        recruiter_seed_code=str(generated_seed_text).strip(),
     )
 
 
@@ -490,15 +533,19 @@ class CandidateHomeView(_MenuView):
         self,
         *,
         seed_text: str = "",
+        name_text: str = "",
         on_complete: Callable[[SessionConfig | None], None] | None = None,
         on_configure: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(on_complete=on_complete)
         self.seed_text = seed_text
+        self.name_text = name_text
         self._on_configure = on_configure
         self.seed_editing = False
+        self.name_editing = False
         self._layout_state: CandidateLayout | None = None
         self.seed_field_rect = Rect(0, 0, 0, 0)
+        self.name_field_rect = Rect(0, 0, 0, 0)
         self.paste_rect = Rect(0, 0, 0, 0)
         self.play_rect = Rect(0, 0, 0, 0)
         self.configure_rect = Rect(0, 0, 0, 0)
@@ -506,6 +553,32 @@ class CandidateHomeView(_MenuView):
     @property
     def seed_state(self) -> SeedInputState:
         return classify_seed_input(self.seed_text)
+
+    def _recruiter_logged_in(self) -> bool:
+        from pathwise.recruiter_accounts import RecruiterRecord
+
+        record = getattr(self.window, "_recruiter_record", None)
+        if not isinstance(record, RecruiterRecord):
+            return False
+        method = getattr(self.window, "recruiter_session_active", None)
+        if callable(method):
+            try:
+                return bool(method())
+            except Exception:
+                return False
+        token = getattr(self.window, "_recruiter_session_token", None)
+        return isinstance(token, str) and bool(token)
+
+    def _candidate_label(self) -> str | None:
+        from pathwise.recruiter_accounts import RecruiterRecord
+
+        if self._recruiter_logged_in():
+            record = getattr(self.window, "_recruiter_record", None)
+            if isinstance(record, RecruiterRecord):
+                return record.email
+            return None
+        stripped = str(self.name_text).strip()
+        return stripped or None
 
     def on_show_view(self) -> None:
         arcade.set_background_color(MENU_BG)
@@ -515,20 +588,35 @@ class CandidateHomeView(_MenuView):
         self._layout()
 
     def _layout(self) -> None:
+        show_name = candidate_name_field_visible(self.seed_text)
+        if not show_name:
+            self.name_editing = False
         layout = layout_candidate(
             self.window.width,
             self.window.height,
+            show_name=show_name,
         )
         self._layout_state = layout
         self.seed_field_rect = layout.seed_field_rect
+        self.name_field_rect = layout.name_field_rect
         self.paste_rect = layout.paste_rect
         self.play_rect = layout.play_rect
         self.configure_rect = layout.configure_rect
 
     def _try_play(self) -> None:
-        if candidate_play_disabled(self.seed_state):
+        logged_in = self._recruiter_logged_in()
+        if candidate_play_disabled(
+            self.seed_state,
+            name_text=self.name_text,
+            recruiter_logged_in=logged_in,
+        ):
             return
-        self.finish(build_candidate_session_config(self.seed_text))
+        self.finish(
+            build_candidate_session_config(
+                self.seed_text,
+                candidate_label=self._candidate_label(),
+            )
+        )
 
     def _apply_seed_paste(self, pasted: str) -> None:
         normalized = normalize_pasted_seed(pasted)
@@ -545,10 +633,18 @@ class CandidateHomeView(_MenuView):
 
     def on_key_press(self, symbol: int, modifiers: int) -> bool | None:
         if symbol == arcade.key.ESCAPE:
-            if self.seed_editing:
+            if self.seed_editing or self.name_editing:
                 self.seed_editing = False
+                self.name_editing = False
             else:
                 self.finish(None)
+            return True
+        if self.name_editing:
+            if symbol == arcade.key.BACKSPACE:
+                self.name_text = self.name_text[:-1]
+                self._layout()
+            elif symbol in (arcade.key.ENTER, arcade.key.RETURN):
+                self.name_editing = False
             return True
         if self.seed_editing:
             if symbol == arcade.key.BACKSPACE:
@@ -566,7 +662,22 @@ class CandidateHomeView(_MenuView):
             self._try_play()
         return True
 
+    def _apply_name_paste(self, pasted: str) -> None:
+        cleaned = " ".join(str(pasted).split())
+        if not cleaned:
+            return
+        self.name_text = cleaned[:MAX_NAME_LENGTH]
+        self.name_editing = True
+        self._layout()
+
     def on_text(self, text: str) -> bool | None:
+        if self.name_editing and text:
+            if len(text) > 1:
+                self._apply_name_paste(text)
+            elif text != "\n":
+                self.name_text = (self.name_text + text)[:MAX_NAME_LENGTH]
+                self._layout()
+            return True
         if not self.seed_editing or not text:
             return True
         if len(text) > 1:
@@ -580,14 +691,22 @@ class CandidateHomeView(_MenuView):
         if button != arcade.MOUSE_BUTTON_LEFT:
             return True
         self.seed_editing = self._seed_field_hit(x, y, self.seed_field_rect)
+        self.name_editing = (
+            candidate_name_field_visible(self.seed_text)
+            and not self._recruiter_logged_in()
+            and self._seed_field_hit(x, y, self.name_field_rect)
+        )
         if self.paste_rect.collidepoint(_mouse_screen_pos(self.window, x, y)):
             self.seed_editing = False
+            self.name_editing = False
             self._paste_seed_from_clipboard()
         if self.play_rect.collidepoint(_mouse_screen_pos(self.window, x, y)):
             self.seed_editing = False
+            self.name_editing = False
             self._try_play()
         if self.configure_rect.collidepoint(_mouse_screen_pos(self.window, x, y)):
             self.seed_editing = False
+            self.name_editing = False
             if self._on_configure is not None:
                 self._on_configure(self.seed_text)
         return True
@@ -597,8 +716,10 @@ class CandidateHomeView(_MenuView):
         layout = self._layout_state or layout_candidate(
             self.window.width,
             self.window.height,
+            show_name=candidate_name_field_visible(self.seed_text),
         )
         cx = self.window.width // 2
+        logged_in = self._recruiter_logged_in()
         arcade.Text(
             "Pathwise",
             cx,
@@ -627,6 +748,20 @@ class CandidateHomeView(_MenuView):
                 anchor_x="center",
                 anchor_y="center",
             ).draw()
+        elif (
+            self.seed_state == "valid"
+            and not logged_in
+            and not str(self.name_text).strip()
+        ):
+            arcade.Text(
+                NAME_REQUIRED_MESSAGE,
+                cx,
+                _arcade_y(self.window, layout.error_label_top),
+                MENU_ERROR,
+                18,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
         arcade.Text(
             "Map seed (optional)",
             cx,
@@ -638,7 +773,28 @@ class CandidateHomeView(_MenuView):
         ).draw()
         self._draw_seed_field(self.seed_field_rect, self.seed_text, editing=self.seed_editing)
         self._draw_button(self.paste_rect, "Paste", 18)
-        play_disabled = candidate_play_disabled(self.seed_state)
+        if candidate_name_field_visible(self.seed_text):
+            arcade.Text(
+                "Your name" if not logged_in else "Playing as",
+                cx,
+                _arcade_y(self.window, layout.name_label_top),
+                MENU_MUTED,
+                16,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
+            name_display = self._candidate_label() or self.name_text
+            self._draw_seed_field(
+                self.name_field_rect,
+                name_display or "",
+                editing=self.name_editing and not logged_in,
+                placeholder=NAME_PLACEHOLDER,
+            )
+        play_disabled = candidate_play_disabled(
+            self.seed_state,
+            name_text=self.name_text,
+            recruiter_logged_in=logged_in,
+        )
         self._draw_button(
             self.play_rect,
             candidate_play_button_label(self.seed_state),
@@ -748,36 +904,64 @@ class RecruiterConfigView(_MenuView):
 
     def _generate_seed(self) -> None:
         from pathwise.recruiter_accounts import RecruiterRecord, can_generate_codes
+        from pathwise.recruiter_auth_views import user_safe_account_error
+        from pathwise.recruiter_seeds import RecruiterSeedConflictError, register_recruiter_seed
 
         record = getattr(self.window, "_recruiter_record", None)
         if not isinstance(record, RecruiterRecord) or not can_generate_codes(record):
             self._generate_error = "This account cannot generate seeds."
             self._layout()
             return
-        self._generate_error = ""
-        map_seed = self._rng.randint(0, MAP_SEED_MOD_V9 - 1)
-        self.generated_seed_text = encode_recruiter_seed(
-            map_seed,
-            self.selected_preset,
-            self.num_rounds,
-            modifiers=self.active_modifiers,
-        )
-        self._generated_settings_fingerprint = recruiter_settings_fingerprint(
-            self.selected_preset,
-            self.num_rounds,
-            self.active_modifiers,
-        )
+        execute = getattr(self.window, "_recruiter_execute", None)
+        if execute is not None and not callable(execute):
+            execute = None
+        last_conflict = False
+        for _attempt in range(GENERATE_SEED_REGISTER_ATTEMPTS):
+            map_seed = self._rng.randint(0, MAP_SEED_MOD_V9 - 1)
+            encoded = encode_recruiter_seed(
+                map_seed,
+                self.selected_preset,
+                self.num_rounds,
+                modifiers=self.active_modifiers,
+            )
+            try:
+                register_recruiter_seed(encoded, record.id, execute=execute)
+            except RecruiterSeedConflictError:
+                last_conflict = True
+                continue
+            except Exception as exc:
+                self._generate_error = user_safe_account_error(exc)
+                self._layout()
+                return
+            self._generate_error = ""
+            self.generated_seed_text = encoded
+            self._generated_settings_fingerprint = recruiter_settings_fingerprint(
+                self.selected_preset,
+                self.num_rounds,
+                self.active_modifiers,
+            )
+            self._layout()
+            return
+        if last_conflict:
+            self._generate_error = "Could not generate a unique seed. Try again."
         self._layout()
 
     def _session_config(self) -> SessionConfig:
+        from pathwise.recruiter_accounts import RecruiterRecord
+
+        record = getattr(self.window, "_recruiter_record", None)
+        label = record.email if isinstance(record, RecruiterRecord) else None
         return build_recruiter_session_config(
             self.generated_seed_text,
             preset=self.selected_preset,
             num_rounds=self.num_rounds,
+            candidate_label=label,
         )
 
     def _try_start(self) -> None:
         if self._on_start is None:
+            return
+        if not recruiter_copy_enabled(self.generated_seed_text):
             return
         self._on_start(self._session_config())
 

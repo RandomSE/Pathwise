@@ -57,12 +57,34 @@ class TestCandidateHomeView(ArcadeMenuTestCase):
         view.on_show_view()
         view.on_draw()
         view.seed_text = "bad!"
+        view._layout()
         view.on_draw()
+
+    def test_name_field_hidden_on_empty_seed_shown_after_chars_or_paste(self):
+        view = CandidateHomeView()
+        view.on_show_view()
+        self.assertEqual(view.name_field_rect.height, 0)
+        view.seed_editing = True
+        view.on_text("4")
+        self.assertGreater(view.name_field_rect.height, 0)
+        view.seed_text = ""
+        view._layout()
+        self.assertEqual(view.name_field_rect.height, 0)
+        view.window.get_clipboard_text = MagicMock(return_value="42")
+        view.on_mouse_press(
+            view.paste_rect.centerx,
+            view.window.height - view.paste_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        self.assertEqual(view.seed_text, "42")
+        self.assertGreater(view.name_field_rect.height, 0)
 
     def test_play_with_valid_seed(self):
         view = CandidateHomeView()
         view.on_show_view()
         view.seed_text = "42"
+        view.name_text = "Ada Lovelace"
         view.on_mouse_press(
             view.play_rect.centerx,
             view.window.height - view.play_rect.centery,
@@ -70,7 +92,71 @@ class TestCandidateHomeView(ArcadeMenuTestCase):
             0,
         )
         self.assertTrue(view._done)
-        self.assertEqual(view._result, build_candidate_session_config("42"))
+        cfg = view._result
+        self.assertEqual(cfg, build_candidate_session_config("42", candidate_label="Ada Lovelace"))
+        self.assertEqual(cfg.candidate_label, "Ada Lovelace")
+        self.assertIsNone(cfg.recruiter_seed_code)
+
+    def test_play_blocked_without_name_on_valid_seed(self):
+        view = CandidateHomeView()
+        view.on_show_view()
+        view.seed_text = "42"
+        view.name_text = ""
+        view.on_mouse_press(
+            view.play_rect.centerx,
+            view.window.height - view.play_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        self.assertFalse(view._done)
+
+    def test_play_random_empty_seed_needs_no_name(self):
+        view = CandidateHomeView()
+        view.on_show_view()
+        view.seed_text = ""
+        view.name_text = ""
+        view.on_mouse_press(
+            view.play_rect.centerx,
+            view.window.height - view.play_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        self.assertTrue(view._done)
+        self.assertIsNone(view._result.seed)
+        self.assertIsNone(view._result.recruiter_seed_code)
+        self.assertIsNone(view._result.candidate_label)
+
+    def test_logged_in_recruiter_play_uses_email_as_label(self):
+        from pathwise.recruiter_accounts import RecruiterRecord
+
+        view = CandidateHomeView()
+        view.on_show_view()
+        view.window.recruiter_session_active = lambda: True
+        view.window._recruiter_record = RecruiterRecord(
+            id="c" * 32,
+            email="player@example.com",
+            billing_date=None,
+            active=1,
+            trial_active=0,
+            billing_exempt=1,
+            tier="basic",
+            company=None,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        view.window._recruiter_session_token = "token"
+        encoded = encode_recruiter_seed(8, "normal", 1)
+        view.seed_text = encoded
+        view.name_text = ""
+        view.on_mouse_press(
+            view.play_rect.centerx,
+            view.window.height - view.play_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        self.assertTrue(view._done)
+        self.assertEqual(view._result.candidate_label, "player@example.com")
+        self.assertEqual(view._result.recruiter_seed_code, encoded)
 
     def test_play_disabled_for_invalid_seed(self):
         view = CandidateHomeView()
@@ -115,6 +201,7 @@ class TestCandidateHomeView(ArcadeMenuTestCase):
         view = CandidateHomeView()
         view.on_show_view()
         view.seed_text = "5"
+        view.name_text = "Ada"
         view.on_key_press(arcade.key.SPACE, 0)
         self.assertEqual(view._result.preset, "normal")
         self.assertEqual(view._result.num_rounds, 1)
@@ -144,6 +231,7 @@ class TestCandidateHomeView(ArcadeMenuTestCase):
         view = CandidateHomeView()
         view.on_show_view()
         view.seed_text = rainy_seed
+        view.name_text = "Ada"
         view._layout()
         view.on_mouse_press(
             view.play_rect.centerx,
@@ -222,18 +310,81 @@ class TestRecruiterConfigView(ArcadeMenuTestCase):
         )
         view.selected_preset = "hard"
         view.num_rounds = 2
-        view.on_mouse_press(
-            view.generate_rect.centerx,
-            view.window.height - view.generate_rect.centery,
-            arcade.MOUSE_BUTTON_LEFT,
-            0,
-        )
+        with patch("pathwise.recruiter_seeds.register_recruiter_seed") as register:
+            view.on_mouse_press(
+                view.generate_rect.centerx,
+                view.window.height - view.generate_rect.centery,
+                arcade.MOUSE_BUTTON_LEFT,
+                0,
+            )
+        register.assert_called_once()
         self.assertEqual(len(view.generated_seed_text), 13)
         payload = __import__("pathwise.session_seed", fromlist=["decode_recruiter_seed"]).decode_recruiter_seed(
             view.generated_seed_text
         )
         self.assertEqual(payload.preset, "hard")
         self.assertEqual(payload.num_rounds, 2)
+        self.assertEqual(register.call_args.args[0], view.generated_seed_text)
+
+    def test_generate_does_not_keep_new_code_if_register_fails(self):
+        from pathwise.recruiter_accounts import RecruiterRecord
+        from pathwise.recruiter_auth_views import OFFLINE_MESSAGE
+        from pathwise.turso_http import TursoHttpError
+
+        view = RecruiterConfigView(rng=__import__("random").Random(1))
+        view.on_show_view()
+        view.window._recruiter_record = RecruiterRecord(
+            id="c" * 32,
+            email="ok@example.com",
+            billing_date=None,
+            active=1,
+            trial_active=0,
+            billing_exempt=1,
+            tier="basic",
+            company=None,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        prior = encode_recruiter_seed(12, "normal", 1)
+        view.generated_seed_text = prior
+        with patch(
+            "pathwise.recruiter_seeds.register_recruiter_seed",
+            side_effect=TursoHttpError("offline"),
+        ):
+            view._generate_seed()
+        self.assertEqual(view.generated_seed_text, prior)
+        self.assertEqual(view._generate_error, OFFLINE_MESSAGE)
+
+    def test_generate_retries_on_unique_conflict(self):
+        from pathwise.recruiter_accounts import RecruiterRecord
+        from pathwise.recruiter_seeds import RecruiterSeedConflictError
+
+        view = RecruiterConfigView(rng=__import__("random").Random(2))
+        view.on_show_view()
+        view.window._recruiter_record = RecruiterRecord(
+            id="c" * 32,
+            email="ok@example.com",
+            billing_date=None,
+            active=1,
+            trial_active=0,
+            billing_exempt=1,
+            tier="basic",
+            company=None,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        attempts = {"n": 0}
+
+        def register(_code, _recruiter_id, *, execute=None):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RecruiterSeedConflictError("seed already registered")
+
+        with patch("pathwise.recruiter_seeds.register_recruiter_seed", side_effect=register):
+            view._generate_seed()
+        self.assertEqual(attempts["n"], 2)
+        self.assertEqual(len(view.generated_seed_text), 13)
+        self.assertEqual(view._generate_error, "")
 
     def test_start_invokes_callback(self):
         start_cb = MagicMock()
@@ -246,6 +397,18 @@ class TestRecruiterConfigView(ArcadeMenuTestCase):
         self.assertEqual(cfg.preset, "easy")
         self.assertEqual(cfg.num_rounds, 3)
         self.assertEqual(cfg.seed, 50)
+
+    def test_start_without_generated_seed_does_not_raise(self):
+        start_cb = MagicMock()
+        view = RecruiterConfigView(on_start=start_cb)
+        view.on_show_view()
+        view.on_mouse_press(
+            view.start_rect.centerx,
+            view.window.height - view.start_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        start_cb.assert_not_called()
 
     def test_start_with_modifiers_goes_directly_to_session(self):
         start_cb = MagicMock()

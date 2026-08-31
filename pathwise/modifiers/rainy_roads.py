@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from pathwise.modifiers.registry import ModifierContext
 
 BRAKE_STRENGTH_MULT = 0.55
@@ -70,6 +72,17 @@ def should_disable_player_yield(*, slip_stunned: bool) -> bool:
     return _active and slip_stunned
 
 
+def slip_impulse_delta(dx: float, dy: float, *, impulse_px: int | None = None) -> tuple[int, int]:
+    """Knockback along facing. Magnitude is fixed so faster sprint does not launch farther."""
+    px = SLIP_IMPULSE_PX if impulse_px is None else int(impulse_px)
+    if dx == 0 and dy == 0:
+        dx, dy = 0.0, 1.0
+    mag = math.hypot(float(dx), float(dy))
+    if mag <= 0:
+        return 0, px
+    return int(round(dx / mag * px)), int(round(dy / mag * px))
+
+
 class RainSlipTracker:
     """Track sprint activity per elapsed-second bucket and roll slip chance."""
 
@@ -103,13 +116,12 @@ class RainSlipTracker:
                 from pathwise.modifiers import old
 
                 dx, dy = player.last_move_direction()
-                if dx == 0 and dy == 0:
-                    dx, dy = 0, 1
+                impulse_dx, impulse_dy = slip_impulse_delta(dx, dy)
                 duration = old.fatal_slip_duration() if old.trip_is_fatal() else None
                 player.begin_slip_stun(
                     elapsed=elapsed,
-                    impulse_dx=int(dx * SLIP_IMPULSE_PX),
-                    impulse_dy=int(dy * SLIP_IMPULSE_PX),
+                    impulse_dx=impulse_dx,
+                    impulse_dy=impulse_dy,
                     duration=duration,
                 )
                 slipped = True

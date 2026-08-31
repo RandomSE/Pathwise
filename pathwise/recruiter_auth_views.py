@@ -37,6 +37,7 @@ from pathwise.recruiter_accounts import (
 from pathwise.turso_http import TursoConfigError, TursoHttpError
 
 OFFLINE_MESSAGE = "Could not reach the account service. Try again later."
+SIGNING_IN_MESSAGE = "Signing in..."
 CONFIRM_MISMATCH_MESSAGE = "Passwords do not match"
 MAX_EMAIL_CHARS = 254
 MAX_PASSWORD_CHARS = 128
@@ -197,14 +198,26 @@ class _AuthFormView(_MenuView):
         if self._on_success is not None:
             self._on_success(record, token)
 
+    def _paint_status(self, message: str) -> None:
+        self.error_text = message
+        self._layout()
+        window = getattr(self, "window", None)
+        if window is None:
+            return
+        self.on_draw()
+        flip = getattr(window, "flip", None)
+        if callable(flip):
+            flip()
+
     def _draw_error(self, cx: int, top: int) -> None:
         if not self.error_text:
             return
+        color = MENU_MUTED if self.error_text == SIGNING_IN_MESSAGE else MENU_ERROR
         arcade.Text(
             self.error_text,
             cx,
             _arcade_y(self.window, top),
-            MENU_ERROR,
+            color,
             16,
             anchor_x="center",
             anchor_y="center",
@@ -247,6 +260,7 @@ class RecruiterLoginView(_AuthFormView):
         }
 
     def _submit(self) -> None:
+        self._paint_status(SIGNING_IN_MESSAGE)
         try:
             record, token = authenticate_recruiter(
                 self.email_text,

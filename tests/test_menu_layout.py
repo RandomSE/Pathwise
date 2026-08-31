@@ -41,6 +41,26 @@ class TestMenuLayout(unittest.TestCase):
     def test_full_hd_resolution(self):
         self._assert_clean(1920, 1080)
 
+    def test_candidate_name_row_is_below_seed_and_overlap_clean(self):
+        for width, height in ((800, 600), (1920, 1080)):
+            layout = layout_candidate(width, height, show_name=True)
+            self.assertGreater(layout.name_field_rect.height, 0)
+            self.assertGreater(layout.name_label_top, 0)
+            self.assertGreaterEqual(layout.name_field_rect.top, layout.seed_field_rect.bottom)
+            self.assertTrue(
+                layouts_do_not_overlap(layout_vertical_spans(layout), window_height=height)
+            )
+
+    def test_candidate_name_row_omitted_when_hidden(self):
+        for width, height in ((800, 600), (1920, 1080)):
+            hidden = layout_candidate(width, height, show_name=False)
+            shown = layout_candidate(width, height, show_name=True)
+            self.assertEqual(hidden.name_field_rect.height, 0)
+            self.assertLess(hidden.play_rect.top, shown.play_rect.top)
+            self.assertTrue(
+                layouts_do_not_overlap(layout_vertical_spans(hidden), window_height=height)
+            )
+
     def test_copy_aligns_with_seed_row(self):
         layout = layout_recruiter(800, 600, num_rounds=1, show_stale_hint=False)
         self.assertEqual(layout.copy_rect.top, layout.seed_display_rect.top)

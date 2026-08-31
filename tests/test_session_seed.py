@@ -139,3 +139,16 @@ class TestRecruiterSeedEncoding(unittest.TestCase):
         self.assertEqual(payload.map_seed, 99_999_999 % 1_000_000)
         self.assertEqual(payload.preset, "hard")
         self.assertEqual(payload.num_rounds, 5)
+
+    def test_generated_shareable_always_decodes_and_is_outside_random_range(self):
+        encoded = encode_recruiter_seed(0, "normal", 1)
+        self.assertIsNotNone(decode_recruiter_seed(encoded))
+        self.assertTrue(encoded.isdigit())
+        self.assertNotIn(int(encoded), range(0, 2**31))
+
+    def test_random_play_seed_never_decodes_as_recruiter_seed(self):
+        rng = random.Random(1)
+        for _ in range(200):
+            seed, source, _adaptive = resolve_candidate_play_seed(None, rng=rng)
+            self.assertEqual(source, SEED_SOURCE_RANDOM)
+            self.assertIsNone(decode_recruiter_seed(str(seed)))

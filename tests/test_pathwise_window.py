@@ -26,16 +26,13 @@ class TestPathwiseWindowDraw(unittest.TestCase):
 
 
 class TestFinishSessionOrder(unittest.TestCase):
-    def test_finish_session_saves_before_showing_view(self):
+    def _finish(self, window, call_order: list[str]):
         import main as game
 
-        window = PathwiseWindow.__new__(PathwiseWindow)
         window._outcomes = ["success"]
         game.round_results = [{"outcome": "success"}]
         game.session_num_rounds = 1
         game.session_base_seed = 42
-
-        call_order: list[str] = []
 
         with patch.object(
             game,
@@ -48,6 +45,68 @@ class TestFinishSessionOrder(unittest.TestCase):
         ), patch("pathwise.pre_game.MessageView", MagicMock()):
             window._finish_session()
 
+    def test_finish_session_saves_before_showing_view(self):
+        window = PathwiseWindow.__new__(PathwiseWindow)
+        window._config = None
+        window._recruiter_record = None
+        window._recruiter_session_token = None
+        window._recruiter_execute = None
+        call_order: list[str] = []
+        notify_calls: list[object] = []
+
+        def _notify(**kwargs):
+            notify_calls.append(kwargs)
+            call_order.append("notify")
+
+        window._notify_recruiter = _notify
+        self._finish(window, call_order)
+        self.assertEqual(call_order, ["save", "notify", "show"])
+        self.assertEqual(notify_calls[0]["dashboard_path"], "logs_dashboard.html")
+
+    def test_finish_session_self_play_skips_notify(self):
+        from pathwise.pre_game import SessionConfig
+        from pathwise.recruiter_accounts import apply_recruiter_schema, create_recruiter
+        from pathwise.recruiter_seeds import register_recruiter_seed
+        from pathwise.session_seed import encode_recruiter_seed
+        from tests.test_recruiter_accounts import FakePipeline
+
+        db = FakePipeline()
+        self.addCleanup(db.conn.close)
+        apply_recruiter_schema(execute=db.execute)
+        owner = create_recruiter("owner@example.com", "password1", execute=db.execute)
+        encoded = encode_recruiter_seed(7, "normal", 1)
+        register_recruiter_seed(encoded, owner.id, execute=db.execute)
+
+        window = PathwiseWindow.__new__(PathwiseWindow)
+        window._config = SessionConfig(
+            preset="normal",
+            recruiter_seed_code=encoded,
+            candidate_label=owner.email,
+        )
+        window._recruiter_record = owner
+        window._recruiter_session_token = "token"
+        window._recruiter_execute = db.execute
+        sent: list[dict] = []
+        window._notify_send = lambda **payload: sent.append(payload)
+        call_order: list[str] = []
+        self._finish(window, call_order)
+        self.assertEqual(call_order, ["save", "show"])
+        self.assertEqual(sent, [])
+
+
+    def test_finish_session_swallows_notify_exception(self):
+        window = PathwiseWindow.__new__(PathwiseWindow)
+        window._config = None
+        window._recruiter_record = None
+        window._recruiter_session_token = None
+        window._recruiter_execute = None
+
+        def boom(**_kwargs):
+            raise RuntimeError("notify exploded")
+
+        window._notify_recruiter = boom
+        call_order: list[str] = []
+        self._finish(window, call_order)
         self.assertEqual(call_order, ["save", "show"])
 
 

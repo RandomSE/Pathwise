@@ -62,8 +62,19 @@ class TestBuildDashboardHtml(unittest.TestCase):
         self.assertIn("<html", html.lower())
         self.assertIn("Pathwise", html)
         self.assertIn("decision_tempo_live_counts", html)
-        self.assertIn("not authorized for employment decisions", html)
-        self.assertIn("not construct validity", html.lower())
+        self.assertNotIn(
+            "Face-valid in-game behavior only. Not construct validity. "
+            "Not criterion validity. Target similarity is not a job-performance "
+            "prediction.",
+            html,
+        )
+        self.assertNotIn(
+            "This tool is not authorized for employment decisions until a "
+            "fairness review on real applicants exists.",
+            html,
+        )
+        self.assertNotIn("validity-banner", html)
+        self.assertNotIn("employment-banner", html)
 
     def test_multi_round_payload(self):
         self._write(

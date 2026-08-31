@@ -14,7 +14,11 @@ from pathwise.recruiter_accounts import (
     RecruiterRecord,
     RecruiterValidationError,
 )
-from pathwise.recruiter_auth_views import RecruiterLoginView, RecruiterRegisterView
+from pathwise.recruiter_auth_views import (
+    SIGNING_IN_MESSAGE,
+    RecruiterLoginView,
+    RecruiterRegisterView,
+)
 from pathwise.turso_http import TursoConfigError, TursoHttpError
 from tests.arcade_harness import fake_arcade_window
 
@@ -99,6 +103,23 @@ class TestRecruiterLoginView(AuthArcadeTestCase):
             self.assertEqual(auth.call_args.args[1], "password1")
             self.assertIn("execute", kwargs)
         on_success.assert_called_once_with(rec, "raw-token")
+
+    def test_login_paints_signing_in_before_authenticate(self):
+        rec = _entitled_record()
+        view = RecruiterLoginView(on_success=MagicMock(), execute=MagicMock())
+        view.on_show_view()
+        view.email_text = "launch@example.com"
+        view.password_text = "password1"
+        seen = {}
+
+        def auth(*_args, **_kwargs):
+            seen["status"] = view.error_text
+            return rec, "raw-token"
+
+        with patch("pathwise.recruiter_auth_views.authenticate_recruiter", side_effect=auth):
+            view._submit()
+        self.assertEqual(seen["status"], SIGNING_IN_MESSAGE)
+        self.assertEqual(view.error_text, "")
 
     def test_failed_login_stays_with_generic_auth_error(self):
         on_success = MagicMock()
@@ -329,7 +350,8 @@ class TestGenerateSeedGate(AuthArcadeTestCase):
         view.window._recruiter_record = _entitled_record()
         view.selected_preset = "hard"
         view.num_rounds = 2
-        view._generate_seed()
+        with patch("pathwise.recruiter_seeds.register_recruiter_seed"):
+            view._generate_seed()
         self.assertEqual(len(view.generated_seed_text), 13)
         payload = __import__(
             "pathwise.session_seed", fromlist=["decode_recruiter_seed"]
@@ -343,6 +365,7 @@ class TestCandidatePlayUngated(AuthArcadeTestCase):
         view = CandidateHomeView()
         view.on_show_view()
         view.seed_text = "42"
+        view.name_text = "Ada"
         view._try_play()
         self.assertTrue(view._done)
         self.assertEqual(view._result.seed, 42)

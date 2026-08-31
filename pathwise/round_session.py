@@ -455,6 +455,9 @@ def save_session_log():
         "pathwise_seed_env": os.environ.get("PATHWISE_SEED"),
         "adaptive_map": m.session_use_adaptive_map,
         "base_difficulty_preset": m.base_preset_id,
+        "candidate_label": getattr(m, "session_candidate_label", None),
+        "recruiter_seed_code": getattr(m, "session_recruiter_seed_code", None),
+        "session_started_at_utc": getattr(m, "session_started_at_utc", None),
         "rounds": m.round_results,
     }
     with open("logs.json", "w", encoding="utf-8") as f:
