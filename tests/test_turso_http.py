@@ -12,6 +12,8 @@ from unittest.mock import patch
 from pathwise.turso_http import (
     TursoConfigError,
     TursoHttpError,
+    _drop_connection,
+    _http_post,
     execute_sql,
     load_dotenv,
     ping,
@@ -241,6 +243,104 @@ class TestExecuteSql(unittest.TestCase):
                     database_url="https://host.turso.io",
                     auth_token="bad",
                 )
+
+    def test_invalid_json_becomes_turso_http_error(self):
+        https_patch, _conns = _https_patch(b"not-json")
+        with https_patch:
+            with self.assertRaises(TursoHttpError) as ctx:
+                execute_sql(
+                    "SELECT 1",
+                    database_url="https://host.turso.io",
+                    auth_token="tok",
+                )
+        self.assertIn("invalid JSON", str(ctx.exception))
+
+    def test_http_post_rejects_url_without_host(self):
+        with self.assertRaises(TursoHttpError) as ctx:
+            _http_post("https:///v2/pipeline", b"{}", {}, 1.0)
+        self.assertIn("invalid Turso URL", str(ctx.exception))
+
+    def test_http_post_keeps_query_string_on_path(self):
+        captured = {}
+        https_patch, _conns = _https_patch(b'{"ok":true}', captured=captured)
+        with https_patch:
+            data = _http_post(
+                "https://host.turso.io/v2/pipeline?foo=1",
+                b"{}",
+                {"Content-Type": "application/json"},
+                1.0,
+            )
+        self.assertEqual(data, b'{"ok":true}')
+        self.assertEqual(captured["url"], "https://host.turso.io/v2/pipeline?foo=1")
+
+    def test_http_post_retries_oserror_then_succeeds(self):
+        class FlakyHTTPS:
+            calls = 0
+
+            def __init__(self, host, port=443, timeout=20):
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+
+            def request(self, method, path, body=None, headers=None):
+                FlakyHTTPS.calls += 1
+                if FlakyHTTPS.calls == 1:
+                    raise OSError("broken pipe")
+
+            def getresponse(self):
+                class FakeResp:
+                    status = 200
+
+                    def read(self):
+                        return b'{"ok":true}'
+
+                return FakeResp()
+
+            def close(self):
+                return None
+
+        reset_http_connections()
+        with patch("pathwise.turso_http.http.client.HTTPSConnection", FlakyHTTPS):
+            data = _http_post(
+                "https://host.turso.io/v2/pipeline",
+                b"{}",
+                {},
+                1.0,
+            )
+        self.assertEqual(data, b'{"ok":true}')
+        self.assertEqual(FlakyHTTPS.calls, 2)
+
+    def test_http_post_raises_after_retry_exhausted(self):
+        class AlwaysFail:
+            def __init__(self, host, port=443, timeout=20):
+                pass
+
+            def request(self, method, path, body=None, headers=None):
+                raise OSError("")
+
+            def close(self):
+                return None
+
+        reset_http_connections()
+        with patch("pathwise.turso_http.http.client.HTTPSConnection", AlwaysFail):
+            with self.assertRaises(TursoHttpError) as ctx:
+                _http_post("https://host.turso.io/v2/pipeline", b"{}", {}, 1.0)
+        self.assertIn("network error", str(ctx.exception))
+
+    def test_reset_and_drop_tolerate_close_errors(self):
+        class BoomConn:
+            def close(self):
+                raise OSError("already closed")
+
+        from pathwise import turso_http as mod
+
+        with mod._pool_lock:
+            mod._connections[("h", 443)] = BoomConn()
+        reset_http_connections()
+        _drop_connection("missing", 443)
+        with mod._pool_lock:
+            mod._connections[("h2", 443)] = BoomConn()
+        _drop_connection("h2", 443)
 
     def test_second_execute_reuses_https_connection(self):
         https_patch, conns = _https_patch(b'{"results":[]}')

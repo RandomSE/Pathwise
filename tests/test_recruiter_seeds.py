@@ -82,6 +82,17 @@ class TestRecruiterSeeds(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], self.owner.id)
 
+    def test_lookup_blank_code_returns_none(self):
+        self.assertIsNone(lookup_recruiter_seed("", execute=self.db.execute))
+        self.assertIsNone(lookup_recruiter_seed("   ", execute=self.db.execute))
+
+    def test_register_reraises_when_error_is_not_missing_table(self):
+        def boom(_sql, _args=(), **_kwargs):
+            raise RuntimeError("disk I/O error")
+
+        with self.assertRaises(RuntimeError):
+            register_recruiter_seed(self.seed_code, self.owner.id, execute=boom)
+
     def test_register_applies_schema_when_seeds_table_missing(self):
         self.db.conn.execute("DROP TABLE recruiter_seeds")
         self.db.conn.commit()

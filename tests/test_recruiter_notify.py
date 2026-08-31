@@ -140,6 +140,133 @@ class TestRecruiterNotify(unittest.TestCase):
         self.assertTrue(self._notify())
         self.assertEqual(len(self.sent), 2)
 
+    def test_lookup_exception_skips_without_raising(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("turso down")
+
+        with self.assertLogs("pathwise.recruiter_notify", level=logging.WARNING) as captured:
+            result = self._notify(execute=boom)
+        self.assertFalse(result)
+        self.assertEqual(self.sent, [])
+        self.assertIn("lookup failed", "\n".join(captured.output).lower())
+
+    def test_missing_dashboard_file_skips(self):
+        missing = Path(self.tmp.name) / "no-such-dashboard.html"
+        with self.assertLogs("pathwise.recruiter_notify", level=logging.WARNING) as captured:
+            result = self._notify(dashboard_path=missing)
+        self.assertFalse(result)
+        self.assertEqual(self.sent, [])
+        self.assertIn("attachment missing", "\n".join(captured.output).lower())
+
+    def test_empty_dashboard_skips(self):
+        empty = Path(self.tmp.name) / "empty.html"
+        empty.write_bytes(b"")
+        with self.assertLogs("pathwise.recruiter_notify", level=logging.WARNING) as captured:
+            result = self._notify(dashboard_path=empty)
+        self.assertFalse(result)
+        self.assertIn("attachment empty", "\n".join(captured.output).lower())
+
+    def test_none_dashboard_path_is_empty_attachment(self):
+        with self.assertLogs("pathwise.recruiter_notify", level=logging.WARNING) as captured:
+            result = self._notify(dashboard_path=None)
+        self.assertFalse(result)
+        self.assertIn("attachment empty", "\n".join(captured.output).lower())
+
+    def test_smtp_send_starttls_login_and_invalid_port(self):
+        calls: list[str] = []
+
+        class FakeSMTP:
+            def __init__(self, host, port, timeout=20):
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+                calls.append(f"connect:{host}:{port}")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                calls.append("close")
+                return False
+
+            def starttls(self):
+                calls.append("starttls")
+
+            def login(self, user, password):
+                calls.append(f"login:{user}:{password}")
+
+            def send_message(self, message):
+                calls.append(f"send:{message['To']}:{message['Subject']}")
+
+        env = {
+            "PATHWISE_SMTP_HOST": "smtp.example.test",
+            "PATHWISE_SMTP_PORT": "587",
+            "PATHWISE_SMTP_USER": "smtp-user",
+            "PATHWISE_SMTP_PASSWORD": "smtp-secret",
+            "PATHWISE_SMTP_FROM": "from@example.test",
+        }
+        with patch("pathwise.recruiter_notify.load_dotenv", return_value=None), patch.dict(
+            os.environ, env, clear=False
+        ), patch("pathwise.recruiter_notify.smtplib.SMTP", FakeSMTP):
+            result = notify_recruiter_of_seed_use(
+                recruiter_seed_code=self.seed_code,
+                candidate_label="Ada Lovelace",
+                used_at_utc="2026-08-30T10:00:00Z",
+                completed_at_utc="2026-08-30T10:12:00Z",
+                dashboard_path=self.dashboard,
+                player_recruiter_id=None,
+                execute=self.db.execute,
+            )
+        self.assertTrue(result)
+        self.assertEqual(
+            calls,
+            [
+                "connect:smtp.example.test:587",
+                "starttls",
+                "login:smtp-user:smtp-secret",
+                "send:owner@example.com:Pathwise session from Ada Lovelace",
+                "close",
+            ],
+        )
+
+        calls.clear()
+        env_bad_port = dict(env)
+        env_bad_port["PATHWISE_SMTP_PORT"] = "not-a-port"
+        with patch("pathwise.recruiter_notify.load_dotenv", return_value=None), patch.dict(
+            os.environ, env_bad_port, clear=False
+        ), patch("pathwise.recruiter_notify.smtplib.SMTP", FakeSMTP):
+            notify_recruiter_of_seed_use(
+                recruiter_seed_code=self.seed_code,
+                candidate_label="Ada Lovelace",
+                used_at_utc="2026-08-30T10:00:00Z",
+                completed_at_utc="2026-08-30T10:12:00Z",
+                dashboard_path=self.dashboard,
+                player_recruiter_id=None,
+                execute=self.db.execute,
+            )
+        self.assertEqual(calls[0], "connect:smtp.example.test:587")
+        self.assertIn("starttls", calls)
+
+        calls.clear()
+        env_no_user = dict(env)
+        env_no_user["PATHWISE_SMTP_PORT"] = "2525"
+        env_no_user["PATHWISE_SMTP_USER"] = ""
+        with patch("pathwise.recruiter_notify.load_dotenv", return_value=None), patch.dict(
+            os.environ, env_no_user, clear=False
+        ), patch("pathwise.recruiter_notify.smtplib.SMTP", FakeSMTP):
+            notify_recruiter_of_seed_use(
+                recruiter_seed_code=self.seed_code,
+                candidate_label="Ada Lovelace",
+                used_at_utc="2026-08-30T10:00:00Z",
+                completed_at_utc="2026-08-30T10:12:00Z",
+                dashboard_path=self.dashboard,
+                player_recruiter_id=None,
+                execute=self.db.execute,
+            )
+        self.assertEqual(calls[0], "connect:smtp.example.test:2525")
+        self.assertNotIn("starttls", calls)
+        self.assertTrue(all(not item.startswith("login:") for item in calls))
+
     def test_warning_does_not_log_smtp_password_or_turso_token(self):
         secret = "smtp-secret-value"
         token = "turso-token-value"

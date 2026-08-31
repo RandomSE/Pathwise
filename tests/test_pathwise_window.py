@@ -94,6 +94,22 @@ class TestFinishSessionOrder(unittest.TestCase):
         self.assertEqual(sent, [])
 
 
+    def test_finish_session_swallows_notify_exception(self):
+        window = PathwiseWindow.__new__(PathwiseWindow)
+        window._config = None
+        window._recruiter_record = None
+        window._recruiter_session_token = None
+        window._recruiter_execute = None
+
+        def boom(**_kwargs):
+            raise RuntimeError("notify exploded")
+
+        window._notify_recruiter = boom
+        call_order: list[str] = []
+        self._finish(window, call_order)
+        self.assertEqual(call_order, ["save", "show"])
+
+
 class TestVsyncPolicy(unittest.TestCase):
     def test_play_defaults_to_vsync_on(self):
         with patch.dict("os.environ", {}, clear=False):
