@@ -3,6 +3,8 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
+from pathwise.packaging import filter_pyinstaller_datas
+
 arcade_datas, arcade_binaries, arcade_hidden = collect_all("arcade")
 pyglet_datas, pyglet_binaries, pyglet_hidden = collect_all("pyglet")
 
@@ -20,7 +22,7 @@ datas = [
     (".env.example", "."),
     ("docs/RECRUITER.md", "."),
 ]
-datas += arcade_datas
+datas += filter_pyinstaller_datas(arcade_datas)
 datas += pyglet_datas
 
 a = Analysis(
@@ -35,6 +37,9 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# Arcade's bundled hook adds dest ./arcade/VERSION as a directory after Analysis.
+a.datas = filter_pyinstaller_datas(a.datas)
 
 pyz = PYZ(a.pure)
 

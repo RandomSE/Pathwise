@@ -69,6 +69,47 @@ class TestPyinstallerSpec(unittest.TestCase):
         self.assertIn("pathwise.env.example", text)
         self.assertNotIn("TURSO_AUTH_TOKEN=", text)
         self.assertNotIn("PATHWISE_SMTP_PASSWORD=", text)
+        self.assertIn("filter_pyinstaller_datas", text)
+        self.assertIn("a.datas", text)
+
+
+class TestArcadeVersionClashFilter(unittest.TestCase):
+    def test_drops_dest_dir_keeps_version_file_under_arcade(self):
+        from pathwise.packaging import filter_pyinstaller_datas
+
+        kept = filter_pyinstaller_datas(
+            [
+                (r"C:\Python\Lib\site-packages\arcade\VERSION", "arcade"),
+                (r"C:\Python\Lib\site-packages\arcade\VERSION", "./arcade/VERSION"),
+                (r"C:\Python\Lib\site-packages\arcade\VERSION", "arcade/VERSION"),
+                (
+                    r"C:\Python\Lib\site-packages\arcade\resources\system",
+                    "./arcade/resources/system",
+                ),
+            ]
+        )
+        dests = [str(item[1]).replace("\\", "/") for item in kept]
+        self.assertIn("arcade", dests)
+        self.assertIn("./arcade/resources/system", dests)
+        self.assertNotIn("./arcade/VERSION", dests)
+        self.assertNotIn("arcade/VERSION", dests)
+        self.assertFalse(any(d.replace("\\", "/").rstrip("/").lower().endswith("arcade/version") for d in dests))
+
+    def test_analysis_toc_keeps_version_file_drops_nested_dir(self):
+        from pathwise.packaging import filter_pyinstaller_datas
+
+        kept = filter_pyinstaller_datas(
+            [
+                ("arcade/VERSION", r"C:\site\arcade\VERSION", "DATA"),
+                ("arcade/VERSION/VERSION", r"C:\site\arcade\VERSION", "DATA"),
+                ("arcade/resources/system/icon.png", r"C:\site\arcade\resources\system\icon.png", "DATA"),
+                ("pyglet/info.py", r"C:\site\pyglet\info.py", "DATA"),
+            ]
+        )
+        names = [item[0].replace("\\", "/") for item in kept]
+        self.assertIn("arcade/VERSION", names)
+        self.assertNotIn("arcade/VERSION/VERSION", names)
+        self.assertIn("arcade/resources/system/icon.png", names)
 
 
 class TestRecruiterWindowsWorkflow(unittest.TestCase):

@@ -28,6 +28,22 @@ from pathwise.runtime_paths import (
 from pathwise.turso_http import load_dotenv
 
 
+def paths_match(left: Path | str, right: Path | str) -> bool:
+    """Windows-safe path equality: resolve + normcase, then samefile if both exist."""
+    a = Path(left)
+    b = Path(right)
+    a_key = os.path.normcase(os.path.normpath(str(a.resolve())))
+    b_key = os.path.normcase(os.path.normpath(str(b.resolve())))
+    if a_key == b_key:
+        return True
+    try:
+        if a.exists() and b.exists() and os.path.samefile(a, b):
+            return True
+    except OSError:
+        return False
+    return False
+
+
 class TestEnvCandidateOrder(unittest.TestCase):
     def test_explicit_path_is_only_candidate(self):
         explicit = Path("/tmp/custom.env")
@@ -45,17 +61,19 @@ class TestEnvCandidateOrder(unittest.TestCase):
         exe_dir = Path("/exe")
         cwd = Path("/cwd")
         named = Path("/named/pathwise.env")
+        exe = exe_dir / "Pathwise.exe"
         paths = env_candidate_paths(
             environ={"PATHWISE_ENV_FILE": str(named)},
             frozen=True,
-            executable=exe_dir / "Pathwise.exe",
+            executable=exe,
             cwd=cwd,
         )
-        self.assertEqual(paths[0], named)
-        self.assertEqual(paths[1], exe_dir / "pathwise.env")
-        self.assertEqual(paths[2], exe_dir / ".env")
-        self.assertEqual(paths[3], cwd / "pathwise.env")
-        self.assertEqual(paths[4], cwd / ".env")
+        frozen_dir = exe.resolve().parent
+        self.assertTrue(paths_match(paths[0], named), (paths[0], named))
+        self.assertTrue(paths_match(paths[1], frozen_dir / "pathwise.env"), (paths[1], frozen_dir))
+        self.assertTrue(paths_match(paths[2], frozen_dir / ".env"))
+        self.assertTrue(paths_match(paths[3], cwd / "pathwise.env"))
+        self.assertTrue(paths_match(paths[4], cwd / ".env"))
 
     def test_env_file_var_directory_searches_basenames(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +164,14 @@ class TestLoadRuntimeEnv(unittest.TestCase):
 
 
 class TestWritableAndResources(unittest.TestCase):
+    def test_paths_match_treats_resolved_temp_as_same(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            self.assertTrue(paths_match(folder, folder.resolve()))
+            nested = folder / "dist"
+            nested.mkdir()
+            self.assertTrue(paths_match(nested, Path(str(nested.resolve()))))
+
     def test_unfrozen_writable_dir_is_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -167,13 +193,15 @@ class TestWritableAndResources(unittest.TestCase):
             cwd = root / "other"
             exe_dir.mkdir()
             cwd.mkdir()
-            self.assertEqual(
-                writable_dir(frozen=True, executable=exe_dir / "Pathwise.exe", cwd=cwd),
-                exe_dir,
-            )
-            self.assertEqual(
-                session_log_path(frozen=True, executable=exe_dir / "Pathwise.exe", cwd=cwd),
-                exe_dir / "logs.json",
+            exe = exe_dir / "Pathwise.exe"
+            got = writable_dir(frozen=True, executable=exe, cwd=cwd)
+            self.assertTrue(paths_match(got, exe_dir), (got, exe_dir))
+            self.assertFalse(paths_match(got, cwd), (got, cwd))
+            self.assertTrue(
+                paths_match(
+                    session_log_path(frozen=True, executable=exe, cwd=cwd),
+                    exe_dir / "logs.json",
+                )
             )
 
     def test_package_resource_prefers_meipass_then_source(self):
