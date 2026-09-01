@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,8 +75,15 @@ class TestRecruiterNotify(unittest.TestCase):
         self.assertNotIn("employment", body.lower())
         self.assertNotIn("construct validity", body.lower())
         self.assertNotIn("criterion validity", body.lower())
-        self.assertEqual(payload["attachment_filename"], "logs_dashboard.html")
-        self.assertEqual(payload["attachment_bytes"], b"<html>run-one</html>")
+        self.assertNotIn("download and open the attached", body.lower())
+        self.assertEqual(payload["attachment_filename"], "logs_dashboard.zip")
+        self.assertTrue(payload["attachment_bytes"].startswith(b"PK"))
+        with zipfile.ZipFile(io.BytesIO(payload["attachment_bytes"])) as archive:
+            self.assertEqual(archive.namelist(), ["logs_dashboard.html"])
+            self.assertEqual(
+                archive.read("logs_dashboard.html"),
+                b"<html>run-one</html>",
+            )
 
     def test_skip_when_no_owner(self):
         unknown = encode_recruiter_seed(1, "easy", 1)
@@ -174,6 +183,7 @@ class TestRecruiterNotify(unittest.TestCase):
 
     def test_smtp_send_starttls_login_and_invalid_port(self):
         calls: list[str] = []
+        captured: dict = {}
 
         class FakeSMTP:
             def __init__(self, host, port, timeout=20):
@@ -195,7 +205,10 @@ class TestRecruiterNotify(unittest.TestCase):
             def login(self, user, password):
                 calls.append(f"login:{user}:{password}")
 
-            def send_message(self, message):
+            def send_message(self, message, from_addr=None, to_addrs=None):
+                captured["message"] = message
+                captured["envelope_from"] = from_addr
+                captured["envelope_to"] = to_addrs
                 calls.append(f"send:{message['To']}:{message['Subject']}")
 
         env = {
@@ -228,6 +241,18 @@ class TestRecruiterNotify(unittest.TestCase):
                 "close",
             ],
         )
+        message = captured["message"]
+        self.assertTrue(message["Date"])
+        self.assertIn("@example.test", message["Message-ID"])
+        self.assertEqual(message["From"], "Pathwise <from@example.test>")
+        self.assertEqual(message["Reply-To"], "from@example.test")
+        self.assertEqual(captured["envelope_from"], "from@example.test")
+        self.assertEqual(captured["envelope_to"], ["owner@example.com"])
+        attachments = list(message.iter_attachments())
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].get_content_type(), "application/zip")
+        self.assertEqual(attachments[0].get_filename(), "logs_dashboard.zip")
+        self.assertNotEqual(message.get_content_type(), "text/html")
 
         calls.clear()
         env_bad_port = dict(env)
@@ -266,6 +291,79 @@ class TestRecruiterNotify(unittest.TestCase):
         self.assertEqual(calls[0], "connect:smtp.example.test:2525")
         self.assertNotIn("starttls", calls)
         self.assertTrue(all(not item.startswith("login:") for item in calls))
+
+    def test_from_falls_back_to_smtp_user_email(self):
+        calls: list[str] = []
+        captured: dict = {}
+
+        class FakeSMTP:
+            def __init__(self, host, port, timeout=20):
+                calls.append(f"connect:{host}:{port}")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def starttls(self):
+                calls.append("starttls")
+
+            def login(self, user, password):
+                calls.append(f"login:{user}")
+
+            def send_message(self, message, from_addr=None, to_addrs=None):
+                captured["message"] = message
+                captured["envelope_from"] = from_addr
+
+        env = {
+            "PATHWISE_SMTP_HOST": "smtp.example.test",
+            "PATHWISE_SMTP_PORT": "587",
+            "PATHWISE_SMTP_USER": "mailbox@example.test",
+            "PATHWISE_SMTP_PASSWORD": "smtp-secret",
+            "PATHWISE_SMTP_FROM": "",
+        }
+        with patch("pathwise.recruiter_notify.load_dotenv", return_value=None), patch.dict(
+            os.environ, env, clear=False
+        ), patch("pathwise.recruiter_notify.smtplib.SMTP", FakeSMTP):
+            result = notify_recruiter_of_seed_use(
+                recruiter_seed_code=self.seed_code,
+                candidate_label="Ada Lovelace",
+                used_at_utc="2026-08-30T10:00:00Z",
+                completed_at_utc="2026-08-30T10:12:00Z",
+                dashboard_path=self.dashboard,
+                player_recruiter_id=None,
+                execute=self.db.execute,
+            )
+        self.assertTrue(result)
+        self.assertEqual(captured["message"]["From"], "Pathwise <mailbox@example.test>")
+        self.assertEqual(captured["envelope_from"], "mailbox@example.test")
+        self.assertIn("starttls", calls)
+        self.assertIn("login:mailbox@example.test", calls)
+
+    def test_skip_when_from_missing_and_smtp_user_is_not_an_email(self):
+        with patch("pathwise.recruiter_notify.load_dotenv", return_value=None), patch.dict(
+            os.environ,
+            {
+                "PATHWISE_SMTP_HOST": "smtp.example.test",
+                "PATHWISE_SMTP_PASSWORD": "smtp-secret",
+                "PATHWISE_SMTP_FROM": "",
+                "PATHWISE_SMTP_USER": "smtp-user",
+            },
+            clear=False,
+        ):
+            with self.assertLogs("pathwise.recruiter_notify", level=logging.WARNING) as captured:
+                result = notify_recruiter_of_seed_use(
+                    recruiter_seed_code=self.seed_code,
+                    candidate_label="Ada Lovelace",
+                    used_at_utc="2026-08-30T10:00:00Z",
+                    completed_at_utc="2026-08-30T10:12:00Z",
+                    dashboard_path=self.dashboard,
+                    player_recruiter_id=None,
+                    execute=self.db.execute,
+                )
+        self.assertFalse(result)
+        self.assertIn("smtp is not configured", "\n".join(captured.output).lower())
 
     def test_warning_does_not_log_smtp_password_or_turso_token(self):
         secret = "smtp-secret-value"
