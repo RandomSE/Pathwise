@@ -1,4 +1,9 @@
 How to run Pathwise
+
+Recruiter Windows zip: download the `Pathwise-recruiter.zip` artifact from GitHub Actions (workflow "Recruiter Windows zip"). Unzip it. Put `pathwise.env` in the SAME FOLDER as `Pathwise.exe` (the folder that contains the exe, not `_internal`). Double-click `Pathwise.exe`. Log in or create an account, set rounds, Generate seed, and send the code to the candidate. Never email the Turso token to untrusted people; `TURSO_AUTH_TOKEN` is full database access. Candidates unzip the same build, skip `pathwise.env`, and play (paste a seed or random). See `docs/RECRUITER.md`.
+
+Python venv remains the developer path.
+
 Pathwise is built with Python and Arcade. To get started, set up a clean environment and install dependencies.
 
 1. Create a Virtual Environment 
@@ -22,9 +27,9 @@ Use Python 3.9+ (3.12 is the primary tested target).
 4. Run Pathwise
 In the same OS-specific terminal opened in step 2, run `python main.py` (or `python pathwise_window.py`).
 
-**Candidate (default):** the app opens on the play screen. Paste or type an optional recruiter seed, then **Play set seed** or **Play random seed** (empty field). **Ctrl+V** pastes into the seed field. **Configure seed** opens recruiter options.
+**Candidate (default):** the app opens on the play screen. No secrets file is required. Paste or type an optional recruiter seed, then **Play set seed** or **Play random seed** (empty field). **Ctrl+V** pastes into the seed field. **Recruiter login** is a separate door.
 
-**Recruiter:** set rounds (1-5) and difficulty, then **Generate seed** to create a 10-digit code that encodes the map seed, rounds, and preset. **Start session** runs the full configuration locally; **Back to play area** copies the generated seed to the candidate screen for candidates to use.
+**Recruiter:** put `pathwise.env` next to the exe (or in the working directory for the Python venv path). Log in or create an account, set rounds (1-5) and difficulty, then **Generate seed**. Send that code to the candidate; they paste it on the play screen. A dashboard zip is emailed when SMTP is configured. **Start session** runs the full configuration locally; after a local recruiter session the app shows the path to `logs_dashboard.html` and can open it.
 
 Cross roads without hitting cars; reach the goal before time runs out. With **more than one round**, each round uses a derived map from the same session seed and gets harder (faster traffic, denser spawns, tighter lights).
 

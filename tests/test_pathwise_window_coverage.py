@@ -105,6 +105,8 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         window._recruiter_record = None
         window._recruiter_session_token = None
         window._recruiter_execute = None
+        window._notify_recruiter = None
+        window._notify_send = None
         window.show_view = MagicMock()
         window.closed = False
         window.set_update_rate = MagicMock()
@@ -288,17 +290,22 @@ class TestPathwiseWindowFlow(unittest.TestCase):
 
     def test_candidate_to_recruiter_and_back(self):
         from pathwise.recruiter_accounts import RecruiterRecord
-        from pathwise.recruiter_auth_views import RecruiterLoginView
+        from pathwise.recruiter_auth_views import RecruiterEnvSetupView, RecruiterLoginView
 
         window = self._window()
         window._show_candidate_home()
         candidate = window.show_view.call_args.args[0]
         self.assertIsInstance(candidate, pre_game.CandidateHomeView)
-        candidate._on_configure("seed-from-candidate")
-        login = window.show_view.call_args.args[0]
-        self.assertIsInstance(login, RecruiterLoginView)
+        with patch("pathwise.runtime_paths.turso_ready", return_value=False):
+            candidate._on_configure("seed-from-candidate")
+        setup = window.show_view.call_args.args[0]
+        self.assertIsInstance(setup, RecruiterEnvSetupView)
         self.assertEqual(window._seed_text, "seed-from-candidate")
         self.assertFalse(window.recruiter_session_active())
+        with patch("pathwise.runtime_paths.turso_ready", return_value=True):
+            window._show_recruiter_login()
+        login = window.show_view.call_args.args[0]
+        self.assertIsInstance(login, RecruiterLoginView)
         record = RecruiterRecord(
             id="d" * 32,
             email="ok@example.com",
@@ -344,6 +351,39 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         start_round.assert_called_once()
         self.assertEqual(window._config.preset, "hard")
         self.assertEqual(window._config.num_rounds, 3)
+
+    def test_recruiter_finish_session_offers_open_dashboard(self):
+        import main as game
+
+        window = self._window()
+        window._outcomes = ["success"]
+        window._config = SessionConfig(preset="normal", audience="recruiter")
+        game.round_results = [{"outcome": "success"}]
+        game.session_num_rounds = 1
+        game.session_base_seed = 7
+        game.session_audience = "recruiter"
+        window._notify_recruiter = MagicMock()
+        shown = {}
+
+        def capture(view):
+            shown["view"] = view
+
+        window.show_view = capture
+        with patch.object(game, "save_session_log", return_value="logs_dashboard.html"):
+            window._finish_session()
+        view = shown["view"]
+        self.assertIn("Dashboard:", view.accent)
+        self.assertEqual(view.action_label, "Open dashboard")
+        self.assertTrue(view.dashboard_path)
+
+    def test_setup_from_config_shows_env_view(self):
+        from pathwise.recruiter_auth_views import RecruiterEnvSetupView
+
+        window = self._window()
+        window._recruiter_generated_text = "123"
+        window._show_recruiter_setup_from_config()
+        view = window.show_view.call_args.args[0]
+        self.assertIsInstance(view, RecruiterEnvSetupView)
 
 
 if __name__ == "__main__":

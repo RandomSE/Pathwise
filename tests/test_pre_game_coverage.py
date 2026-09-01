@@ -514,6 +514,27 @@ class TestMessageView(ArcadeMenuTestCase):
         view.on_mouse_press(1, 1, arcade.MOUSE_BUTTON_LEFT, 0)
         self.assertTrue(view._done)
 
+    def test_open_dashboard_action_does_not_finish(self):
+        opened = []
+        view = MessageView(
+            title="Done",
+            accent="Dashboard: /tmp/logs_dashboard.html",
+            action_label="Open dashboard",
+            on_action=lambda: opened.append("open"),
+            dashboard_path="/tmp/logs_dashboard.html",
+        )
+        view.on_show_view()
+        self.assertIsNotNone(view.action_rect)
+        view.on_mouse_press(
+            view.action_rect.centerx,
+            view.window.height - view.action_rect.centery,
+            arcade.MOUSE_BUTTON_LEFT,
+            0,
+        )
+        self.assertEqual(opened, ["open"])
+        self.assertFalse(view._done)
+        view.on_draw()
+
     def test_draw_minimal(self):
         view = MessageView(title="Only")
         view.on_draw()

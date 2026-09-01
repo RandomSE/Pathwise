@@ -126,6 +126,11 @@ def _from_header(addr: str) -> str:
     return formataddr((display, parsed or bare))
 
 
+def smtp_is_configured() -> bool:
+    """True when host, from, and password are set. Missing SMTP skips notify."""
+    return _smtp_ready()
+
+
 def _smtp_from_addr() -> str:
     load_dotenv()
     configured = os.environ.get("PATHWISE_SMTP_FROM", "").strip()

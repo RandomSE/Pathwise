@@ -35,10 +35,16 @@ spectate_dashboard.html
 tmp_spectate/
 tmp_spectate*/
 
-# Local secrets (copy .env.example to .env)
+# Local secrets (copy pathwise.env.example to pathwise.env next to Pathwise.exe)
 .env
 .env.local
+pathwise.env
 !.env.example
+!pathwise.env.example
+
+# PyInstaller output (never commit a built exe)
+build/
+dist/
 
 # Local debug scratch: never commit
 tmp/

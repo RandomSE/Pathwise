@@ -1,0 +1,42 @@
+name: Recruiter Windows zip
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  windows-recruiter-zip:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install freeze dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build Pathwise onedir
+        run: python -m PyInstaller --noconfirm Pathwise.spec
+
+      - name: Stage recruiter sidecar example and one-pager
+        shell: pwsh
+        run: |
+          Copy-Item -Force pathwise.env.example dist\Pathwise\pathwise.env.example
+          Copy-Item -Force docs\RECRUITER.md dist\Pathwise\RECRUITER.md
+
+      - name: Zip onedir folder
+        shell: pwsh
+        run: |
+          if (Test-Path Pathwise-recruiter.zip) { Remove-Item Pathwise-recruiter.zip }
+          Compress-Archive -Path dist\Pathwise -DestinationPath Pathwise-recruiter.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pathwise-recruiter.zip
+          path: Pathwise-recruiter.zip
