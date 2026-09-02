@@ -34,6 +34,13 @@ from pathwise.recruiter_accounts import (
     authenticate_recruiter,
     create_recruiter,
 )
+from pathwise.runtime_paths import (
+    RECRUITER_ENV_FILENAME,
+    env_setup_folder,
+    load_runtime_env,
+    recruiter_setup_message,
+    write_pathwise_env,
+)
 from pathwise.turso_http import TursoConfigError, TursoHttpError
 
 OFFLINE_MESSAGE = "Could not reach the account service. Try again later."
@@ -51,7 +58,9 @@ def user_safe_account_error(exc: BaseException) -> str:
         return "That email is already registered"
     if isinstance(exc, RecruiterValidationError):
         return str(exc)
-    if isinstance(exc, (TursoHttpError, TursoConfigError)):
+    if isinstance(exc, TursoConfigError):
+        return recruiter_setup_message()
+    if isinstance(exc, TursoHttpError):
         return OFFLINE_MESSAGE
     return OFFLINE_MESSAGE
 
@@ -509,6 +518,173 @@ class RecruiterRegisterView(_AuthFormView):
         self._draw_button(self.back_rect, "Back to login", 16)
         arcade.Text(
             "Esc to go back",
+            cx,
+            18,
+            MENU_MUTED,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+
+
+class RecruiterEnvSetupView(_AuthFormView):
+    """In-app sidecar setup when Turso keys are missing. Never echoes the token."""
+
+    _fields = ("email", "password")
+
+    def __init__(
+        self,
+        *,
+        on_saved: Callable[[], None] | None = None,
+        on_back: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(on_back=on_back)
+        self._on_saved = on_saved
+        self._layout_state: RecruiterAuthLayout | None = None
+        self.email_field_rect = Rect(0, 0, 0, 0)
+        self.password_field_rect = Rect(0, 0, 0, 0)
+        self.save_rect = Rect(0, 0, 0, 0)
+        self.back_rect = Rect(0, 0, 0, 0)
+        self.login_rect = Rect(0, 0, 0, 0)
+
+    @property
+    def url_text(self) -> str:
+        return self.email_text
+
+    @url_text.setter
+    def url_text(self, value: str) -> None:
+        self.email_text = value
+
+    @property
+    def token_text(self) -> str:
+        return self.password_text
+
+    @token_text.setter
+    def token_text(self, value: str) -> None:
+        self.password_text = value
+
+    @property
+    def status_text(self) -> str:
+        return self.error_text
+
+    @status_text.setter
+    def status_text(self, value: str) -> None:
+        self.error_text = value
+
+    def setup_copy(self) -> str:
+        return recruiter_setup_message(env_setup_folder())
+
+    def _layout(self) -> None:
+        layout = layout_recruiter_auth(self.window.width, self.window.height)
+        self._layout_state = layout
+        self.email_field_rect = layout.email_field_rect
+        self.password_field_rect = layout.password_field_rect
+        self.save_rect = layout.login_rect
+        self.login_rect = layout.login_rect
+        self.back_rect = layout.back_rect
+
+    def _focus_rects(self) -> dict[str, Rect]:
+        return {
+            "email": self.email_field_rect,
+            "password": self.password_field_rect,
+        }
+
+    def _submit(self) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        url = self.url_text.strip()
+        token = self.token_text.strip()
+        if not url or not token:
+            self.status_text = (
+                "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required."
+            )
+            self._layout()
+            return
+        folder = env_setup_folder()
+        path = write_pathwise_env(
+            folder,
+            {
+                "TURSO_DATABASE_URL": url,
+                "TURSO_AUTH_TOKEN": token,
+            },
+        )
+        self.token_text = ""
+        self.status_text = f"Saved {RECRUITER_ENV_FILENAME} in {folder}."
+        load_runtime_env(explicit=path)
+        if self._on_saved is not None:
+            self._on_saved()
+
+    def on_mouse_press(self, x: float, y: float, button: int, modifiers: int) -> bool | None:
+        if button != arcade.MOUSE_BUTTON_LEFT:
+            return True
+        self._focus_field_at(x, y)
+        pos = _mouse_screen_pos(self.window, x, y)
+        if self.save_rect.collidepoint(pos):
+            self._save()
+        elif self.back_rect.collidepoint(pos):
+            self._go_back()
+        return True
+
+    def on_draw(self) -> None:
+        self.clear()
+        layout = self._layout_state or layout_recruiter_auth(
+            self.window.width, self.window.height
+        )
+        cx = self.window.width // 2
+        arcade.Text(
+            "Recruiter setup",
+            cx,
+            _arcade_y(self.window, layout.title_top),
+            MENU_TEXT,
+            36,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        arcade.Text(
+            self.setup_copy(),
+            cx,
+            _arcade_y(self.window, layout.subtitle_top),
+            MENU_MUTED,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        self._draw_error(cx, layout.error_label_top)
+        arcade.Text(
+            "TURSO_DATABASE_URL",
+            cx,
+            _arcade_y(self.window, layout.email_label_top),
+            MENU_MUTED,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        self._draw_seed_field(
+            self.email_field_rect,
+            self.url_text,
+            editing=self._focus == "email",
+            placeholder="libsql://...",
+        )
+        arcade.Text(
+            "TURSO_AUTH_TOKEN",
+            cx,
+            _arcade_y(self.window, layout.password_label_top),
+            MENU_MUTED,
+            14,
+            anchor_x="center",
+            anchor_y="center",
+        ).draw()
+        self._draw_seed_field(
+            self.password_field_rect,
+            self._masked_password(),
+            editing=self._focus == "password",
+            placeholder="token",
+        )
+        self._draw_button(self.save_rect, f"Save {RECRUITER_ENV_FILENAME}", 18, primary=True)
+        self._draw_button(self.back_rect, "Back to play", 16)
+        arcade.Text(
+            "Plaintext sidecar next to the exe. Never email the token.",
             cx,
             18,
             MENU_MUTED,

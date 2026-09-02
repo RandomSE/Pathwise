@@ -156,8 +156,10 @@ class TestRecruiterLoginView(AuthArcadeTestCase):
             side_effect=TursoConfigError("TURSO_AUTH_TOKEN is missing"),
         ):
             view._submit()
-        self.assertIn("account service", view.error_text.lower())
-        self.assertNotIn("TURSO_AUTH_TOKEN", view.error_text)
+        self.assertIn("pathwise.env", view.error_text)
+        self.assertIn("TURSO_DATABASE_URL", view.error_text)
+        self.assertIn("TURSO_AUTH_TOKEN", view.error_text)
+        self.assertNotIn("account service", view.error_text.lower())
 
     def test_enter_submits_login_and_tab_moves_focus(self):
         view = RecruiterLoginView(on_success=MagicMock(), execute=MagicMock())
@@ -358,6 +360,22 @@ class TestGenerateSeedGate(AuthArcadeTestCase):
         ).decode_recruiter_seed(view.generated_seed_text)
         self.assertEqual(payload.preset, "hard")
         self.assertEqual(payload.num_rounds, 2)
+
+    def test_generate_turso_config_calls_needs_setup(self):
+        on_setup = MagicMock()
+        view = RecruiterConfigView(
+            rng=__import__("random").Random(0),
+            on_needs_setup=on_setup,
+        )
+        view.on_show_view()
+        view.window._recruiter_record = _entitled_record()
+        with patch(
+            "pathwise.recruiter_seeds.register_recruiter_seed",
+            side_effect=TursoConfigError("TURSO_AUTH_TOKEN is missing"),
+        ):
+            view._generate_seed()
+        on_setup.assert_called_once()
+        self.assertEqual(view.generated_seed_text, "")
 
 
 class TestCandidatePlayUngated(AuthArcadeTestCase):

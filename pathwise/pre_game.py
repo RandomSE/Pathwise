@@ -72,6 +72,19 @@ GENERATE_SEED_REGISTER_ATTEMPTS = 8
 STALE_SEED_MESSAGE = "Settings changed; regenerate seed"
 COPY_FEEDBACK_SECONDS = 1.5
 COPY_FEEDBACK_MESSAGE = "Copied!"
+CANDIDATE_HOME_SUBTITLE = (
+    "No setup needed. Paste a seed if you have one, or play a random map."
+)
+CANDIDATE_HOME_FOOTER = "Candidates play here. Recruiters sign in separately."
+RECRUITER_DOOR_LABEL = "Recruiter login"
+RECRUITER_SEED_SHARE_HINT = (
+    "Send this code to the candidate. They paste it on the play screen. "
+    "A dashboard zip is emailed when SMTP is configured."
+)
+SMTP_OFF_HINT = (
+    "Email is off until PATHWISE_SMTP_HOST, PATHWISE_SMTP_PASSWORD, and "
+    "PATHWISE_SMTP_FROM are included in this build."
+)
 
 DISCLAIMER_TITLE = "Safety disclaimer"
 DISCLAIMER_AGREE_LABEL = "I understand and agree"
@@ -730,11 +743,11 @@ class CandidateHomeView(_MenuView):
             anchor_y="center",
         ).draw()
         arcade.Text(
-            "Enter a recruiter seed or play a random map",
+            CANDIDATE_HOME_SUBTITLE,
             cx,
             _arcade_y(self.window, layout.subtitle_top),
             MENU_MUTED,
-            22,
+            18,
             anchor_x="center",
             anchor_y="center",
         ).draw()
@@ -802,13 +815,13 @@ class CandidateHomeView(_MenuView):
             primary=not play_disabled,
             disabled=play_disabled,
         )
-        self._draw_button(self.configure_rect, "Configure seed", 20)
+        self._draw_button(self.configure_rect, RECRUITER_DOOR_LABEL, 20)
         arcade.Text(
-            "Esc to quit",
+            CANDIDATE_HOME_FOOTER,
             cx,
             18,
             MENU_MUTED,
-            16,
+            14,
             anchor_x="center",
             anchor_y="center",
         ).draw()
@@ -821,6 +834,7 @@ class RecruiterConfigView(_MenuView):
         generated_seed_text: str = "",
         on_back: Callable[[str], None] | None = None,
         on_start: Callable[[SessionConfig], None] | None = None,
+        on_needs_setup: Callable[[], None] | None = None,
         rng: random.Random | None = None,
     ) -> None:
         super().__init__()
@@ -844,6 +858,7 @@ class RecruiterConfigView(_MenuView):
         self._rng = rng or random.Random()
         self._on_back = on_back
         self._on_start = on_start
+        self._on_needs_setup = on_needs_setup
         self._layout_state: RecruiterLayout | None = None
         self.minus_rect = Rect(0, 0, 0, 0)
         self.plus_rect = Rect(0, 0, 0, 0)
@@ -906,6 +921,7 @@ class RecruiterConfigView(_MenuView):
         from pathwise.recruiter_accounts import RecruiterRecord, can_generate_codes
         from pathwise.recruiter_auth_views import user_safe_account_error
         from pathwise.recruiter_seeds import RecruiterSeedConflictError, register_recruiter_seed
+        from pathwise.turso_http import TursoConfigError
 
         record = getattr(self.window, "_recruiter_record", None)
         if not isinstance(record, RecruiterRecord) or not can_generate_codes(record):
@@ -929,6 +945,13 @@ class RecruiterConfigView(_MenuView):
             except RecruiterSeedConflictError:
                 last_conflict = True
                 continue
+            except TursoConfigError as exc:
+                if self._on_needs_setup is not None:
+                    self._on_needs_setup()
+                    return
+                self._generate_error = user_safe_account_error(exc)
+                self._layout()
+                return
             except Exception as exc:
                 self._generate_error = user_safe_account_error(exc)
                 self._layout()
@@ -945,6 +968,17 @@ class RecruiterConfigView(_MenuView):
         if last_conflict:
             self._generate_error = "Could not generate a unique seed. Try again."
         self._layout()
+
+    def _share_hint(self) -> str:
+        hint = RECRUITER_SEED_SHARE_HINT
+        try:
+            from pathwise.recruiter_notify import smtp_is_configured
+
+            if smtp_is_configured():
+                return hint
+        except Exception:
+            pass
+        return f"{hint} {SMTP_OFF_HINT}"
 
     def _session_config(self) -> SessionConfig:
         from pathwise.recruiter_accounts import RecruiterRecord
@@ -1245,6 +1279,16 @@ class RecruiterConfigView(_MenuView):
             anchor_x="center",
             anchor_y="center",
         ).draw()
+        if self.generated_seed_text and not getattr(self, "_generate_error", ""):
+            arcade.Text(
+                self._share_hint(),
+                cx,
+                _arcade_y(self.window, layout.generate_error_top),
+                MENU_MUTED,
+                12,
+                anchor_x="center",
+                anchor_y="center",
+            ).draw()
 
 
 # Backward-compatible alias for tests and external callers.
@@ -1512,6 +1556,9 @@ class MessageView(_MenuView):
         audience: str = "candidate",
         auto_advance_s: float | None = None,
         on_complete: Callable | None = None,
+        action_label: str = "",
+        on_action: Callable[[], None] | None = None,
+        dashboard_path: str = "",
     ) -> None:
         super().__init__(on_complete=on_complete)
         from pathwise.modifiers import hidden
@@ -1523,6 +1570,10 @@ class MessageView(_MenuView):
         self.audience = "recruiter" if audience == "recruiter" else "candidate"
         self.modifiers = hidden.visible_modifiers(modifiers, audience=self.audience)
         self.auto_advance_s = auto_advance_s
+        self.action_label = action_label
+        self._on_action = on_action
+        self.dashboard_path = dashboard_path
+        self.action_rect: Rect | None = None
         self._elapsed = 0.0
         self._modifiers_popup_open = False
         self.modifiers_btn_rect: Rect | None = None
@@ -1539,6 +1590,12 @@ class MessageView(_MenuView):
         self._layout_message()
 
     def _layout_message(self) -> None:
+        self.action_rect = None
+        if self.action_label:
+            cx = self.window.width // 2
+            h = self.window.height
+            btn_h = max(34, int(h * 0.045))
+            self.action_rect = Rect(cx - 140, int(h * 0.16), 280, btn_h)
         if not self.modifiers:
             self.modifiers_btn_rect = None
             self._popup_card_rect = Rect(0, 0, 0, 0)
@@ -1629,6 +1686,10 @@ class MessageView(_MenuView):
             return True
         if self.modifiers_btn_rect and self.modifiers_btn_rect.collidepoint(pos):
             self._open_modifiers_popup()
+            return True
+        if self.action_rect is not None and self.action_rect.collidepoint(pos):
+            if self._on_action is not None:
+                self._on_action()
             return True
         self.finish(True)
         return True
@@ -1761,10 +1822,12 @@ class MessageView(_MenuView):
                 cx,
                 h * 0.38,
                 MENU_ACCENT,
-                24,
+                18 if len(self.accent) > 48 else 24,
                 anchor_x="center",
                 anchor_y="center",
             ).draw()
+        if self.action_rect is not None and self.action_label:
+            self._draw_button(self.action_rect, self.action_label, 18, primary=True)
         if self.modifiers_btn_rect is not None:
             self._draw_button(self.modifiers_btn_rect, "See modifiers", 18, primary=True)
         if self.details:

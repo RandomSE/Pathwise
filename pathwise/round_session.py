@@ -51,7 +51,9 @@ def _game():
     return main
 
 def _load_prior_session():
-    path = "logs.json"
+    from pathwise.runtime_paths import session_log_path
+
+    path = session_log_path()
     if not os.path.isfile(path):
         return None
     try:
@@ -460,9 +462,12 @@ def save_session_log():
         "session_started_at_utc": getattr(m, "session_started_at_utc", None),
         "rounds": m.round_results,
     }
-    with open("logs.json", "w", encoding="utf-8") as f:
+    from pathwise.runtime_paths import session_log_path
+
+    log_path = session_log_path()
+    with open(log_path, "w", encoding="utf-8") as f:
         json.dump(log, f, indent=2)
-    return _game().build_dashboard_html("logs.json")
+    return _game().build_dashboard_html(str(log_path))
 
 
 def record_risk(reason, tier="risky", cooldown=None, **context):

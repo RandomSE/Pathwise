@@ -70,8 +70,11 @@ def require_billing_enabled() -> bool:
 
 def apply_recruiter_schema(*, execute: ExecuteFn | None = None) -> None:
     """Create recruiters and recruiter_sessions. Admin/API only, not game start."""
+    from pathwise.runtime_paths import package_resource
+
     exec_fn = execute or execute_sql
-    text = _SCHEMA_PATH.read_text(encoding="utf-8")
+    schema = package_resource("pathwise", "recruiter_schema.sql")
+    text = schema.read_text(encoding="utf-8")
     for statement in _sql_statements(text):
         _pipeline_execute_result(exec_fn(statement, ()))
 

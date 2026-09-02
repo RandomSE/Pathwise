@@ -117,9 +117,11 @@ class TestLoadDotenv(unittest.TestCase):
                 load_dotenv(path)
                 self.assertEqual(os.environ["TURSO_AUTH_TOKEN"], "from-shell")
 
-    def test_missing_file_is_noop(self):
-        missing = Path(tempfile.gettempdir()) / "pathwise-no-such.env"
-        self.assertIsNone(load_dotenv(missing))
+    def test_parse_env_line_still_exported(self):
+        from pathwise.turso_http import _parse_env_line
+
+        self.assertEqual(_parse_env_line("A=b"), ("A", "b"))
+        self.assertIsNone(_parse_env_line("# comment"))
 
 
 class TestExecuteSql(unittest.TestCase):

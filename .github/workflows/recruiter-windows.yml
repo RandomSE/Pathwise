@@ -1,0 +1,33 @@
+name: Recruiter Windows zip
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# CI smoke only: packs tests/fixtures/recruiter_pack.env (fake URL/token).
+# Not the recruiter handoff. Operators pack locally with their pathwise.env.
+
+jobs:
+  windows-recruiter-zip:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install freeze dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Pack onedir zip with synthetic fixture env
+        run: python -m pathwise.pack --env tests/fixtures/recruiter_pack.env
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pathwise-windows-ci-smoke.zip
+          path: Pathwise-recruiter.zip

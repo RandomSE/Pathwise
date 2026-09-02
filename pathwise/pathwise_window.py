@@ -235,6 +235,9 @@ class PathwiseWindow(arcade.Window):
         self._notify_send = None
 
     def run(self) -> None:
+        from pathwise.runtime_paths import load_runtime_env
+
+        load_runtime_env()
         if self._smoke_mode:
             super().run()
             return
@@ -274,8 +277,18 @@ class PathwiseWindow(arcade.Window):
         return can_generate_codes(record)
 
     def _show_recruiter_login(self) -> None:
-        from pathwise.recruiter_auth_views import RecruiterLoginView
+        from pathwise.recruiter_auth_views import RecruiterEnvSetupView, RecruiterLoginView
+        from pathwise.runtime_paths import load_runtime_env, turso_ready
 
+        load_runtime_env()
+        if self._recruiter_execute is None and not turso_ready():
+            self.show_view(
+                RecruiterEnvSetupView(
+                    on_saved=self._show_recruiter_login,
+                    on_back=self._show_candidate_home,
+                )
+            )
+            return
         self.show_view(
             RecruiterLoginView(
                 on_success=self._on_recruiter_authenticated,
@@ -322,6 +335,24 @@ class PathwiseWindow(arcade.Window):
                 generated_seed_text=generated_seed_text,
                 on_back=self._on_recruiter_back,
                 on_start=self._on_recruiter_start,
+                on_needs_setup=self._show_recruiter_setup_from_config,
+            )
+        )
+
+    def _show_recruiter_setup_from_config(self) -> None:
+        from pathwise.recruiter_auth_views import RecruiterEnvSetupView
+
+        view = getattr(self, "current_view", None)
+        if isinstance(view, pre_game.RecruiterConfigView):
+            self._recruiter_generated_text = view.generated_seed_text
+        self.show_view(
+            RecruiterEnvSetupView(
+                on_saved=lambda: self._show_recruiter_config(
+                    generated_seed_text=self._recruiter_generated_text
+                ),
+                on_back=lambda: self._show_recruiter_config(
+                    generated_seed_text=self._recruiter_generated_text
+                ),
             )
         )
 
@@ -444,6 +475,9 @@ class PathwiseWindow(arcade.Window):
             f"Session seed: {game.session_base_seed} ({game.session_num_rounds} round(s), "
             f"source={game.session_seed_source}, adaptive_map={game.session_use_adaptive_map})"
         )
+        from pathwise.runtime_paths import car_diagnostics_path
+
+        game.car_diagnostics.path = str(car_diagnostics_path())
         game.car_diagnostics.begin_session(
             session_seed=game.session_base_seed,
             seed_source=game.session_seed_source,
@@ -590,11 +624,35 @@ class PathwiseWindow(arcade.Window):
         else:
             title = f"All {game.session_num_rounds} rounds complete"
 
+        audience = getattr(game, "session_audience", "candidate")
+        action_label = ""
+        on_action = None
+        dashboard_text = ""
+        accent = "Open logs_dashboard.html for per-round replays"
+        if dashboard:
+            from pathlib import Path as DashboardPath
+
+            from pathwise.runtime_paths import open_path_in_browser
+
+            full = str(DashboardPath(dashboard).resolve())
+            dashboard_text = full
+            if audience == "recruiter":
+                accent = f"Dashboard: {full}"
+                action_label = "Open dashboard"
+
+                def _open_dashboard() -> None:
+                    open_path_in_browser(full)
+
+                on_action = _open_dashboard
+
         self.show_view(
             pre_game.MessageView(
                 title=title,
                 subtitle=subtitle,
-                accent="Open logs_dashboard.html for per-round replays",
+                accent=accent,
+                action_label=action_label,
+                on_action=on_action,
+                dashboard_path=dashboard_text,
                 on_complete=lambda _: arcade.close_window(),
             )
         )

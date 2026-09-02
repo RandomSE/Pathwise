@@ -1,8 +1,8 @@
 """Minimal Turso/libSQL SQL-over-HTTP client (stdlib only, no native libsql).
 
-Store the official ``libsql://`` URL in ``.env``. HTTP calls convert it to
-``https://.../v2/pipeline`` each request. That conversion is not a one-time
-dashboard change.
+Frozen Pathwise.exe loads obfuscated operator env first. Optional sidecar
+pathwise.env next to the exe may override for operator debug. HTTP calls
+convert libsql:// to https://.../v2/pipeline each request.
 """
 
 from __future__ import annotations
@@ -107,35 +107,21 @@ def _http_post(url: str, body: bytes, headers: dict[str, str], timeout: float) -
 
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
-    text = line.strip()
-    if not text or text.startswith("#"):
-        return None
-    if text.startswith("export "):
-        text = text[7:].strip()
-    if "=" not in text:
-        return None
-    key, _, value = text.partition("=")
-    key = key.strip()
-    if not key:
-        return None
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        value = value[1:-1]
-    return key, value
+    from pathwise.runtime_paths import parse_env_line
+
+    return parse_env_line(line)
 
 
 def load_dotenv(path: str | Path | None = None) -> Path | None:
-    """Load KEY=VALUE into os.environ when the key is unset. Does not override."""
-    env_path = Path(path) if path is not None else Path.cwd() / ".env"
-    if not env_path.is_file():
-        return None
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        parsed = _parse_env_line(line)
-        if parsed is None:
-            continue
-        key, value = parsed
-        os.environ.setdefault(key, value)
-    return env_path
+    """Load KEY=VALUE into os.environ when the key is unset. Does not override.
+
+    With an explicit path, only that file is read. With path=None, search
+    PATHWISE_ENV_FILE, the frozen exe folder, then cwd; in each folder try
+    pathwise.env then .env.
+    """
+    from pathwise.runtime_paths import load_runtime_env
+
+    return load_runtime_env(explicit=path)
 
 
 def _credentials(
@@ -146,12 +132,16 @@ def _credentials(
     url = (database_url if database_url is not None else os.environ.get("TURSO_DATABASE_URL", "")).strip()
     token = (auth_token if auth_token is not None else os.environ.get("TURSO_AUTH_TOKEN", "")).strip()
     if not url:
+        from pathwise.runtime_paths import recruiter_setup_message
+
         raise TursoConfigError(
-            "TURSO_DATABASE_URL is missing. Copy .env.example to .env and paste the libsql URL."
+            "TURSO_DATABASE_URL is missing. " + recruiter_setup_message()
         )
     if not token:
+        from pathwise.runtime_paths import recruiter_setup_message
+
         raise TursoConfigError(
-            "TURSO_AUTH_TOKEN is missing. Paste a database token into .env (never commit it)."
+            "TURSO_AUTH_TOKEN is missing. " + recruiter_setup_message()
         )
     return url, token
 
