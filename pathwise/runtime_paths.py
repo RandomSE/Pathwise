@@ -1,8 +1,8 @@
-"""Frozen-aware folders, recruiter sidecar discovery, and writable session files.
+"""Frozen-aware folders, embedded secrets, sidecar override, and writable files.
 
-Sidecar secrets live in pathwise.env (or .env) next to Pathwise.exe. They are
-never baked into the binary. load_runtime_env uses setdefault and does not
-override keys already present in os.environ.
+Frozen Pathwise.exe loads an obfuscated blob first (setdefault). A sidecar
+pathwise.env next to the exe may override blob keys for operator debug.
+Process env always wins. load_runtime_env never prints token values.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ SESSION_LOG_NAME = "logs.json"
 DASHBOARD_HTML_NAME = "logs_dashboard.html"
 CAR_DIAGNOSTICS_NAME = "car_diagnostics.jsonl"
 REQUIRED_TURSO_KEYS = ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN")
+EMBEDDED_BLOB_NAME = "embedded_env.bin"
 SIDECAR_KEYS = (
     "TURSO_DATABASE_URL",
     "TURSO_AUTH_TOKEN",
@@ -46,6 +47,13 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def default_meipass() -> Path | None:
+    bundle = getattr(sys, "_MEIPASS", None)
+    if not bundle:
+        return None
+    return Path(bundle)
+
+
 def parse_env_line(line: str) -> tuple[str, str] | None:
     text = line.strip()
     if not text or text.startswith("#"):
@@ -64,17 +72,84 @@ def parse_env_line(line: str) -> tuple[str, str] | None:
     return key, value
 
 
-def apply_env_file(path: str | Path) -> Path | None:
-    env_path = Path(path)
-    if not env_path.is_file():
-        return None
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+def parse_env_text(text: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for line in text.splitlines():
         parsed = parse_env_line(line)
         if parsed is None:
             continue
         key, value = parsed
-        os.environ.setdefault(key, value)
+        if key not in mapping:
+            mapping[key] = value
+    return mapping
+
+
+def apply_env_mapping(
+    mapping: dict[str, str],
+    *,
+    protected: set[str] | None = None,
+    overwrite: set[str] | None = None,
+) -> set[str]:
+    prot = protected if protected is not None else set()
+    over = overwrite if overwrite is not None else set()
+    written: set[str] = set()
+    for key, value in mapping.items():
+        if key in prot:
+            continue
+        if key in over:
+            os.environ[key] = value
+            written.add(key)
+            continue
+        if key not in os.environ:
+            os.environ[key] = value
+            written.add(key)
+    return written
+
+
+def apply_env_file(
+    path: str | Path,
+    *,
+    protected: set[str] | None = None,
+    overwrite: set[str] | None = None,
+) -> Path | None:
+    env_path = Path(path)
+    if not env_path.is_file():
+        return None
+    mapping = parse_env_text(env_path.read_text(encoding="utf-8"))
+    apply_env_mapping(mapping, protected=protected, overwrite=overwrite)
     return env_path
+
+
+def resolve_embedded_blob_path(
+    *,
+    frozen: bool | None = None,
+    meipass: str | Path | None = None,
+    blob_path: str | Path | None = None,
+) -> Path | None:
+    if blob_path is not None:
+        path = Path(blob_path)
+        return path if path.is_file() else None
+    bundle = Path(meipass) if meipass is not None else default_meipass()
+    use_frozen = is_frozen() if frozen is None else bool(frozen)
+    if bundle is None:
+        return None
+    if not use_frozen and meipass is None:
+        return None
+    path = Path(bundle) / EMBEDDED_BLOB_NAME
+    return path if path.is_file() else None
+
+
+def load_embedded_mapping(path: str | Path) -> dict[str, str]:
+    from pathwise.secret_blob import recover_env_bytes
+
+    blob_path = Path(path)
+    if not blob_path.is_file():
+        return {}
+    try:
+        recovered = recover_env_bytes(blob_path.read_bytes())
+        return parse_env_text(recovered.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
 
 
 def env_candidate_paths(
@@ -125,8 +200,29 @@ def load_runtime_env(
     frozen: bool | None = None,
     executable: str | Path | None = None,
     cwd: str | Path | None = None,
+    meipass: str | Path | None = None,
+    blob_path: str | Path | None = None,
+    apply_embedded: bool | None = None,
 ) -> Path | None:
+    protected = set(os.environ)
+    use_frozen = is_frozen() if frozen is None else bool(frozen)
+    should_embed = apply_embedded
+    if should_embed is None:
+        should_embed = bool(use_frozen) or blob_path is not None or meipass is not None
+    blob_keys: set[str] = set()
+    if should_embed and explicit is None:
+        embedded = resolve_embedded_blob_path(
+            frozen=use_frozen,
+            meipass=meipass,
+            blob_path=blob_path,
+        )
+        if embedded is not None:
+            blob_keys = apply_env_mapping(
+                load_embedded_mapping(embedded),
+                protected=protected,
+            )
     first: Path | None = None
+    remaining_overwrite = set(blob_keys)
     for candidate in env_candidate_paths(
         explicit=explicit,
         environ=environ,
@@ -134,9 +230,15 @@ def load_runtime_env(
         executable=executable,
         cwd=cwd,
     ):
-        loaded = apply_env_file(candidate)
-        if loaded is not None and first is None:
-            first = loaded
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        mapping = parse_env_text(path.read_text(encoding="utf-8"))
+        file_overwrite = remaining_overwrite & set(mapping)
+        apply_env_mapping(mapping, protected=protected, overwrite=file_overwrite)
+        remaining_overwrite -= file_overwrite
+        if first is None:
+            first = path
     return first
 
 
@@ -247,9 +349,9 @@ def write_pathwise_env(folder: str | Path, values: dict[str, str]) -> Path:
     path = target_dir / RECRUITER_ENV_FILENAME
     supplied = {str(key): "" if value is None else str(value) for key, value in values.items()}
     lines = [
-        "# Pathwise recruiter sidecar. Keep this file next to Pathwise.exe.",
+        "# Pathwise recruiter sidecar. Operator debug next to Pathwise.exe.",
         "# Never email TURSO_AUTH_TOKEN. It is full database access.",
-        "# Do not put this file inside _internal.",
+        "# Recruiters should not need this file when the zip was packed with --env.",
         "",
     ]
     for key in SIDECAR_KEYS:

@@ -83,7 +83,7 @@ RECRUITER_SEED_SHARE_HINT = (
 )
 SMTP_OFF_HINT = (
     "Email is off until PATHWISE_SMTP_HOST, PATHWISE_SMTP_PASSWORD, and "
-    "PATHWISE_SMTP_FROM are set in pathwise.env."
+    "PATHWISE_SMTP_FROM are included in this build."
 )
 
 DISCLAIMER_TITLE = "Safety disclaimer"

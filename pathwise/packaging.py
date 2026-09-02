@@ -1,4 +1,4 @@
-"""PyInstaller helpers. Sidecar secrets are never baked into the freeze."""
+"""PyInstaller helpers. Keep the arcade VERSION file; drop the dest-dir clash."""
 
 from __future__ import annotations
 

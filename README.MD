@@ -1,6 +1,6 @@
 How to run Pathwise
 
-Recruiter Windows zip: download the `Pathwise-recruiter.zip` artifact from GitHub Actions (workflow "Recruiter Windows zip"). Unzip it. Put `pathwise.env` in the SAME FOLDER as `Pathwise.exe` (the folder that contains the exe, not `_internal`). Double-click `Pathwise.exe`. Log in or create an account, set rounds, Generate seed, and send the code to the candidate. Never email the Turso token to untrusted people; `TURSO_AUTH_TOKEN` is full database access. Candidates unzip the same build, skip `pathwise.env`, and play (paste a seed or random). See `docs/RECRUITER.md`.
+Recruiter Windows zip: unzip `Pathwise-recruiter.zip` and double-click `Pathwise.exe`. No Python, no pip, no pathwise.env to fill in. See `docs/RECRUITER.md`. Operators pack that zip with `python -m pathwise.pack --env pathwise.env` (gitignored local keys); never commit the env or generated blob. GitHub Actions zip is a CI smoke build with fake keys, not the recruiter handoff. See `docs/OPERATOR_PACK.md`.
 
 Python venv remains the developer path.
 
@@ -29,7 +29,7 @@ In the same OS-specific terminal opened in step 2, run `python main.py` (or `pyt
 
 **Candidate (default):** the app opens on the play screen. No secrets file is required. Paste or type an optional recruiter seed, then **Play set seed** or **Play random seed** (empty field). **Ctrl+V** pastes into the seed field. **Recruiter login** is a separate door.
 
-**Recruiter:** put `pathwise.env` next to the exe (or in the working directory for the Python venv path). Log in or create an account, set rounds (1-5) and difficulty, then **Generate seed**. Send that code to the candidate; they paste it on the play screen. A dashboard zip is emailed when SMTP is configured. **Start session** runs the full configuration locally; after a local recruiter session the app shows the path to `logs_dashboard.html` and can open it.
+**Recruiter:** log in or create an account (secrets are already in a packed Windows zip). Set rounds (1-5) and difficulty, then **Generate seed**. Send that code to the candidate; they paste it on the play screen. A dashboard zip is emailed when SMTP was packed. **Start session** runs the full configuration locally; after a local recruiter session the app shows the path to `logs_dashboard.html` and can open it. Operators: `python -m pathwise.pack --env pathwise.env`.
 
 Cross roads without hitting cars; reach the goal before time runs out. With **more than one round**, each round uses a derived map from the same session seed and gets harder (faster traffic, denser spawns, tighter lights).
 

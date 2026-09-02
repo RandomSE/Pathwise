@@ -333,6 +333,41 @@ class TestPathwiseWindowFlow(unittest.TestCase):
         skipped = window.show_view.call_args.args[0]
         self.assertIsInstance(skipped, pre_game.RecruiterConfigView)
 
+    def test_embedded_turso_keys_skip_setup_screen(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from pathwise.recruiter_auth_views import RecruiterEnvSetupView, RecruiterLoginView
+        from pathwise.secret_blob import obfuscate_env_bytes
+
+        env_text = (
+            "TURSO_DATABASE_URL=libsql://ci-placeholder.example.invalid\n"
+            "TURSO_AUTH_TOKEN=ci-not-a-real-token\n"
+        )
+        blob = obfuscate_env_bytes(env_text.encode("utf-8"))
+        window = self._window()
+        with tempfile.TemporaryDirectory() as tmp:
+            meipass = Path(tmp) / "mei"
+            meipass.mkdir()
+            (meipass / "embedded_env.bin").write_bytes(blob)
+            exe_dir = Path(tmp) / "exe"
+            exe_dir.mkdir()
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("pathwise.runtime_paths.is_frozen", return_value=True):
+                    with patch(
+                        "pathwise.runtime_paths.default_meipass",
+                        return_value=meipass,
+                    ):
+                        with patch(
+                            "pathwise.runtime_paths.env_candidate_paths",
+                            return_value=[],
+                        ):
+                            window._show_recruiter_login()
+        shown = window.show_view.call_args.args[0]
+        self.assertIsInstance(shown, RecruiterLoginView)
+        self.assertNotIsInstance(shown, RecruiterEnvSetupView)
+
     @patch("main.car_diagnostics")
     @patch("main.perf_profiler")
     @patch("main.ENABLE_PERF_PROFILE", False)

@@ -1,5 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller onedir spec for Pathwise.exe. Sidecar secrets are never baked in."""
+"""PyInstaller onedir spec for Pathwise.exe.
+
+If pathwise/_generated/embedded_env.bin exists (written by python -m pathwise.pack
+--env), it is bundled. That file is obfuscated operator env, not plaintext.
+Do not add pathwise.env or example env files to the recruiter freeze.
+"""
+
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -18,10 +25,11 @@ hiddenimports += ["argon2", "argon2.low_level", "main"]
 
 datas = [
     ("pathwise/recruiter_schema.sql", "pathwise"),
-    ("pathwise.env.example", "."),
-    (".env.example", "."),
     ("docs/RECRUITER.md", "."),
 ]
+blob = Path("pathwise/_generated/embedded_env.bin")
+if blob.is_file():
+    datas.append((str(blob).replace("\\", "/"), "."))
 datas += filter_pyinstaller_datas(arcade_datas)
 datas += pyglet_datas
 

@@ -35,12 +35,15 @@ spectate_dashboard.html
 tmp_spectate/
 tmp_spectate*/
 
-# Local secrets (copy pathwise.env.example to pathwise.env next to Pathwise.exe)
+# Local secrets (copy pathwise.env.example to pathwise.env; pass it to pack)
 .env
 .env.local
 pathwise.env
 !.env.example
 !pathwise.env.example
+
+# Generated obfuscated env blob (written by python -m pathwise.pack --env)
+pathwise/_generated/
 
 # PyInstaller output (never commit a built exe)
 build/

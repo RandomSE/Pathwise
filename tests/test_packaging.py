@@ -47,9 +47,10 @@ class TestExampleEnvFiles(unittest.TestCase):
             )
             self.assertNotRegex(text, r"eyJ[A-Za-z0-9_-]{10,}")
 
-    def test_pathwise_example_tells_recruiter_the_visible_filename(self):
+    def test_pathwise_example_is_operator_local_input(self):
         text = EXAMPLE_PATHWISE.read_text(encoding="utf-8")
         self.assertIn("pathwise.env", text)
+        self.assertIn("python -m pathwise.pack", text)
 
 
 class TestPyinstallerSpec(unittest.TestCase):
@@ -66,7 +67,9 @@ class TestPyinstallerSpec(unittest.TestCase):
         self.assertIn("map_generation", text)
         self.assertIn("argon2", text)
         self.assertIn("recruiter_schema.sql", text)
-        self.assertIn("pathwise.env.example", text)
+        self.assertIn("embedded_env.bin", text)
+        self.assertNotIn('("pathwise.env.example"', text)
+        self.assertNotIn('(".env.example"', text)
         self.assertNotIn("TURSO_AUTH_TOKEN=", text)
         self.assertNotIn("PATHWISE_SMTP_PASSWORD=", text)
         self.assertIn("filter_pyinstaller_datas", text)
@@ -117,11 +120,12 @@ class TestRecruiterWindowsWorkflow(unittest.TestCase):
         self.assertTrue(WORKFLOW.is_file())
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("windows-latest", text)
-        self.assertIn("pyinstaller", text.lower())
-        self.assertIn("Pathwise.spec", text)
+        self.assertIn("pathwise.pack", text)
+        self.assertIn("recruiter_pack.env", text)
         self.assertIn("Pathwise-recruiter.zip", text)
         self.assertIn("upload-artifact", text)
-        self.assertIn("pathwise.env.example", text)
+        self.assertIn("ci-smoke", text.lower())
+        self.assertNotIn("pathwise.env.example", text)
         self.assertTrue(CI.is_file())
         ci = CI.read_text(encoding="utf-8")
         self.assertIn("ubuntu-latest", ci)
@@ -129,31 +133,50 @@ class TestRecruiterWindowsWorkflow(unittest.TestCase):
         self.assertIn("python -m pytest tests/", ci)
         self.assertNotIn("Pathwise-recruiter.zip", ci)
 
-    def test_local_windows_build_script_exists(self):
+    def test_local_windows_build_script_requires_env_file(self):
         self.assertTrue(BUILD_SCRIPT.is_file())
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("Pathwise.spec", text)
-        self.assertIn("pathwise.env.example", text)
+        self.assertIn("EnvFile", text)
+        self.assertIn("pathwise.pack", text)
+        self.assertIn("--env", text)
+        self.assertNotIn("pathwise.env.example", text)
 
 
 class TestRecruiterDocs(unittest.TestCase):
-    def test_recruiter_one_pager_and_readme_zip_path(self):
+    def test_recruiter_one_pager_is_unzip_and_run_only(self):
         self.assertTrue(RECRUITER_DOC.is_file())
         doc = RECRUITER_DOC.read_text(encoding="utf-8")
         for needle in (
-            "pathwise.env",
             "Pathwise.exe",
             "Generate seed",
-            "_internal",
-            "TURSO_AUTH_TOKEN",
-            "full",
+            "Unzip",
+            "Double-click",
         ):
             self.assertIn(needle, doc)
+        self.assertNotIn("Put `pathwise.env`", doc)
+        self.assertNotIn("pathwise.env.example", doc)
+        self.assertNotIn("pip", doc.lower())
         readme = README.read_text(encoding="utf-8")
         self.assertLess(readme.lower().find("pathwise-recruiter.zip"), 400)
-        self.assertIn("pathwise.env", readme)
+        self.assertIn("python -m pathwise.pack", readme)
+        self.assertIn("--env", readme)
         self.assertIn("Pathwise.exe", readme)
         self.assertIn("venv", readme.lower())
+        operator = ROOT / "docs" / "OPERATOR_PACK.md"
+        self.assertTrue(operator.is_file())
+        op = operator.read_text(encoding="utf-8")
+        self.assertIn("python -m pathwise.pack --env", op)
+        self.assertIn("obfuscat", op.lower())
+        self.assertIn("PyInstaller", op)
+        self.assertIn("never commit", op.lower())
+        self.assertNotRegex(op, r"eyJ[A-Za-z0-9_-]{10,}")
+
+
+class TestGeneratedBlobGitignored(unittest.TestCase):
+    def test_gitignore_covers_generated_blob_and_operator_env(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("pathwise/_generated/", gitignore)
+        self.assertIn("pathwise.env", gitignore)
 
 
 if __name__ == "__main__":

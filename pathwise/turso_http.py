@@ -1,8 +1,8 @@
 """Minimal Turso/libSQL SQL-over-HTTP client (stdlib only, no native libsql).
 
-Store the official ``libsql://`` URL in ``pathwise.env`` (or ``.env``) next
-to Pathwise.exe. HTTP calls convert it to ``https://.../v2/pipeline`` each
-request. That conversion is not a one-time dashboard change.
+Frozen Pathwise.exe loads obfuscated operator env first. Optional sidecar
+pathwise.env next to the exe may override for operator debug. HTTP calls
+convert libsql:// to https://.../v2/pipeline each request.
 """
 
 from __future__ import annotations

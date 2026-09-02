@@ -162,6 +162,19 @@ class TestLoadRuntimeEnv(unittest.TestCase):
                 self.assertEqual(os.environ["DISCOVERED"], "1")
                 self.assertEqual(loaded, folder / "pathwise.env")
 
+    def test_apply_env_file_setdefault_and_missing(self):
+        missing = Path(tempfile.gettempdir()) / "pathwise-no-such-apply.env"
+        self.assertIsNone(apply_env_file(missing))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pathwise.env"
+            path.write_text("APPLY_FILE=1\n", encoding="utf-8")
+            with patch.dict(os.environ, {"APPLY_FILE": "keep"}, clear=True):
+                self.assertEqual(apply_env_file(path), path)
+                self.assertEqual(os.environ["APPLY_FILE"], "keep")
+            with patch.dict(os.environ, {"APPLY_FILE": "old"}, clear=True):
+                apply_env_file(path, overwrite={"APPLY_FILE"})
+                self.assertEqual(os.environ["APPLY_FILE"], "1")
+
 
 class TestWritableAndResources(unittest.TestCase):
     def test_paths_match_treats_resolved_temp_as_same(self):

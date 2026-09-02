@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
 
+# CI smoke only: packs tests/fixtures/recruiter_pack.env (fake URL/token).
+# Not the recruiter handoff. Operators pack locally with their pathwise.env.
+
 jobs:
   windows-recruiter-zip:
     runs-on: windows-latest
@@ -21,22 +24,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build Pathwise onedir
-        run: python -m PyInstaller --noconfirm Pathwise.spec
-
-      - name: Stage recruiter sidecar example and one-pager
-        shell: pwsh
-        run: |
-          Copy-Item -Force pathwise.env.example dist\Pathwise\pathwise.env.example
-          Copy-Item -Force docs\RECRUITER.md dist\Pathwise\RECRUITER.md
-
-      - name: Zip onedir folder
-        shell: pwsh
-        run: |
-          if (Test-Path Pathwise-recruiter.zip) { Remove-Item Pathwise-recruiter.zip }
-          Compress-Archive -Path dist\Pathwise -DestinationPath Pathwise-recruiter.zip
+      - name: Pack onedir zip with synthetic fixture env
+        run: python -m pathwise.pack --env tests/fixtures/recruiter_pack.env
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Pathwise-recruiter.zip
+          name: Pathwise-windows-ci-smoke.zip
           path: Pathwise-recruiter.zip
